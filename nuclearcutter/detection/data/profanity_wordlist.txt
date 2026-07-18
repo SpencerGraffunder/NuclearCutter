@@ -1,0 +1,32 @@
+# Starter profanity wordlist for NuclearCutter.
+# One word per line, lowercase. Lines starting with # are ignored.
+# This is intentionally a starting point, not exhaustive — edit freely for
+# your own use, or open a PR to improve the default list.
+# Remember: this wordlist is only the first pass. Every match here is
+# re-checked in context by an LLM before being flagged (see
+# nuclearcutter/detection/profanity.py) — so it's fine (and expected) for this
+# list to be broad/loose, including mild words, since context is what
+# actually decides.
+
+damn
+hell
+ass
+asshole
+bastard
+bitch
+bullshit
+crap
+dick
+piss
+shit
+fuck
+fucking
+fucked
+motherfucker
+goddamn
+cunt
+cock
+prick
+douche
+slut
+whore
