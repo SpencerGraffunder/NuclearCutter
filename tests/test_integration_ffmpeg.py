@@ -38,27 +38,18 @@ def synthetic_video(tmp_path):
 
 
 @requires_ffmpeg
-def test_render_produces_correct_output_duration(synthetic_video, tmp_path):
+def test_render_blur_preserves_duration(synthetic_video, tmp_path):
     identity = FilmIdentity(title="T", year=2024, duration_seconds=20.0, phash_samples=[])
-    vd_skip = VisualDetection(
-        category=Category.INTIMATE_SCENES, start=8.0, end=12.0,
-        description="A short scene happens here.", confidence=0.9,
-    )
-    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd_skip], language_detections=[])
-    prefs = Preferences(intimate_scenes_action=Action.SKIP)
+    vd_blur = VisualDetection(category=Category.INTIMATE_SCENES, start=8.0, end=12.0, description="A short scene happens here.", confidence=0.9)
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd_blur], language_detections=[])
+    prefs = Preferences(intimate_scenes_action=Action.BLUR)
 
     out_path = tmp_path / "out.mp4"
     result_path = render(synthetic_video, scan, prefs, output_path=out_path)
 
     assert result_path.exists()
     output_duration = probe_duration(result_path)
-
-    # Original 20s, minus original 4s scene, plus the skip card's own duration.
-    from nuclearcutter.render.skip_card import card_duration_for_text
-    card_duration = card_duration_for_text(vd_skip.description)
-    expected_duration = 20.0 - 4.0 + card_duration
-
-    assert abs(output_duration - expected_duration) < 1.0  # allow for frame-boundary rounding
+    assert abs(output_duration - 20.0) < 0.5  # blur doesn't change runtime
 
 
 @requires_ffmpeg

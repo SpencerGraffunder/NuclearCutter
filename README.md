@@ -35,18 +35,11 @@ You can re-render the same scan with different preferences without rescanning
 
 | Category | Actions | Notes |
 |---|---|---|
-| Nudity | `blur`, `skip`, `none` | blur = intense box blur over the video; audio mute during blur is a separate toggle |
-| Intimate scenes | `blur`, `skip`, `none` | same as above; distinct category from nudity (e.g. a clothed sex scene) |
-| Foul language | `mute`, `none` | mutes audio only; defaults to muting just the flagged word, configurable to the whole sentence |
+| Nudity | `blur`, `none` | blur = intense box blur over the video; audio mute during blur is a separate toggle |
+| Intimate scenes | `blur`, `none` | same as above; distinct category from nudity (e.g. a clothed sex scene) |
+| Foul language | `mute`, `none` | mutes audio only; defaults to muting just the flagged word, configurable to the whole sentence/utterance |
 
-**`skip`** doesn't cut the scene out. It replaces the video with a black
-screen showing a short, clean, AI-generated summary of what happens —
-covering both the visual action and any plot-relevant dialogue — so you don't
-lose story content. How long the card stays up scales with how much there is
-to read (roughly 200-250 words/minute), not a fixed duration. Runtime is
-preserved because audio is generated separately to match the card's own
-length, not the original scene's — see `docs/SPEC.md` §4.3 for why this
-matters for A/V sync.
+**`blur`** applies an intense box blur to the flagged video range and overlays a short, clean, AI-generated summary so you keep story context. This keeps the scene intact and less disruptive than replacing the footage entirely, while still obscuring the flagged content. Audio can be muted separately for each blur category using `--nudity-blur-mute-audio` and `--intimate-scenes-blur-mute-audio`.
 
 ## Setup
 
@@ -70,32 +63,46 @@ cd nuclearcutter
 pip install -e .
 ```
 
+Activate the local virtual environment before running the CLI, or invoke the
+installed binary directly:
+
+```bash
+source .venv/bin/activate
+nuclearcutter scan "/path/to/Movie.mkv"
+```
+
+Or:
+
+```bash
+./.venv/bin/nuclearcutter scan "/path/to/Movie.mkv"
+```
+
 ### Suggested models
 
 NuclearCutter needs two local models available through your OpenAI-compatible
-server:
+server. For an 8GB VRAM Apple Silicon setup, use a single recommended vision+
+text model pair:
 
-- **A vision-language model** (for nudity/intimate scene confirmation +
-  scene descriptions). Suggested starting points, roughly in order of
-  quality/speed tradeoff as of this writing:
-  - `qwen2.5-vl:7b` (via Ollama) — good default, solid at both classification
-    and writing clean descriptions
-  - `qwen2.5-vl:32b` if you have the memory for it and want higher accuracy
-  - `llava:13b` — older but widely available, works fine if you already have
-    it pulled
+- `qwen3.5:4b-mlx` — the one recommended model for this workflow.
+  - vision-language capable for scene confirmation and descriptions
+  - 64K context is sufficient for the scan and render prompts used here
+  - the smallest practical MLX model for stable local performance on 8GB
 
-- **A text-only model** (for the foul-language context check — see
-  `docs/SPEC.md` §4.2). Doesn't need to be huge; this is a simple
-  classification task per line of dialogue.
-  - `qwen2.5:7b` — good default
-  - `llama3.1:8b` — also fine
-
-Pull them in Ollama:
+Pull it in Ollama:
 
 ```bash
-ollama pull qwen2.5-vl:7b
-ollama pull qwen2.5:7b
+ollama pull qwen3.5:4b-mlx
 ollama serve
+```
+
+Specify the model used during the scan step with `--vlm-model` and
+`--text-model`. For example:
+
+```bash
+nuclearcutter scan "/path/to/Movie.mkv" \
+  --base-url http://localhost:11434/v1 \
+  --vlm-model qwen3.5:4b-mlx \
+  --text-model qwen3.5:4b-mlx
 ```
 
 Then point NuclearCutter at it (defaults already assume `http://localhost:11434/v1`
@@ -118,8 +125,11 @@ nuclearcutter scan "/path/to/Movie.mkv"
 # Render with your preferred actions per category
 nuclearcutter render "/path/to/Movie.mkv" \
   --nudity blur \
-  --intimate-scenes skip \
-  --foul-language mute
+  --nudity-blur-mute-audio \
+  --intimate-scenes blur \
+  --intimate-scenes-blur-mute-audio \
+  --foul-language mute \
+  --mute-scope word
 ```
 
 This produces `/path/to/Movie_cleaned.mkv`.
@@ -140,7 +150,7 @@ that data over instead of doing a full rescan.
 
 Scans you produce are meant to be shared back — copy your `.nuclearcutter.json`
 output into `timestamps/` and open a PR. **Scan files never contain your
-personal action preferences** (blur vs skip vs mute) — only what's in the
+personal action preferences** (blur vs mute) — only what's in the
 film and when. That's what makes one scan file useful to everyone regardless
 of what they each want censored.
 
@@ -151,7 +161,12 @@ every time, you can save a preferences file and reuse it:
 
 ```python
 from nuclearcutter.schema import Preferences, Action
-prefs = Preferences(nudity_action=Action.SKIP, intimate_scenes_action=Action.SKIP, foul_language_action=Action.MUTE)
+prefs = Preferences(
+    nudity_action=Action.BLUR,
+    intimate_scenes_action=Action.BLUR,
+    foul_language_action=Action.MUTE,
+    foul_language_mute_scope="utterance",
+)
 prefs.save(Path("my_prefs.json"))
 ```
 
@@ -192,7 +207,7 @@ flow, including the VLM spot-check step that runs before a match is trusted.
 ## Contributing
 
 Read `docs/SPEC.md` first — it's the design doc that captures not just what
-was built but *why*, including several explicit decisions (e.g. why skip uses
-a text card instead of a hard cut, why scan data and preferences are kept
-separate, why fingerprinting uses percentage-based pHash sampling) that you'll
-want to understand before changing behavior.
+was built but *why*, including several explicit decisions (e.g. why intense blur
+is used instead of a skip card, why scan data and preferences are kept separate,
+why fingerprinting uses percentage-based pHash sampling) that you'll want to
+understand before changing behavior.

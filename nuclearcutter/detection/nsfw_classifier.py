@@ -13,6 +13,9 @@ default because it's small, fast, and has no GPU dependency requirement.
 
 from __future__ import annotations
 
+import gc
+import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,10 +29,11 @@ from nuclearcutter.utils.ffmpeg import probe_duration
 
 # Labels from NudeNet's default model that count as "candidate" for our
 # purposes. NudeNet returns many fine-grained classes (exposed vs covered,
-# by body region); we treat any exposed-* label as worth flagging to the
-# VLM stage, which will make the real judgment call including context
-# (e.g. medical/nature-documentary nudity vs sexual content — matters for
-# fewer titles but the VLM stage is where that nuance belongs, not here).
+# by body region); Stage A is deliberately set up to be overinclusive, flagging
+# anything that might indicate nudity, swimwear, underwear, or intimate
+# visual content. The VLM stage makes the real judgment call including
+# context, such as whether the scene is sexual/intimate or just a non-flagged
+# wardrobe choice.
 CANDIDATE_LABELS = {
     "FEMALE_BREAST_EXPOSED",
     "FEMALE_GENITALIA_EXPOSED",
@@ -37,6 +41,8 @@ CANDIDATE_LABELS = {
     "BUTTOCKS_EXPOSED",
     "ANUS_EXPOSED",
     "MALE_BREAST_EXPOSED",
+    "BELLY_EXPOSED",
+    "ARMPITS_EXPOSED",
 }
 
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 1.0
@@ -74,6 +80,68 @@ class NsfwClassifier:
                 best = max(best, det["score"])
         return best
 
+    # Number of frames between checkpoint saves. Frequent enough that a crash
+    # doesn't lose much progress, not so frequent that it thrashes the disk.
+    CHECKPOINT_INTERVAL = 100
+
+    def _checkpoint_path(self, video_path: Path) -> Path:
+        return video_path.with_suffix(".stage_a_checkpoint.json")
+
+    def _results_path(self, video_path: Path) -> Path:
+        return video_path.with_suffix(".stage_a_results.json")
+
+    def _save_checkpoint(
+        self,
+        video_path: Path,
+        duration: float,
+        sample_interval: float,
+        last_timestamp: float,
+        frame_count: int,
+        flagged_points: list,
+    ) -> None:
+        import os as _os
+        st = _os.stat(str(video_path))
+        data = {
+            "version": 1,
+            "video_path": str(video_path),
+            "file_size": st.st_size,
+            "file_mtime_ns": st.st_mtime_ns,
+            "duration": duration,
+            "sample_interval": sample_interval,
+            "last_timestamp": last_timestamp,
+            "frame_count": frame_count,
+            "flagged_points": flagged_points,
+        }
+        self._checkpoint_path(video_path).write_text(json.dumps(data))
+
+    def _load_checkpoint(self, video_path: Path, sample_interval: float, duration: float) -> tuple[float, int, list] | None:
+        """Try to resume from a checkpoint. Returns (last_timestamp, frame_count, flagged_points) or None."""
+        cp = self._checkpoint_path(video_path)
+        if not cp.exists():
+            return None
+        try:
+            data = json.loads(cp.read_text())
+        except Exception:
+            return None
+
+        # Validate the checkpoint is for this file (same path, size, mtime).
+        import os as _os
+        st = _os.stat(str(video_path))
+        if (data.get("file_size") != st.st_size or
+            data.get("file_mtime_ns") != st.st_mtime_ns or
+            data.get("sample_interval") != sample_interval or
+            abs(data.get("duration", 0) - duration) > 0.5):
+            print(f"Warning: checkpoint mismatch for {video_path}, starting fresh.", file=sys.stderr)
+            cp.unlink(missing_ok=True)
+            return None
+
+        last_t = data["last_timestamp"]
+        fc = data.get("frame_count", 0)
+        pts = data.get("flagged_points", [])
+        print(f"Resuming Stage A from {last_t:.0f}s (frame {fc}) — "
+              f"{len(pts)} flagged points so far.", file=sys.stderr)
+        return last_t, fc, pts
+
     def scan(
         self,
         video_path: Path,
@@ -83,19 +151,84 @@ class NsfwClassifier:
     ) -> list[CandidateRange]:
         """Scan the full video at sample_interval, return merged candidate ranges.
 
-        progress_callback, if given, is called with (current_second, total_seconds)
-        after each sampled frame — useful for CLI progress bars on long scans.
+        Tolerant of individual frame-extraction failures: logs a warning and
+        skips the frame rather than aborting. Also saves periodic checkpoints
+        so a crash mid-scan can resume from the last saved position — re-run
+        the exact same command and it auto-detects the checkpoint.
+
+        After Stage A completes, the merged candidate ranges are saved to a
+        separate results file (Movie.stage_a_results.json). If the scan later
+        crashes during transcription or Stage B, re-running will skip Stage A
+        entirely and load the saved results. Delete that file to force a
+        full rescan of Stage A.
         """
         from nuclearcutter.utils.ffmpeg import extract_frame_at
 
         duration = probe_duration(video_path)
+
+        # If Stage A already completed in a previous run, load saved results.
+        results_file = self._results_path(video_path)
+        if results_file.exists():
+            try:
+                saved = json.loads(results_file.read_text())
+                ranges = [CandidateRange(**r) for r in saved["ranges"]]
+                print(
+                    f"Loaded saved Stage A results ({len(ranges)} candidate ranges).",
+                    file=sys.stderr,
+                )
+                return ranges
+            except Exception as exc:
+                print(
+                    f"Warning: could not load saved Stage A results ({exc}), "
+                    f"re-scanning.",
+                    file=sys.stderr,
+                )
+                results_file.unlink(missing_ok=True)
+
         flagged_points: list[tuple[float, float]] = []  # (timestamp, score)
 
-        t = 0.0
-        while t < duration:
-            frame_path = extract_frame_at(video_path, t)
+        # Resume from mid-scan checkpoint if one exists.
+        resume = self._load_checkpoint(video_path, sample_interval, duration)
+        if resume:
+            resume_t, frame_count, flagged_points = resume
+            t = resume_t + sample_interval
+        else:
+            frame_count = 0
+            t = 0.0
+
+        # Stop sampling half a second before the end — ffmpeg can't reliably
+        # extract a frame at exactly the final frame, and we'd rather skip one
+        # end-of-video sample than crash on every long scan.
+        END_MARGIN = 0.5
+        # Periodically recreate the ONNX session to flush its internal memory
+        # arena. ONNX Runtime accumulates cached allocations across inference
+        # calls that never shrink — over 7200 frames (2h movie @ 1 fps) this
+        # can silently consume gigabytes.
+        RECREATE_INTERVAL = 500
+        skipped = 0
+        while t < duration - END_MARGIN:
+            # --- tolerant frame extraction ---
+            try:
+                frame_path = extract_frame_at(video_path, t)
+            except Exception as exc:
+                print(
+                    f"  Warning: skipped frame at {t:.0f}s — {exc}",
+                    file=sys.stderr,
+                )
+                skipped += 1
+                t += sample_interval
+                continue
+
             try:
                 score = self.score_frame(frame_path)
+            except Exception as exc:
+                print(
+                    f"  Warning: classifier failed on frame at {t:.0f}s — {exc}",
+                    file=sys.stderr,
+                )
+                skipped += 1
+                t += sample_interval
+                continue
             finally:
                 frame_path.unlink(missing_ok=True)
 
@@ -105,9 +238,34 @@ class NsfwClassifier:
             if progress_callback:
                 progress_callback(t, duration)
 
+            # Flush ONNX Runtime memory arena periodically.
+            frame_count += 1
+            if frame_count % RECREATE_INTERVAL == 0:
+                del self._detector
+                gc.collect()
+                from nudenet import NudeDetector
+                self._detector = NudeDetector()
+
+            # Periodic checkpoint.
+            if frame_count % self.CHECKPOINT_INTERVAL == 0:
+                self._save_checkpoint(
+                    video_path, duration, sample_interval,
+                    t, frame_count, flagged_points,
+                )
+
             t += sample_interval
 
-        return _merge_points_to_ranges(flagged_points, duration)
+        # Stage A complete — save final results so later stages can crash
+        # without losing progress, then clean up the mid-scan checkpoint.
+        ranges = _merge_points_to_ranges(flagged_points, duration)
+        results_file.write_text(json.dumps(
+            {"ranges": [{"start": r.start, "end": r.end, "peak_score": r.peak_score} for r in ranges]}
+        ))
+        self._checkpoint_path(video_path).unlink(missing_ok=True)
+        if skipped:
+            print(f"  {skipped} frame(s) skipped due to errors.", file=sys.stderr)
+
+        return ranges
 
 
 def _merge_points_to_ranges(flagged_points: list[tuple[float, float]], duration: float) -> list[CandidateRange]:

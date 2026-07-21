@@ -11,10 +11,16 @@ Approach (see docs/SPEC.md section 5):
      as long as the underlying cut of the film is the same.
   3. (Optional, done by the caller, not here) VLM spot-check of a few
      flagged timestamp ranges for extra confidence before trusting a match.
+
+The fingerprint result is cached on disk (next to the video) so that a
+crash or restart during a long scan does not require re-extracting and
+re-hashing the sample frames.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +61,40 @@ class PhashSample:
     @staticmethod
     def from_dict(d: dict) -> "PhashSample":
         return PhashSample(pct=d["pct"], phash=d["phash"])
+
+
+def _cache_path(video_path: Path) -> Path:
+    return video_path.with_suffix(".fingerprint.json")
+
+
+def _cache_key(video_path: Path) -> dict:
+    st = os.stat(str(video_path))
+    return {"path": str(video_path), "mtime_ns": st.st_mtime_ns, "size": st.st_size}
+
+
+def load_cached_fingerprint(video_path: Path) -> tuple[float, list[PhashSample]] | None:
+    """Return cached (duration, [PhashSample, ...]) if the cache exists and
+    the video file hasn't changed (mtime + size). Returns None otherwise."""
+    cache = _cache_path(video_path)
+    if not cache.exists():
+        return None
+    try:
+        data = json.loads(cache.read_text())
+        if data.get("key") != _cache_key(video_path):
+            return None
+        return data["duration"], [PhashSample.from_dict(s) for s in data["samples"]]
+    except Exception:
+        return None
+
+
+def cache_fingerprint(video_path: Path, duration: float, samples: list[PhashSample]) -> None:
+    """Write the fingerprint cache alongside the video file."""
+    data = {
+        "key": _cache_key(video_path),
+        "duration": duration,
+        "samples": [s.to_dict() for s in samples],
+    }
+    _cache_path(video_path).write_text(json.dumps(data, indent=2))
 
 
 def compute_fingerprint(video_path: Path, sample_points: list[float] = None) -> tuple[float, list[PhashSample]]:

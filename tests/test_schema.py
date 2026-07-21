@@ -44,7 +44,7 @@ def test_scan_result_does_not_store_actions():
 
 def test_preferences_round_trip():
     prefs = Preferences(
-        nudity_action=Action.SKIP,
+        nudity_action=Action.BLUR,
         nudity_blur_mute_audio=True,
         intimate_scenes_action=Action.BLUR,
         foul_language_action=Action.MUTE,
@@ -55,7 +55,7 @@ def test_preferences_round_trip():
         prefs.save(path)
         loaded = Preferences.load(path)
 
-    assert loaded.nudity_action == Action.SKIP
+    assert loaded.nudity_action == Action.BLUR
     assert loaded.nudity_blur_mute_audio is True
     assert loaded.foul_language_mute_scope == "utterance"
 
@@ -70,10 +70,10 @@ def test_preferences_defaults():
 
 def test_action_for_all_categories():
     prefs = Preferences(
-        nudity_action=Action.SKIP,
+        nudity_action=Action.BLUR,
         intimate_scenes_action=Action.NONE,
         foul_language_action=Action.MUTE,
     )
-    assert prefs.action_for(Category.NUDITY) == Action.SKIP
+    assert prefs.action_for(Category.NUDITY) == Action.BLUR
     assert prefs.action_for(Category.INTIMATE_SCENES) == Action.NONE
     assert prefs.action_for(Category.FOUL_LANGUAGE) == Action.MUTE

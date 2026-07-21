@@ -18,6 +18,7 @@ from nuclearcutter.scan.repo_match import find_matching_scan, spot_check_match
 from nuclearcutter.scan.scanner import scan as scan_pass
 from nuclearcutter.schema import Preferences, ScanResult
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
+from nuclearcutter.detection.transcribe import DEFAULT_MODEL, LOW_MEMORY_MODEL, LOW_MEMORY_VLM, LOW_MEMORY_TEXT
 
 
 def _default_scan_path(video_path: Path) -> Path:
@@ -31,6 +32,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     llm_config = LLMConfig(base_url=args.base_url, vlm_model=args.vlm_model, text_model=args.text_model)
+
+    if args.low_memory:
+        print("Low-memory mode: using tiny Whisper + 3B LLM models.")
+        if not args.whisper_model:
+            args.whisper_model = LOW_MEMORY_MODEL
+        if args.vlm_model == "qwen2.5-vl:7b":
+            llm_config.vlm_model = LOW_MEMORY_VLM
+        if args.text_model == "qwen2.5:7b":
+            llm_config.text_model = LOW_MEMORY_TEXT
+
+    whisper_model = args.whisper_model or DEFAULT_MODEL
 
     if not args.force_rescan and args.timestamps_dir:
         timestamps_dir = Path(args.timestamps_dir)
@@ -58,7 +70,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print(f"\r[{stage}] {i} / {total} candidates", end="", flush=True)
 
     print(f"Scanning {video_path.name}...")
-    result: ScanResult = scan_pass(video_path, llm_config=llm_config, title=args.title, year=args.year, progress_callback=progress)
+    result: ScanResult = scan_pass(video_path, llm_config=llm_config, title=args.title, year=args.year, progress_callback=progress, whisper_model=whisper_model)
     print()
 
     out_path = Path(args.output) if args.output else _default_scan_path(video_path)
@@ -119,6 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible API base URL (Ollama/LM Studio)")
     p_scan.add_argument("--vlm-model", default="qwen2.5-vl:7b", help="Vision model name")
     p_scan.add_argument("--text-model", default="qwen2.5:7b", help="Text model name for profanity context checks")
+    p_scan.add_argument("--whisper-model", help=f"Whisper model for transcription (default: {DEFAULT_MODEL})")
+    p_scan.add_argument("--low-memory", action="store_true", help="Use smallest models (tiny Whisper + 3B LLMs) for ≤16 GB RAM")
     p_scan.set_defaults(func=cmd_scan)
 
     p_render = sub.add_parser("render", help="Render a cleaned copy of a movie file using a scan JSON + preferences.")
@@ -126,13 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_render.add_argument("--scan", "-s", help="Path to scan JSON (default: MOVIE.nuclearcutter.json)")
     p_render.add_argument("--output", "-o", help="Output path (default: MOVIE_cleaned.ext)")
     p_render.add_argument("--prefs", help="Path to a saved Preferences JSON, overrides individual flags below")
-    p_render.add_argument("--nudity", choices=["blur", "skip", "none"], default="blur")
+    p_render.add_argument("--nudity", choices=["blur", "none"], default="blur")
     p_render.add_argument("--nudity-blur-mute-audio", action="store_true")
-    p_render.add_argument("--intimate-scenes", choices=["blur", "skip", "none"], default="blur")
+    p_render.add_argument("--intimate-scenes", choices=["blur", "none"], default="blur")
     p_render.add_argument("--intimate-scenes-blur-mute-audio", action="store_true")
     p_render.add_argument("--foul-language", choices=["mute", "none"], default="mute")
     p_render.add_argument("--mute-scope", choices=["word", "utterance"], default="word")
-    p_render.add_argument("--font", help="Path to a .ttf font file for skip-card text (optional)")
+    p_render.add_argument("--font", help="Path to a .ttf font file for blur overlay text (optional)")
     p_render.set_defaults(func=cmd_render)
 
     return parser

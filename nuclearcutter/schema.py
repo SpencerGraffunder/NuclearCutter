@@ -33,15 +33,14 @@ class Category(str, Enum):
 
 class Action(str, Enum):
     BLUR = "blur"
-    SKIP = "skip"
     MUTE = "mute"
     NONE = "none"  # detected but user chose to leave it untouched
 
 
 # Which actions are valid for which category — enforced at render time.
 VALID_ACTIONS = {
-    Category.NUDITY: {Action.BLUR, Action.SKIP, Action.NONE},
-    Category.INTIMATE_SCENES: {Action.BLUR, Action.SKIP, Action.NONE},
+    Category.NUDITY: {Action.BLUR, Action.NONE},
+    Category.INTIMATE_SCENES: {Action.BLUR, Action.NONE},
     Category.FOUL_LANGUAGE: {Action.MUTE, Action.NONE},
 }
 

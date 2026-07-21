@@ -4,19 +4,9 @@ ScanResult + Preferences, and produces the final `_cleaned` output file.
 
 Strategy: split the source into segments at every action boundary, and
 build BOTH the video and audio timelines segment-by-segment in lockstep,
-then concat each track and mux them together. This is necessary — not
-optional — because `skip` segments replace the original footage with a
-black text card whose duration is driven by reading speed (docs/SPEC.md
-4.3), which is essentially never equal to the original scene's duration.
-If the original (unmodified-length) audio track were simply laid under a
-re-timed video track, everything downstream of the first skip segment
-would drift out of sync. So for a skip segment we generate a silent audio
-clip matching the card's duration, keeping both tracks the same total
-length at every point in the timeline.
-
-For `blur` and `mute` segments, duration is unchanged from the source, so
-no re-timing is needed there — only a video filter (blur) or an audio
-volume-zero window (mute), applied without touching timing.
+then concat each track and mux them together. Blur segments preserve the
+original timing while applying an intense blur and overlaying a short
+summary of the scene. Mute segments silence audio only.
 
 Untouched segments are re-encoded (not stream-copied) to keep the concat
 step reliable across arbitrary cut points — see the note in
@@ -32,18 +22,18 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from nuclearcutter.render.skip_card import card_duration_for_text, render_skip_card_clip
 from nuclearcutter.schema import Action, Category, Preferences, ScanResult
 from nuclearcutter.utils.ffmpeg import probe_streams
+
+# Discard ffmpeg stderr (progress lines) to avoid memory accumulation.
+_FFMPEG_KW = {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL, "check": True}
 
 
 @dataclass
 class TimelineSegment:
     """One span of the ORIGINAL source timeline, and what to do with it.
 
-    Output duration may differ from (end - start) only for `skip` segments,
-    where it's the VLM-description-driven card duration instead of the
-    original scene length.
+    For blur and mute segments, output duration equals the source duration.
     """
     start: float
     end: float
@@ -72,7 +62,7 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
     """
     active = [
         d for d in scan.visual_detections
-        if prefs.action_for(d.category) in (Action.BLUR, Action.SKIP)
+        if prefs.action_for(d.category) == Action.BLUR
     ]
     active.sort(key=lambda d: d.start)
 
@@ -92,8 +82,6 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
                 prefs.nudity_blur_mute_audio if d.category == Category.NUDITY
                 else prefs.intimate_scenes_blur_mute_audio
             )
-        elif action == Action.SKIP:
-            audio_muted = True  # skip always replaces audio for that span with silence
 
         segments.append(TimelineSegment(
             start=start, end=d.end, action=action, category=d.category,
@@ -137,9 +125,49 @@ def render(
     return output_path
 
 
+_FFMPEG_FILTERS: set[str] | None = None
+
+
 def _parse_fps(r_frame_rate: str) -> float:
     num, denom = r_frame_rate.split("/")
     return float(num) / float(denom)
+
+
+def _ffmpeg_has_filter(filter_name: str) -> bool:
+    global _FFMPEG_FILTERS
+    if _FFMPEG_FILTERS is None:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+        filters = set()
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split()
+            if not parts:
+                continue
+            filters.add(parts[-1])
+        _FFMPEG_FILTERS = filters
+    return filter_name in _FFMPEG_FILTERS
+
+
+def _build_blur_filter(text: str, font_path: str | None) -> str:
+    filters = ["boxblur=luma_radius=30:luma_power=3:chroma_radius=30:chroma_power=3"]
+    if text.strip() and _ffmpeg_has_filter("drawtext"):
+        wrapped_text = _wrap_for_display(text)
+        escaped_text = _escape_for_drawtext(wrapped_text)
+        fontfile_arg = f":fontfile='{font_path}'" if font_path else ""
+        drawtext = (
+            f"drawtext=text='{escaped_text}'{fontfile_arg}:"
+            "fontcolor=white:fontsize=36:"
+            "box=1:boxcolor=black@0.6:boxborderw=10:"
+            "x=(w-text_w)/2:y=h-(text_h)-40:"
+            "line_spacing=10"
+        )
+        filters.append(drawtext)
+    return ",".join(filters)
 
 
 def _render_track_segments(
@@ -170,7 +198,7 @@ def _render_track_segments(
 
         elif seg.action == Action.BLUR:
             output_duration = seg.source_duration
-            blur_filter = "boxblur=luma_radius=30:luma_power=3:chroma_radius=30:chroma_power=3"
+            blur_filter = _build_blur_filter(seg.description, font_path)
             _extract_video_segment(input_path, seg.start, output_duration, v_out, video_filter=blur_filter)
             if seg.audio_muted:
                 _silent_audio(output_duration, a_out)
@@ -179,11 +207,6 @@ def _render_track_segments(
                     input_path, seg.start, output_duration, a_out,
                     mute_ranges=_language_mute_ranges_within(scan, prefs, seg.start, seg.end),
                 )
-
-        elif seg.action == Action.SKIP:
-            output_duration = card_duration_for_text(seg.description)
-            render_skip_card_clip(seg.description, output_duration, width, height, fps, v_out, font_path)
-            _silent_audio(output_duration, a_out)
 
         video_files.append(v_out)
         audio_files.append(a_out)
@@ -213,12 +236,38 @@ def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg_start
     return ranges
 
 
+def _wrap_for_display(text: str, max_chars_per_line: int = 40) -> str:
+    words = text.split()
+    lines = []
+    current = []
+    current_len = 0
+    for word in words:
+        if current_len + len(word) + 1 > max_chars_per_line and current:
+            lines.append(" ".join(current))
+            current = [word]
+            current_len = len(word)
+        else:
+            current.append(word)
+            current_len += len(word) + 1
+    if current:
+        lines.append(" ".join(current))
+    return "\n".join(lines)
+
+
+def _escape_for_drawtext(text: str) -> str:
+    text = text.replace("\\", "\\\\")
+    text = text.replace(":", "\\:")
+    text = text.replace("'", "\u2019")
+    text = text.replace("\n", "\r")
+    return text
+
+
 def _extract_video_segment(input_path: Path, start: float, duration: float, out_path: Path, video_filter: str | None) -> None:
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", str(input_path), "-t", str(duration)]
     if video_filter:
         cmd += ["-vf", video_filter]
     cmd += ["-an", "-c:v", "libx264", "-crf", "17", "-preset", "medium", str(out_path)]
-    subprocess.run(cmd, capture_output=True, check=True)
+    subprocess.run(cmd, **_FFMPEG_KW)
 
 
 def _extract_audio_segment(input_path: Path, start: float, duration: float, out_path: Path, mute_ranges: list[tuple[float, float]]) -> None:
@@ -227,7 +276,7 @@ def _extract_audio_segment(input_path: Path, start: float, duration: float, out_
         clauses = "+".join(f"between(t,{r0},{r1})" for r0, r1 in mute_ranges)
         cmd += ["-af", f"volume=0:enable='{clauses}'"]
     cmd += ["-c:a", "aac", "-b:a", "192k", str(out_path)]
-    subprocess.run(cmd, capture_output=True, check=True)
+    subprocess.run(cmd, **_FFMPEG_KW)
 
 
 def _silent_audio(duration: float, out_path: Path) -> None:
@@ -239,7 +288,7 @@ def _silent_audio(duration: float, out_path: Path) -> None:
             "-c:a", "aac", "-b:a", "192k",
             str(out_path),
         ],
-        capture_output=True, check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
     )
 
 
@@ -254,7 +303,7 @@ def _concat_track(files: list[Path], tmp_dir: Path, out_name: str) -> Path:
             "-c", "copy",
             str(out_path),
         ],
-        capture_output=True, check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
     )
     return out_path
 
@@ -268,5 +317,5 @@ def _mux_final_output(video_path: Path, audio_path: Path, output_path: Path) -> 
             "-c:v", "copy", "-c:a", "copy",
             str(output_path),
         ],
-        capture_output=True, check=True,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
     )

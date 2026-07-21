@@ -41,8 +41,8 @@ Three categories, each independently configurable to one of the available action
 
 | Category | Available actions |
 |---|---|
-| `nudity` | `blur`, `skip` |
-| `intimate_scenes` (sex scenes, not necessarily nudity — e.g. implied/clothed) | `blur`, `skip` |
+| `nudity`, `immodesty` | `blur` |
+| `intimate_scenes` (sex scenes, not necessarily nudity — e.g. implied/clothed) | `blur` |
 | `foul_language` | `mute` |
 
 Actions:
@@ -50,13 +50,11 @@ Actions:
 - **`blur`** — apply an intense box blur to the video for the flagged range.
   Whether audio is also muted during a blur is a **separate configurable
   sub-option per category** (`blur_mute_audio: true/false`), not implied by blur
-  itself.
-- **`skip`** — replace the video for the flagged range with a black screen
-  displaying a short, clean, VLM-generated text summary of what happens during
-  that segment (see §4 for how this is generated and timed). Audio is muted
-  during a skip. This is NOT a hard cut — runtime is preserved, which matters for
-  sync with subtitles, chapter markers, etc. It's a "read this instead of
-  watching this" substitution, not an edit that shortens the film.
+  itself. On top of the blur display a short, clean, VLM-generated text summary of what happens during
+  that segment (see §4 for how this is generated and timed). This approach is
+  chosen because an intense blur obscures the flagged content while preserving
+  scene flow and avoiding the abrupt disruption of a skip card. Runtime is
+  preserved, which matters for sync with subtitles, chapter markers, etc.
 - **`mute`** — silence the audio only, video untouched. Used for foul language.
   Default granularity is **the offending word only** (tightest mute window
   possible), but this is configurable to mute the whole sentence/utterance
@@ -76,12 +74,12 @@ Actions:
   flags, send sampled frames from that range to a vision-language model to (a)
   confirm or reject the classifier's flag, (b) classify it as `nudity` vs
   `intimate_scenes`, and (c) generate the human-readable scene description text
-  used later for `skip` cards.
+  used later for `blur` cards.
 - The VLM description must weave together **both** what is visually happening
   and what is being said/plot-relevant during the scene (dialogue content from
   the audio pipeline, see §4.2) — not just a visual description. E.g. not just
   "two characters embrace in bed" but incorporating relevant plot-carrying
-  dialogue that happens during the scene, since the whole point of the `skip`
+  dialogue that happens during the scene, since the whole point of the `blur`
   card is that the viewer doesn't miss story content.
 - Model access is via an **OpenAI-compatible chat completions API**
   (`/v1/chat/completions` with image content blocks), so the user can point
@@ -103,14 +101,6 @@ Actions:
   non-profane homophone, a word used in a non-profane sense). Wordlist match
   alone is never sufficient on its own; the LLM pass always runs on top of it.
 - Output: word-level (or utterance-level) timestamps for each flagged instance.
-
-### 4.3 Skip-card timing
-
-The black-screen text card duration for `skip` actions scales with how long the
-description takes to read, roughly 200–250 words/minute reading pace. A short
-visual-only beat ("character walks past camera, briefly nude") might render for
-~2 seconds; a scene with meaningful dialogue might need ~10 seconds. This is a
-formula based on word count of the generated description, not a fixed duration.
 
 ## 5. Fingerprinting (for matching shared timestamp files to a local file)
 
@@ -160,7 +150,4 @@ addition but explicitly out of scope for v1.
 
 - Not a live-playback filter. No Plex/Jellyfin plugin, no client-side
   integration. Operates only on files, before they ever reach a media server.
-- Not trying to preserve original runtime for `skip` (that's the point of the
-  text-card mechanic — better than a hard cut which risks losing plot content or
-  breaking sync with subtitle files).
 - Not scoped to build a full review/edit web UI in v1.

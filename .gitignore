@@ -1,0 +1,12 @@
+*.pyc
+*.json
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.webm
+.DS_Store
+nuclearcutter.egg-info/
+timestamps/
+__pycache__/

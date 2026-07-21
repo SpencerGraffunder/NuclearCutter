@@ -4,8 +4,8 @@ range flagged cheaply by Stage A (nsfw_classifier.py), use a VLM to:
 
   1. Confirm or reject the flag (Stage A is deliberately trigger-happy).
   2. Classify it as `nudity` vs `intimate_scenes`.
-  3. Generate the human-readable scene description used later for `skip`
-     text cards — weaving together what's visually happening AND relevant
+  3. Generate the human-readable scene description used later for blurred
+     segments — weaving together what's visually happening AND relevant
      dialogue/plot content from that time range (see docs/SPEC.md 4.1).
 
 The dialogue content for a candidate range is pulled from the Whisper
@@ -16,6 +16,7 @@ that captures plot-relevant conversation, not just visuals.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -41,10 +42,12 @@ respond with a JSON object with these exact fields:
 
 - "contains_flagged_content": true or false — true only if there is visible nudity \
 or a sexually intimate scene (not just kissing/embracing with clothes on — that alone \
-does not count).
+does not count). Scenes in underwear, swimwear, lingerie, or otherwise suggestive \
+clothing should be treated as flagged content.
 - "category": either "nudity" (visible nudity, not necessarily sexual in nature) or \
 "intimate_scenes" (a sexual/intimate scene, whether or not nudity is visible). Use \
-"nudity" if visible nudity is the main flagged element. Omit or use null if \
+"nudity" if visible nudity or underwear/swimwear/lingerie is the main flagged element, \
+and "intimate_scenes" for other clothed sexual/intimate scenes. Omit or use null if \
 contains_flagged_content is false.
 - "confidence": a number from 0 to 1.
 - "description": a SHORT, clean, matter-of-fact summary of what happens in this segment, \
@@ -87,7 +90,14 @@ class VlmConfirmer:
             frame_paths = frame_paths[:FRAMES_PER_RANGE]
 
             prompt = CONFIRM_PROMPT.format(dialogue=dialogue_text or "(no dialogue)")
-            result = self.client.vision_query_json(prompt, frame_paths)
+            try:
+                result = self.client.vision_query_json(prompt, frame_paths)
+            except Exception as exc:
+                logging.warning(
+                    "VLM query failed for candidate [%.1f, %.1f] — skipping: %s",
+                    candidate.start, candidate.end, exc,
+                )
+                return None
 
             if not result.get("contains_flagged_content"):
                 return None

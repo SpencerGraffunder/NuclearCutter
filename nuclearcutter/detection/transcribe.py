@@ -37,7 +37,19 @@ class Utterance:
     words: list[Word]
 
 
-DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+DEFAULT_MODEL = "mlx-community/whisper-small-mlx"
+# For higher accuracy on machines with ≥ 32 GB RAM, use:
+#   "mlx-community/whisper-large-v3-turbo"
+# Model sizes (approx MLX unified-memory usage):
+#   tiny   ~150 MB   – fastest, lowest accuracy
+#   small  ~500 MB   – good balance for profanity detection
+#   medium ~1.5 GB   – higher accuracy
+#   large-v3-turbo ~4-5 GB – best accuracy, heavy memory usage
+
+# Low-memory presets
+LOW_MEMORY_MODEL = "mlx-community/whisper-tiny-mlx"
+LOW_MEMORY_VLM = "qwen2.5-vl:3b"
+LOW_MEMORY_TEXT = "qwen2.5:3b"
 
 
 def transcribe(video_path: Path, model: str = DEFAULT_MODEL) -> list[Utterance]:

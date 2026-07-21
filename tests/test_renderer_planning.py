@@ -13,7 +13,7 @@ def test_plan_timeline_full_coverage_no_gaps():
     vd1 = VisualDetection(category=Category.NUDITY, start=10.0, end=15.0, description="a", confidence=0.9)
     vd2 = VisualDetection(category=Category.INTIMATE_SCENES, start=50.0, end=60.0, description="b", confidence=0.9)
     scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd1, vd2], language_detections=[])
-    prefs = Preferences(nudity_action=Action.BLUR, intimate_scenes_action=Action.SKIP)
+    prefs = Preferences(nudity_action=Action.BLUR, intimate_scenes_action=Action.BLUR)
 
     timeline = plan_timeline(scan, prefs, 100.0)
 
@@ -32,7 +32,7 @@ def test_plan_timeline_overlapping_detections_no_double_count():
     vd1 = VisualDetection(category=Category.NUDITY, start=10.0, end=20.0, description="a", confidence=0.9)
     vd2 = VisualDetection(category=Category.INTIMATE_SCENES, start=15.0, end=25.0, description="b", confidence=0.9)
     scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd1, vd2], language_detections=[])
-    prefs = Preferences(nudity_action=Action.BLUR, intimate_scenes_action=Action.SKIP)
+    prefs = Preferences(nudity_action=Action.BLUR, intimate_scenes_action=Action.BLUR)
 
     timeline = plan_timeline(scan, prefs, 100.0)
     total = sum(s.end - s.start for s in timeline)
@@ -71,15 +71,15 @@ def test_blur_mute_audio_flag_propagates():
     assert blur_seg2.audio_muted is False
 
 
-def test_skip_always_mutes_audio():
+def test_blur_audio_mutes_only_when_configured():
     identity = make_identity(50.0)
     vd = VisualDetection(category=Category.NUDITY, start=10.0, end=20.0, description="a", confidence=0.9)
     scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd], language_detections=[])
-    prefs = Preferences(nudity_action=Action.SKIP)
+    prefs = Preferences(nudity_action=Action.BLUR, nudity_blur_mute_audio=True)
 
     timeline = plan_timeline(scan, prefs, 50.0)
-    skip_seg = next(s for s in timeline if s.action == Action.SKIP)
-    assert skip_seg.audio_muted is True
+    blur_seg = next(s for s in timeline if s.action == Action.BLUR)
+    assert blur_seg.audio_muted is True
 
 
 def test_language_mute_ranges_convert_to_segment_relative_time():
