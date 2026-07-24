@@ -27,6 +27,7 @@ from pathlib import Path
 import imagehash
 from PIL import Image
 
+from nuclearcutter.utils.cache import cache_path_for
 from nuclearcutter.utils.ffmpeg import extract_frame_at, probe_duration
 
 # Sample points as a fraction of total runtime. Avoiding the very start/end
@@ -64,7 +65,7 @@ class PhashSample:
 
 
 def _cache_path(video_path: Path) -> Path:
-    return video_path.with_suffix(".fingerprint.json")
+    return cache_path_for(video_path, ".fingerprint.json")
 
 
 def _cache_key(video_path: Path) -> dict:

@@ -19,6 +19,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from nuclearcutter.utils.cache import cache_path_for
 from nuclearcutter.utils.ffmpeg import probe_duration
 
 # NudeDetector is imported lazily inside NsfwClassifier.__init__ rather than
@@ -85,10 +86,10 @@ class NsfwClassifier:
     CHECKPOINT_INTERVAL = 100
 
     def _checkpoint_path(self, video_path: Path) -> Path:
-        return video_path.with_suffix(".stage_a_checkpoint.json")
+        return cache_path_for(video_path, ".stage_a_checkpoint.json", subdir="checkpoint")
 
     def _results_path(self, video_path: Path) -> Path:
-        return video_path.with_suffix(".stage_a_results.json")
+        return cache_path_for(video_path, ".stage_a_results.json", subdir="results")
 
     def _save_checkpoint(
         self,

@@ -23,23 +23,25 @@ from PIL import Image
 
 @dataclass
 class LLMConfig:
-    base_url: str = "http://localhost:11434/v1"  # Ollama default
-    vlm_model: str = "qwen2.5-vl:7b"
-    text_model: str = "qwen2.5:7b"
+    base_url: str = "http://localhost:1234/v1"  # Ollama default
+    vlm_model: str = "qwen3.5:4b-mlx"
+    text_model: str = "qwen3.5:4b-mlx"
     api_key: str = "not-needed"  # most local servers ignore this but the client requires *something*
-    timeout: int = 120
+    timeout: int = 240
+    vision_timeout: int = 8000  # VLM requests with images can be much slower
 
 
 class LLMClient:
     def __init__(self, config: LLMConfig):
         self.config = config
 
-    def _post(self, payload: dict) -> dict:
+    def _post(self, payload: dict, timeout: int = None) -> dict:
+        timeout = timeout if timeout is not None else self.config.timeout
         resp = requests.post(
             f"{self.config.base_url}/chat/completions",
             headers=self._headers(),
             json=payload,
-            timeout=self.config.timeout,
+            timeout=timeout,
         )
         if not resp.ok:
             body = resp.text[:2000]  # server error details
@@ -130,7 +132,7 @@ class LLMClient:
         # they support it for text-only. We skip json_mode for vision calls and
         # rely on _parse_json_loose to extract JSON from the text response.
 
-        result = self._post(payload)
+        result = self._post(payload, timeout=self.config.vision_timeout)
         return result["choices"][0]["message"]["content"]
 
     def text_query(self, prompt: str, json_mode: bool = False) -> str:

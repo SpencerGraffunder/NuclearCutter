@@ -10,3 +10,6 @@
 nuclearcutter.egg-info/
 timestamps/
 __pycache__/
+# Local cache for sidecar files (fingerprints, checkpoints, results)
+# when videos are on read-only volumes.
+.cache/

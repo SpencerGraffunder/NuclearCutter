@@ -18,6 +18,7 @@ from nuclearcutter.detection.transcribe import find_subtitle_file, parse_subtitl
 from nuclearcutter.detection.vlm_confirm import VlmConfirmer
 from nuclearcutter.fingerprint.fingerprint import cache_fingerprint, compute_fingerprint, load_cached_fingerprint
 from nuclearcutter.schema import FilmIdentity, ScanResult
+from nuclearcutter.utils.cache import cache_path_for
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 
 
@@ -50,7 +51,7 @@ def scan(
     if progress_callback:
         progress_callback("nsfw_stage_a", None)
 
-    stage_a_results_file = video_path.with_suffix(".stage_a_results.json")
+    stage_a_results_file = cache_path_for(video_path, ".stage_a_results.json", subdir="results")
 
     # Check if Stage A already completed in a prior run.
     if stage_a_results_file.exists():
@@ -103,13 +104,22 @@ def scan(
         progress_callback("nsfw_stage_b", (0, len(candidates)))
     confirmer = VlmConfirmer(client)
     visual_detections = []
+    vlm_failures = 0
     for i, candidate in enumerate(candidates):
         dialogue = _dialogue_in_range(utterances, candidate.start, candidate.end)
         detection = confirmer.confirm_and_describe(video_path, candidate, dialogue)
         if detection:
             visual_detections.append(detection)
+        else:
+            vlm_failures += 1
         if progress_callback:
             progress_callback("nsfw_stage_b", (i + 1, len(candidates)))
+
+    if candidates and vlm_failures == len(candidates):
+        raise RuntimeError(
+            f"All {vlm_failures} VLM confirmation queries failed. Cannot produce a reliable scan.\n"
+            f"Check that your inference server is running and accessible at {llm_config.base_url}"
+        )
 
     if progress_callback:
         progress_callback("language_detection", None)
@@ -126,10 +136,6 @@ def scan(
             "text_model": llm_config.text_model,
         },
     )
-
-    # Full scan complete — clean up Stage A results file so next run rescans.
-    stage_a_results = video_path.with_suffix(".stage_a_results.json")
-    stage_a_results.unlink(missing_ok=True)
 
     if progress_callback:
         progress_callback("done", None)

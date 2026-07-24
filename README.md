@@ -100,12 +100,12 @@ Specify the model used during the scan step with `--vlm-model` and
 
 ```bash
 nuclearcutter scan "/path/to/Movie.mkv" \
-  --base-url http://localhost:11434/v1 \
+  --base-url http://localhost:1234/v1 \
   --vlm-model qwen3.5:4b-mlx \
   --text-model qwen3.5:4b-mlx
 ```
 
-Then point NuclearCutter at it (defaults already assume `http://localhost:11434/v1`
+Then point NuclearCutter at it (defaults already assume `http://localhost:1234/v1`
 with these model names — override with `--base-url`, `--vlm-model`,
 `--text-model` if you're using something else, e.g. LM Studio's server URL).
 

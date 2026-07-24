@@ -32,6 +32,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     llm_config = LLMConfig(base_url=args.base_url, vlm_model=args.vlm_model, text_model=args.text_model)
+    if args.vision_timeout is not None:
+        llm_config.vision_timeout = args.vision_timeout
 
     if args.low_memory:
         print("Low-memory mode: using tiny Whisper + 3B LLM models.")
@@ -52,9 +54,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print("Fingerprint match found. Spot-checking with VLM before trusting it...")
             client = LLMClient(llm_config)
             if spot_check_match(video_path, candidate, client):
-                out_path = args.output or _default_scan_path(video_path)
-                candidate.save(Path(out_path))
-                print(f"Verified match. Wrote scan result to {out_path} (skipped full rescan).")
+                out_path = Path(args.output) if args.output else _default_scan_path(video_path)
+                try:
+                    candidate.save(out_path)
+                    print(f"Verified match. Wrote scan result to {out_path} (skipped full rescan).")
+                except PermissionError:
+                    fallback = Path.cwd() / out_path.name
+                    print(f"warning: no write permission at {out_path.parent}, falling back to {fallback}")
+                    candidate.save(fallback)
+                    print(f"Verified match. Wrote scan result to {fallback} (skipped full rescan).")
                 return 0
             else:
                 print("Spot-check failed to confirm match closely enough — falling back to full scan.")
@@ -70,11 +78,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print(f"\r[{stage}] {i} / {total} candidates", end="", flush=True)
 
     print(f"Scanning {video_path.name}...")
-    result: ScanResult = scan_pass(video_path, llm_config=llm_config, title=args.title, year=args.year, progress_callback=progress, whisper_model=whisper_model)
+    try:
+        result: ScanResult = scan_pass(video_path, llm_config=llm_config, title=args.title, year=args.year, progress_callback=progress, whisper_model=whisper_model)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     print()
 
     out_path = Path(args.output) if args.output else _default_scan_path(video_path)
-    result.save(out_path)
+    try:
+        result.save(out_path)
+    except PermissionError:
+        fallback = Path.cwd() / out_path.name
+        print(f"warning: no write permission at {out_path.parent}, falling back to {fallback}")
+        result.save(fallback)
+        out_path = fallback
     print(f"Scan complete: {len(result.visual_detections)} visual detections, "
           f"{len(result.language_detections)} language detections.")
     print(f"Wrote {out_path}")
@@ -133,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--text-model", default="qwen2.5:7b", help="Text model name for profanity context checks")
     p_scan.add_argument("--whisper-model", help=f"Whisper model for transcription (default: {DEFAULT_MODEL})")
     p_scan.add_argument("--low-memory", action="store_true", help="Use smallest models (tiny Whisper + 3B LLMs) for ≤16 GB RAM")
+    p_scan.add_argument("--vision-timeout", type=int, default=None,
+                        help="Timeout in seconds for VLM vision requests (default: 300)")
     p_scan.set_defaults(func=cmd_scan)
 
     p_render = sub.add_parser("render", help="Render a cleaned copy of a movie file using a scan JSON + preferences.")
