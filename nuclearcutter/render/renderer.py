@@ -78,10 +78,12 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
         action = prefs.action_for(d.category)
         audio_muted = False
         if action == Action.BLUR:
-            audio_muted = (
-                prefs.nudity_blur_mute_audio if d.category == Category.NUDITY
-                else prefs.intimate_scenes_blur_mute_audio
-            )
+            if d.category == Category.NUDITY:
+                audio_muted = prefs.nudity_blur_mute_audio
+            elif d.category == Category.INTIMATE_SCENES:
+                audio_muted = prefs.intimate_scenes_blur_mute_audio
+            elif d.category == Category.GORE_VIOLENCE:
+                audio_muted = prefs.gore_violence_blur_mute_audio
 
         segments.append(TimelineSegment(
             start=start, end=d.end, action=action, category=d.category,
@@ -108,6 +110,12 @@ def render(
     width, height = int(video_stream["width"]), int(video_stream["height"])
     fps = _parse_fps(video_stream.get("r_frame_rate", "24/1"))
     duration = float(stream_info["format"]["duration"])
+    codec_name = video_stream.get("codec_name", "h264")
+
+    # Preserve the source codec family instead of forcing libx264. This keeps
+    # x265/HEVC sources at x265-sized files instead of ballooning them into
+    # much larger H.264 output (a known complaint with re-encoding).
+    video_encoder = _encoder_for_codec(codec_name)
 
     timeline = plan_timeline(scan, prefs, duration)
 
@@ -115,7 +123,7 @@ def render(
         tmp_dir = Path(tmp)
 
         video_files, audio_files = _render_track_segments(
-            input_path, timeline, scan, prefs, width, height, fps, tmp_dir, font_path,
+            input_path, timeline, scan, prefs, width, height, fps, tmp_dir, font_path, video_encoder,
         )
 
         final_video = _concat_track(video_files, tmp_dir, "video_concat.mp4")
@@ -123,6 +131,24 @@ def render(
         _mux_final_output(final_video, final_audio, output_path)
 
     return output_path
+
+
+def _encoder_for_codec(codec_name: str) -> str:
+    """Map a source video codec to the ffmpeg encoder that preserves its family.
+
+    This keeps re-encoded output sizes roughly in line with the source (x265 stays
+    x265, AV1 stays AV1) rather than always falling back to H.264, which is much
+    larger for the same quality.
+    """
+    family = {
+        "h264": "libx264",
+        "hevc": "libx265",
+        "h265": "libx265",
+        "av1": "libsvtav1",
+        "vp9": "libvpx-vp9",
+        "vp8": "libvpx",
+    }
+    return family.get(codec_name, "libx264")
 
 
 _FFMPEG_FILTERS: set[str] | None = None
@@ -146,28 +172,83 @@ def _ffmpeg_has_filter(filter_name: str) -> bool:
         filters = set()
         for line in proc.stdout.splitlines():
             parts = line.strip().split()
-            if not parts:
-                continue
-            filters.add(parts[-1])
+            # ffmpeg `-filters` lines look like: " T. boxblur  V->V  Blur..."
+            # parts[0] is the flag column (e.g. "T."), parts[1] is the filter name.
+            if len(parts) >= 2 and not parts[1].startswith("="):
+                filters.add(parts[1])
         _FFMPEG_FILTERS = filters
     return filter_name in _FFMPEG_FILTERS
 
 
 def _build_blur_filter(text: str, font_path: str | None) -> str:
+    """Return the -vf filter chain for a blur segment.
+
+    We always apply the intense boxblur. The summary-text overlay is NOT drawn
+    here: this ffmpeg build lacks the drawtext filter (no freetype), so text is
+    composited separately via a PIL-generated PNG + the overlay filter (see
+    _make_overlay_png / _extract_video_segment's overlay_path).
+    """
     filters = ["boxblur=luma_radius=30:luma_power=3:chroma_radius=30:chroma_power=3"]
-    if text.strip() and _ffmpeg_has_filter("drawtext"):
-        wrapped_text = _wrap_for_display(text)
-        escaped_text = _escape_for_drawtext(wrapped_text)
-        fontfile_arg = f":fontfile='{font_path}'" if font_path else ""
-        drawtext = (
-            f"drawtext=text='{escaped_text}'{fontfile_arg}:"
-            "fontcolor=white:fontsize=36:"
-            "box=1:boxcolor=black@0.6:boxborderw=10:"
-            "x=(w-text_w)/2:y=h-(text_h)-40:"
-            "line_spacing=10"
-        )
-        filters.append(drawtext)
     return ",".join(filters)
+
+
+def _make_overlay_png(text: str, width: int, height: int, font_path: str | None, out_path: Path) -> None:
+    """Render the summary text onto a transparent full-frame PNG.
+
+    The text sits in a semi-opaque black box near the bottom-center, matching
+    the look of the old drawtext overlay. This works with ffmpeg's universal
+    `overlay` filter, so it doesn't depend on a drawtext-capable build.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    wrapped = _wrap_for_display(text, max_chars_per_line=45)
+
+    font = None
+    candidates = [font_path] if font_path else []
+    candidates += [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            font = ImageFont.truetype(path, 32)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    # Measure the wrapped text so the black box hugs it.
+    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=8)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    pad_x, pad_y = 24, 16
+    box_w = text_w + pad_x * 2
+    box_h = text_h + pad_y * 2
+    x0 = (width - box_w) // 2
+    y0 = height - box_h - 48
+
+    draw.rounded_rectangle(
+        [x0, y0, x0 + box_w, y0 + box_h],
+        radius=12,
+        fill=(0, 0, 0, 178),
+    )
+    draw.multiline_text(
+        (x0 + pad_x, y0 + pad_y),
+        wrapped,
+        font=font,
+        fill=(255, 255, 255, 255),
+        spacing=8,
+    )
+    img.save(str(out_path))
 
 
 def _render_track_segments(
@@ -180,6 +261,7 @@ def _render_track_segments(
     fps: float,
     tmp_dir: Path,
     font_path: str,
+    video_encoder: str,
 ) -> tuple[list[Path], list[Path]]:
     video_files: list[Path] = []
     audio_files: list[Path] = []
@@ -190,7 +272,7 @@ def _render_track_segments(
 
         if seg.action is None:
             output_duration = seg.source_duration
-            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_filter=None)
+            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_encoder, video_filter=None)
             _extract_audio_segment(
                 input_path, seg.start, output_duration, a_out,
                 mute_ranges=_language_mute_ranges_within(scan, prefs, seg.start, seg.end),
@@ -199,7 +281,14 @@ def _render_track_segments(
         elif seg.action == Action.BLUR:
             output_duration = seg.source_duration
             blur_filter = _build_blur_filter(seg.description, font_path)
-            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_filter=blur_filter)
+            overlay_path: Path | None = None
+            if seg.description.strip() and _ffmpeg_has_filter("overlay"):
+                overlay_path = tmp_dir / f"overlay_{i:04d}.png"
+                _make_overlay_png(seg.description, width, height, font_path, overlay_path)
+            _extract_video_segment(
+                input_path, seg.start, output_duration, v_out, video_encoder,
+                video_filter=blur_filter, overlay_path=overlay_path,
+            )
             if seg.audio_muted:
                 _silent_audio(output_duration, a_out)
             else:
@@ -254,19 +343,33 @@ def _wrap_for_display(text: str, max_chars_per_line: int = 40) -> str:
     return "\n".join(lines)
 
 
-def _escape_for_drawtext(text: str) -> str:
-    text = text.replace("\\", "\\\\")
-    text = text.replace(":", "\\:")
-    text = text.replace("'", "\u2019")
-    text = text.replace("\n", "\r")
-    return text
-
-
-def _extract_video_segment(input_path: Path, start: float, duration: float, out_path: Path, video_filter: str | None) -> None:
-    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", str(input_path), "-t", str(duration)]
-    if video_filter:
+def _extract_video_segment(
+    input_path: Path, start: float, duration: float, out_path: Path,
+    video_encoder: str, video_filter: str | None, overlay_path: Path | None = None,
+) -> None:
+    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", str(input_path)]
+    if overlay_path is not None:
+        # Composite a pre-rendered text overlay (PIL PNG) on top of the blurred
+        # video. -loop 1 turns the still PNG into a stream; -t is given as an
+        # OUTPUT option (after all inputs) so the encode stops at `duration`
+        # regardless of the never-ending looped image input.
+        cmd += ["-loop", "1", "-i", str(overlay_path)]
+        fc = (
+            f"[0:v]{video_filter}[bg];"
+            "[1:v]format=rgba,scale=iw:ih[ovr];"
+            "[bg][ovr]overlay=0:0:format=auto[v]"
+        )
+        cmd += ["-filter_complex", fc, "-map", "[v]"]
+    elif video_filter:
         cmd += ["-vf", video_filter]
-    cmd += ["-an", "-c:v", "libx264", "-crf", "17", "-preset", "medium", str(out_path)]
+    # Use the source-codec-preserving encoder (libx265 for HEVC input, libx264 for
+    # H.264, etc.) so output size tracks the source family. CRF 17 ≈ visually
+    # lossless; -tag:v hvc1 keeps HEVC playable in QuickTime/Apple tooling.
+    # -t here is an output option bounding the segment to `duration`.
+    cmd += ["-t", str(duration), "-an", "-c:v", video_encoder, "-crf", "17", "-preset", "medium"]
+    if video_encoder == "libx265":
+        cmd += ["-tag:v", "hvc1"]
+    cmd += [str(out_path)]
     subprocess.run(cmd, **_FFMPEG_KW)
 
 

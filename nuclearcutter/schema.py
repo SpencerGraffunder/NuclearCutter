@@ -28,6 +28,7 @@ SCHEMA_VERSION = 1
 class Category(str, Enum):
     NUDITY = "nudity"
     INTIMATE_SCENES = "intimate_scenes"
+    GORE_VIOLENCE = "gore_violence"
     FOUL_LANGUAGE = "foul_language"
 
 
@@ -41,20 +42,21 @@ class Action(str, Enum):
 VALID_ACTIONS = {
     Category.NUDITY: {Action.BLUR, Action.NONE},
     Category.INTIMATE_SCENES: {Action.BLUR, Action.NONE},
+    Category.GORE_VIOLENCE: {Action.BLUR, Action.NONE},
     Category.FOUL_LANGUAGE: {Action.MUTE, Action.NONE},
 }
 
 
 @dataclass
 class VisualDetection:
-    """A single nudity/intimate_scenes detection from the Stage A+B pipeline."""
+    """A single visual detection (nudity/intimate_scenes/gore_violence) from the VLM sweep."""
 
     category: Category
     start: float  # seconds
     end: float  # seconds
     description: str  # VLM-generated summary, visual + dialogue content woven together
     confidence: float  # 0-1, from the VLM confirmation stage
-    stage_a_score: Optional[float] = None  # raw classifier score that triggered the candidate range
+    stage_a_score: Optional[float] = None  # retained for backward-compat; always None with the VLM sweep
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -153,6 +155,9 @@ class Preferences:
     intimate_scenes_action: Action = Action.BLUR
     intimate_scenes_blur_mute_audio: bool = False
 
+    gore_violence_action: Action = Action.BLUR
+    gore_violence_blur_mute_audio: bool = False
+
     foul_language_action: Action = Action.MUTE
     foul_language_mute_scope: str = "word"  # "word" or "utterance"
 
@@ -161,6 +166,8 @@ class Preferences:
             return self.nudity_action
         if category == Category.INTIMATE_SCENES:
             return self.intimate_scenes_action
+        if category == Category.GORE_VIOLENCE:
+            return self.gore_violence_action
         if category == Category.FOUL_LANGUAGE:
             return self.foul_language_action
         raise ValueError(f"Unknown category: {category}")
@@ -169,6 +176,7 @@ class Preferences:
         d = asdict(self)
         d["nudity_action"] = self.nudity_action.value
         d["intimate_scenes_action"] = self.intimate_scenes_action.value
+        d["gore_violence_action"] = self.gore_violence_action.value
         d["foul_language_action"] = self.foul_language_action.value
         return d
 
@@ -183,6 +191,8 @@ class Preferences:
             nudity_blur_mute_audio=d.get("nudity_blur_mute_audio", False),
             intimate_scenes_action=Action(d.get("intimate_scenes_action", "blur")),
             intimate_scenes_blur_mute_audio=d.get("intimate_scenes_blur_mute_audio", False),
+            gore_violence_action=Action(d.get("gore_violence_action", "blur")),
+            gore_violence_blur_mute_audio=d.get("gore_violence_blur_mute_audio", False),
             foul_language_action=Action(d.get("foul_language_action", "mute")),
             foul_language_mute_scope=d.get("foul_language_mute_scope", "word"),
         )

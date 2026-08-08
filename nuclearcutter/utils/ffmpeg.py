@@ -15,9 +15,7 @@ from pathlib import Path
 # Shared kwargs for ffmpeg/ffprobe subprocess calls.
 # We capture both stdout and stderr (necessary for error diagnostics), but
 # each call is synchronous and the result goes out of scope immediately, so
-# this does NOT accumulate memory across repeated calls.  The real memory
-# fix for long-running scans is in NsfwClassifier (periodic ONNX session
-# recreation), not here.
+# this does NOT accumulate memory across repeated calls.
 _FFMPEG_RUN_KWARGS = {"capture_output": True, "text": True, "check": True}
 
 

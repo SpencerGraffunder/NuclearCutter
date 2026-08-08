@@ -9,7 +9,6 @@ dependencies = [
     "requests>=2.31",
     "Pillow>=10.0",
     "ImageHash>=4.3",
-    "nudenet>=3.4",
     "mlx-whisper>=0.4",
     "pysrt>=1.1",
 ]

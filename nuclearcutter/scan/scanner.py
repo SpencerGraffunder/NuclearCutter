@@ -1,24 +1,26 @@
 """
 Pass 1 of the two-pass architecture (docs/SPEC.md section 2): orchestrates
-the full detection pipeline (Stage A/B nudity+intimate detection, Whisper
-transcription, subtitle cross-check, profanity wordlist + LLM check) and
-produces a ScanResult.
+the full detection pipeline (unified VLM visual sweep for nudity/intimate/
+gore, Whisper transcription, subtitle cross-check, profanity wordlist + LLM
+check) and produces a ScanResult.
+
+Visual detection is a single full-film VLM sweep (see detection/vlm_confirm.py)
+— NudeNet was removed because it missed a real nude scene entirely; the VLM
+sweep is the only visual detector and catches nudity, intimate scenes, and
+gore/violence in one pass.
 """
 
 from __future__ import annotations
 
 import gc
-import json
 import sys
 from pathlib import Path
 
-from nuclearcutter.detection.nsfw_classifier import NsfwClassifier, CandidateRange
 from nuclearcutter.detection.profanity import detect_foul_language, load_wordlist
 from nuclearcutter.detection.transcribe import find_subtitle_file, parse_subtitles, transcribe
-from nuclearcutter.detection.vlm_confirm import VlmConfirmer
+from nuclearcutter.detection.vlm_confirm import DEFAULT_SWEEP_INTERVAL, VisualSweepDetector
 from nuclearcutter.fingerprint.fingerprint import cache_fingerprint, compute_fingerprint, load_cached_fingerprint
 from nuclearcutter.schema import FilmIdentity, ScanResult
-from nuclearcutter.utils.cache import cache_path_for
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 
 
@@ -29,6 +31,7 @@ def scan(
     year: int = None,
     progress_callback=None,
     whisper_model: str = None,
+    sweep_interval: float = None,
 ) -> ScanResult:
     llm_config = llm_config or LLMConfig()
     client = LLMClient(llm_config)
@@ -49,50 +52,8 @@ def scan(
     )
 
     if progress_callback:
-        progress_callback("nsfw_stage_a", None)
-
-    stage_a_results_file = cache_path_for(video_path, ".stage_a_results.json", subdir="results")
-
-    # Check if Stage A already completed in a prior run.
-    if stage_a_results_file.exists():
-        try:
-            saved = json.loads(stage_a_results_file.read_text())
-            candidates = [CandidateRange(**r) for r in saved["ranges"]]
-            print(
-                f"[nsfw_stage_a] loaded {len(candidates)} candidate ranges from "
-                f"{stage_a_results_file.name}",
-                file=sys.stderr,
-            )
-        except Exception as exc:
-            print(
-                f"Warning: corrupt Stage A results ({exc}), re-scanning.",
-                file=sys.stderr,
-            )
-            stage_a_results_file.unlink(missing_ok=True)
-            candidates = None
-    else:
-        candidates = None
-
-    if candidates is None:
-        classifier = NsfwClassifier()
-        candidates = classifier.scan(
-            video_path,
-            progress_callback=lambda t, total: progress_callback("nsfw_stage_a", (t, total)) if progress_callback else None,
-        )
-        # Save results immediately so later stages can crash without losing
-        # Stage A progress.
-        stage_a_results_file.write_text(json.dumps(
-            {"ranges": [
-                {"start": r.start, "end": r.end, "peak_score": r.peak_score}
-                for r in candidates
-            ]}
-        ))
-        del classifier
-        gc.collect()
-
-    if progress_callback:
         progress_callback("transcribing", None)
-    utterances = transcribe(video_path, model=whisper_model) if whisper_model else transcribe(video_path)
+    utterances = transcribe(video_path, model=whisper_model)
 
     subtitle_path = find_subtitle_file(video_path)
     subtitle_utterances = parse_subtitles(subtitle_path) if subtitle_path else []
@@ -100,22 +61,35 @@ def scan(
     # Whisper model is now out of scope; free its memory before loading VLM frames.
     gc.collect()
 
+    # ------------------------------------------------------------------
+    # Unified full-film VLM sweep (the only visual detector — no NudeNet).
+    # One sweep pass catches nudity, intimate scenes, AND gore/violence.
+    # ------------------------------------------------------------------
     if progress_callback:
-        progress_callback("nsfw_stage_b", (0, len(candidates)))
-    confirmer = VlmConfirmer(client)
+        progress_callback("visual_sweep", None)
+    sweep_detector = VisualSweepDetector(client)
+    sweep_ranges = sweep_detector.sweep(
+        video_path,
+        sample_interval=sweep_interval or DEFAULT_SWEEP_INTERVAL,
+    )
+    print(
+        f"[visual_sweep] {len(sweep_ranges)} candidate range(s) from VLM sweep",
+        file=sys.stderr,
+    )
+
     visual_detections = []
     vlm_failures = 0
-    for i, candidate in enumerate(candidates):
+    for i, candidate in enumerate(sweep_ranges):
         dialogue = _dialogue_in_range(utterances, candidate.start, candidate.end)
-        detection = confirmer.confirm_and_describe(video_path, candidate, dialogue)
+        detection = sweep_detector.confirm_and_describe(video_path, candidate, dialogue)
         if detection:
             visual_detections.append(detection)
         else:
             vlm_failures += 1
         if progress_callback:
-            progress_callback("nsfw_stage_b", (i + 1, len(candidates)))
+            progress_callback("visual_confirm", (i + 1, len(sweep_ranges)))
 
-    if candidates and vlm_failures == len(candidates):
+    if sweep_ranges and vlm_failures == len(sweep_ranges):
         raise RuntimeError(
             f"All {vlm_failures} VLM confirmation queries failed. Cannot produce a reliable scan.\n"
             f"Check that your inference server is running and accessible at {llm_config.base_url}"

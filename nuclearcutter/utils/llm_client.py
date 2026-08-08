@@ -24,11 +24,24 @@ from PIL import Image
 @dataclass
 class LLMConfig:
     base_url: str = "http://localhost:1234/v1"  # Ollama default
-    vlm_model: str = "qwen3.5:4b-mlx"
-    text_model: str = "qwen3.5:4b-mlx"
+    vlm_model: str | None = None  # no default — user must pass --vlm-model
+    text_model: str | None = None  # no default — user must pass --text-model
     api_key: str = "not-needed"  # most local servers ignore this but the client requires *something*
-    timeout: int = 240
+    timeout: int = 90  # text-only requests; kept short so slow LLM checks fall back to the wordlist quickly
     vision_timeout: int = 8000  # VLM requests with images can be much slower
+    # Bounds on generation length. Reasoning models will happily "think" for
+    # thousands of tokens (or forever, if unbounded) before emitting an answer;
+    # a firm cap guarantees every request terminates so a full scan can't hang
+    # indefinitely. Tokens are free locally, but time isn't.
+    text_max_tokens: int = 6000
+    vision_max_tokens: int = 9000
+    # Reasoning models spend most of their budget "thinking" before answering.
+    # Instructing them to answer directly cuts latency dramatically and
+    # prevents empty responses when the thinking chain hits the token cap.
+    system_prompt: str = (
+        "Answer directly and concisely. Do not provide lengthy reasoning or "
+        "chain-of-thought; output only the requested result."
+    )
 
 
 class LLMClient:
@@ -82,6 +95,11 @@ class LLMClient:
             return  # empty list, can't validate
 
         for label, model in [("VLM", self.config.vlm_model), ("text", self.config.text_model)]:
+            if model is None:
+                # No default models in the code — if the caller didn't supply
+                # one, there's nothing to validate here; a clear error is raised
+                # by the CLI before any work is attempted.
+                continue
             if model not in available:
                 suggestions = [m for m in available if model.replace(":", "-") in m or model.split(":")[0] in m]
                 hint = (
@@ -124,8 +142,12 @@ class LLMClient:
 
         payload = {
             "model": self.config.vlm_model,
-            "messages": [{"role": "user", "content": content}],
+            "messages": [
+                {"role": "system", "content": self.config.system_prompt},
+                {"role": "user", "content": content},
+            ],
             "temperature": 0.1,
+            "max_tokens": self.config.vision_max_tokens,
         }
         # Most local inference servers (LM Studio, Ollama, etc.) do NOT support
         # response_format/json_mode for multimodal (vision) requests, even when
@@ -139,13 +161,29 @@ class LLMClient:
         """Send a text-only prompt to the configured text LLM. Returns raw text response."""
         payload = {
             "model": self.config.text_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": self.config.system_prompt},
+                {"role": "user", "content": prompt},
+            ],
             "temperature": 0.1,
+            "max_tokens": self.config.text_max_tokens,
         }
         if json_mode:
+            # Some servers (OpenAI-compatible) accept json_object; LM Studio
+            # requires json_schema or text and rejects json_object with 400.
+            # Try json_object first, then fall back to plain text (the prompt
+            # already demands strict JSON and callers parse loosely).
             payload["response_format"] = {"type": "json_object"}
-
-        result = self._post(payload)
+            try:
+                result = self._post(payload)
+            except requests.HTTPError as exc:
+                if "response_format" in str(exc) and exc.response is not None:
+                    payload.pop("response_format", None)
+                    result = self._post(payload)
+                else:
+                    raise
+        else:
+            result = self._post(payload)
         return result["choices"][0]["message"]["content"]
 
     def vision_query_json(self, prompt: str, image_paths: list[Path]) -> dict:

@@ -37,9 +37,10 @@ You can re-render the same scan with different preferences without rescanning
 |---|---|---|
 | Nudity | `blur`, `none` | blur = intense box blur over the video; audio mute during blur is a separate toggle |
 | Intimate scenes | `blur`, `none` | same as above; distinct category from nudity (e.g. a clothed sex scene) |
+| Gore / violence | `blur`, `none` | graphic gore (blood, wounds, mutilation) and graphic violence (brutal fighting, murder, torture) |
 | Foul language | `mute`, `none` | mutes audio only; defaults to muting just the flagged word, configurable to the whole sentence/utterance |
 
-**`blur`** applies an intense box blur to the flagged video range and overlays a short, clean, AI-generated summary so you keep story context. This keeps the scene intact and less disruptive than replacing the footage entirely, while still obscuring the flagged content. Audio can be muted separately for each blur category using `--nudity-blur-mute-audio` and `--intimate-scenes-blur-mute-audio`.
+**`blur`** applies an intense box blur to the flagged video range and overlays a short, clean, AI-generated summary so you keep story context. This keeps the scene intact and less disruptive than replacing the footage entirely, while still obscuring the flagged content. Audio can be muted separately for each blur category using `--nudity-blur-mute-audio`, `--intimate-scenes-blur-mute-audio`, and `--gore-violence-blur-mute-audio`.
 
 ## Setup
 
@@ -102,28 +103,69 @@ Specify the model used during the scan step with `--vlm-model` and
 nuclearcutter scan "/path/to/Movie.mkv" \
   --base-url http://localhost:1234/v1 \
   --vlm-model qwen3.5:4b-mlx \
-  --text-model qwen3.5:4b-mlx
+  --text-model qwen3.5:4b-mlx \
+  --whisper-model mlx-community/whisper-small-mlx
 ```
 
-Then point NuclearCutter at it (defaults already assume `http://localhost:1234/v1`
-with these model names — override with `--base-url`, `--vlm-model`,
-`--text-model` if you're using something else, e.g. LM Studio's server URL).
+NuclearCutter has **no built-in model defaults** — you must always pass
+`--vlm-model`, `--text-model` (and `--whisper-model` for the scan) explicitly,
+so it only ever uses the models you name. Point it at your server with
+`--base-url` (e.g. LM Studio's `http://localhost:1234/v1` or Ollama's
+`http://localhost:11434/v1`).
 
-### The cheap nudity classifier (Stage A)
+### Full-film VLM sweep (the only visual detector)
 
-Runs via `nudenet`, installed automatically as a dependency. This runs on
-CPU/ONNX and doesn't need the inference server — it's the fast first pass
-that decides which time ranges are even worth sending to the VLM. See
-`docs/SPEC.md` §4.1 for why this two-stage approach exists.
+Visual detection is a single **full-film VLM sweep** — there is no separate
+NudeNet classifier anymore. NudeNet was removed because it can miss a real
+nude scene entirely (it scored zero on every frame of a full nude scene in
+The Martian that a vision model immediately flagged at 0.95 confidence).
+
+The sweep samples frames across the whole film, sends them to the vision
+model in small batches, and asks one question per batch: *"does this batch
+contain ANY flagged content?"* — covering nudity, intimate scenes, **and**
+gore/violence in a single pass. Flagged batch windows are merged into ranges
+with generous before/after padding, so a scene is never clipped and nothing
+is silently dropped. Each range is then confirmed and described (the nudity
+confirm prompt deliberately treats underwear/swimwear/lingerie/suggestive
+clothing as flagged content).
+
+`--sweep-interval` controls sampling density (seconds between samples;
+default 5). Smaller catches shorter scenes but makes more VLM calls; larger
+is faster but can miss brief flashes:
+
+```bash
+nuclearcutter scan ... --sweep-interval 5   # default — densest, most thorough
+nuclearcutter scan ... --sweep-interval 10  # faster, still catches ~10s+ scenes
+```
+
+Because this is one VLM sweep covering all three visual categories, it
+replaces what used to be NudeNet + a VLM confirm pass + two separate opt-in
+sweeps — and it never depends on a fast-but-blind classifier deciding what's
+worth looking at.
+
+### Rendering preserves the source codec
+
+The renderer keeps the source codec family — an x265/HEVC source is re-encoded
+with `libx265` (not forced to H.264), an H.264 source uses `libx264`, AV1 stays
+AV1, etc. This avoids the large output-size jump you'd get from transcoding a
+compact x265 file into H.264. (Blur/mute segments are still re-encoded; the
+point is the *codec* is preserved, not that output is bit-identical.)
 
 ## Usage
 
+The two commands, at a glance (models are required — see Examples below):
+
 ```bash
 # Scan a movie (slow — hours to a day+ depending on length/hardware)
-nuclearcutter scan "/path/to/Movie.mkv"
+nuclearcutter scan "/path/to/Movie.mkv" \
+  --base-url http://localhost:1234/v1 \
+  --vlm-model qwen3.5 \
+  --text-model qwen3.5 \
+  --whisper-model mlx-community/whisper-small-mlx
 
 # Render with your preferred actions per category
 nuclearcutter render "/path/to/Movie.mkv" \
+  --scan "/path/to/Movie.nuclearcutter.json" \
   --nudity blur \
   --nudity-blur-mute-audio \
   --intimate-scenes blur \
@@ -134,13 +176,129 @@ nuclearcutter render "/path/to/Movie.mkv" \
 
 This produces `/path/to/Movie_cleaned.mkv`.
 
+## Examples
+
+All examples below are complete, runnable commands. Swap in your own video
+path, model names, and base URL. **There are no built-in model defaults** —
+every scan must name `--vlm-model`, `--text-model`, and `--whisper-model`
+explicitly.
+
+### Example 1 — Full scan + render (LM Studio, Apple Silicon)
+
+The most common case: a local movie, LM Studio serving on the default port,
+using a single `qwen3.5` model for both vision and text.
+
+```bash
+# 1. Scan (slow — run it and walk away)
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --base-url http://localhost:1234/v1 \
+  --vlm-model qwen/qwen3.5-9b \
+  --text-model qwen/qwen3.5-9b \
+  --whisper-model mlx-community/whisper-small-mlx
+
+# 2. Render the censored copy (fast)
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
+  --nudity blur \
+  --nudity-blur-mute-audio \
+  --intimate-scenes blur \
+  --intimate-scenes-blur-mute-audio \
+  --foul-language mute \
+  --mute-scope word
+```
+
+Result: `/Volumes/Media/Movies/The.Martian.2015.1080p_cleaned.mkv` (original
+left untouched).
+
+### Example 2 — Ollama instead of LM Studio
+
+Same workflow, different server. Ollama's default port is `11434`, and its
+model names use the `name:tag` form.
+
+```bash
+# Make sure the model is pulled first
+ollama pull qwen3.5:7b
+ollama serve
+
+nuclearcutter scan "/Users/you/Movies/The.Martian.2015.1080p.mkv" \
+  --base-url http://localhost:11434/v1 \
+  --vlm-model qwen3.5:7b \
+  --text-model qwen3.5:7b \
+  --whisper-model mlx-community/whisper-large-v3-turbo
+```
+
+### Example 3 — Re-render an old scan with different preferences (no rescan)
+
+You already scanned once; now you want a different censorship policy without
+re-analyzing the film. Just render again from the same JSON.
+
+```bash
+# This time: don't mute audio during blur, and mute whole utterances, not just words
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
+  --output "/Volumes/Media/Movies/The.Martian.2015.1080p_lite_cut.mkv" \
+  --nudity blur \
+  --intimate-scenes blur \
+  --foul-language mute \
+  --mute-scope utterance
+```
+
+### Example 4 — Render from a saved preferences file
+
+Define your policy once in JSON, reuse it for every movie.
+
+```bash
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
+  --prefs ~/.config/nuclearcutter/prefs.json
+```
+
+To create that prefs file, see "Saving preferences" below.
+
+### Example 5 — Skip the scan using a shared timestamp file
+
+If someone has already scanned the same film, reuse their work instead of
+re-analyzing for hours. NuclearCutter fingerprints your file and, if it
+matches a scan in `timestamps/`, spot-checks a few frames with the VLM and
+reuses the result.
+
+```bash
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --base-url http://localhost:1234/v1 \
+  --vlm-model qwen/qwen3.5-9b \
+  --text-model qwen/qwen3.5-9b \
+  --whisper-model mlx-community/whisper-small-mlx \
+  --timestamps-dir ~/Code/nuclearcutter/timestamps
+```
+
+Note: `--timestamps-dir` still needs the models for the VLM spot-check.
+
+### Example 6 — Write the scan JSON to a specific location
+
+By default the scan lands next to your movie as `Movie.nuclearcutter.json`.
+On a read-only or shared drive you can send it somewhere writable instead.
+
+```bash
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --output "$HOME/scans/The.Martian.2015.1080p.json" \
+  --base-url http://localhost:1234/v1 \
+  --vlm-model qwen/qwen3.5-9b \
+  --text-model qwen/qwen3.5-9b \
+  --whisper-model mlx-community/whisper-small-mlx
+```
+
 ### Using the shared timestamps repo
 
 If someone has already scanned the same film (even a different rip/encode —
 see fingerprinting below), you can skip the expensive scan entirely:
 
 ```bash
-nuclearcutter scan "/path/to/Movie.mkv" --timestamps-dir ./timestamps
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --base-url http://localhost:1234/v1 \
+  --vlm-model qwen/qwen3.5-9b \
+  --text-model qwen/qwen3.5-9b \
+  --whisper-model mlx-community/whisper-small-mlx \
+  --timestamps-dir ./timestamps
 ```
 
 This checks `./timestamps/*.json` for a fingerprint match against your local
@@ -171,8 +329,13 @@ prefs.save(Path("my_prefs.json"))
 ```
 
 ```bash
-nuclearcutter render "/path/to/Movie.mkv" --prefs my_prefs.json
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
+  --prefs ~/.config/nuclearcutter/prefs.json
 ```
+
+Render needs no models — it just applies the actions from your scan JSON and
+preferences via ffmpeg.
 
 ## How fingerprinting works
 

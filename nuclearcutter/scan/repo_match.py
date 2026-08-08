@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nuclearcutter.detection.vlm_confirm import VlmConfirmer
 from nuclearcutter.fingerprint.fingerprint import compare_fingerprints, compute_fingerprint, PhashSample
 from nuclearcutter.schema import ScanResult
 from nuclearcutter.utils.ffmpeg import extract_frames_in_range

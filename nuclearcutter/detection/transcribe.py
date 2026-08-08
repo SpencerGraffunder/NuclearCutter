@@ -37,23 +37,17 @@ class Utterance:
     words: list[Word]
 
 
-DEFAULT_MODEL = "mlx-community/whisper-small-mlx"
-# For higher accuracy on machines with ≥ 32 GB RAM, use:
-#   "mlx-community/whisper-large-v3-turbo"
-# Model sizes (approx MLX unified-memory usage):
-#   tiny   ~150 MB   – fastest, lowest accuracy
-#   small  ~500 MB   – good balance for profanity detection
-#   medium ~1.5 GB   – higher accuracy
-#   large-v3-turbo ~4-5 GB – best accuracy, heavy memory usage
+def transcribe(video_path: Path, model: str | None = None) -> list[Utterance]:
+    """Transcribe the full audio track of a video file with word-level timestamps.
 
-# Low-memory presets
-LOW_MEMORY_MODEL = "mlx-community/whisper-tiny-mlx"
-LOW_MEMORY_VLM = "qwen2.5-vl:3b"
-LOW_MEMORY_TEXT = "qwen2.5:3b"
-
-
-def transcribe(video_path: Path, model: str = DEFAULT_MODEL) -> list[Utterance]:
-    """Transcribe the full audio track of a video file with word-level timestamps."""
+    The Whisper model must be supplied by the caller (there are no built-in
+    defaults). See README for suggested models.
+    """
+    if not model:
+        raise RuntimeError(
+            "No Whisper model specified for transcription. Pass --whisper-model "
+            "(e.g. `--whisper-model mlx-community/whisper-small-mlx`). See README.md."
+        )
     try:
         import mlx_whisper
     except ImportError as e:

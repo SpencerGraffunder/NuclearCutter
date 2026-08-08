@@ -43,6 +43,7 @@ Three categories, each independently configurable to one of the available action
 |---|---|
 | `nudity`, `immodesty` | `blur` |
 | `intimate_scenes` (sex scenes, not necessarily nudity — e.g. implied/clothed) | `blur` |
+| `gore_violence` (graphic gore/blood/wounds and graphic violence, e.g. brutal fighting, murder, torture) | `blur` |
 | `foul_language` | `mute` |
 
 Actions:
@@ -62,19 +63,33 @@ Actions:
 
 ## 4. Detection pipeline
 
-### 4.1 Nudity / intimate scenes (hybrid two-stage)
+### 4.1 Nudity / intimate scenes / gore (unified VLM sweep)
 
-- **Stage A (cheap classifier):** Sample video frames at a fixed interval (not
-  every single frame — configurable, default something like every 0.5–1s) and
-  run a lightweight local NSFW/nudity image classifier (e.g. NudeNet or similar
-  ONNX model) to flag *candidate* time ranges cheaply. This stage exists purely
-  to avoid burning expensive VLM calls on the ~99% of a movie with nothing to
-  flag.
-- **Stage B (VLM confirmation + description):** For every candidate range Stage A
-  flags, send sampled frames from that range to a vision-language model to (a)
-  confirm or reject the classifier's flag, (b) classify it as `nudity` vs
-  `intimate_scenes`, and (c) generate the human-readable scene description text
-  used later for `blur` cards.
+Visual detection is a single **full-film VLM sweep** — there is no separate
+cheap classifier anymore. A two-stage NudeNet-then-VLM design was tried and
+removed: NudeNet (a fast local ONNX classifier) scored **zero** on every frame
+of a full nude scene in The Martian that a vision model flagged at 0.95
+confidence, which meant the VLM never got a chance to confirm the scene. A
+blind fast pass can't be the gatekeeper if it can silently drop real content.
+
+- **Sweep:** Sample frames across the whole film at a configurable interval
+  (default 5s — catches any scene that lasts ≥ ~5s). Frames are sent to the
+  vision model in small batches (4 per call), and the model is asked one
+  single-verdict question per batch: *"does this batch contain ANY flagged
+  content?"* covering nudity, intimate scenes, and gore/violence in one pass.
+  This single-verdict format (rather than per-frame index JSON) is what proved
+  reliable with local reasoning VLMs.
+- **Merge + pad:** Flagged batch windows are merged into ranges with generous
+  before/after padding (`SWEEP_PADDING_SECONDS`, default 10s) so a scene is
+  never clipped. The sweep verdict is authoritative: a range that was flagged
+  is never dropped, even if a later pass can't enrich it — the goal is to
+  never show bad content, at the cost of occasionally blurring more than the
+  minimum.
+- **Confirm + describe:** Each merged range is sent to the vision model with
+  the per-category confirm prompt to (a) produce the human-readable scene
+  description used for `blur` cards and (b) refine the category. The nudity
+  confirm prompt deliberately treats underwear/swimwear/lingerie/suggestive
+  clothing as flagged content.
 - The VLM description must weave together **both** what is visually happening
   and what is being said/plot-relevant during the scene (dialogue content from
   the audio pipeline, see §4.2) — not just a visual description. E.g. not just
@@ -145,6 +160,23 @@ CLI only for the initial version. Two primary commands: `scan` and `render`
 (names TBD in implementation), operating on the two-pass model in §2. A review
 UI for inspecting/editing flagged scenes before rendering is a valid future
 addition but explicitly out of scope for v1.
+
+Models are never defaulted in code — the user names every model explicitly on
+the command line. Concrete examples (see README for the full set):
+
+```bash
+# Scan a film (slow; hours on a long feature). All three models are required.
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --base-url http://localhost:1234/v1 \
+  --vlm-model qwen/qwen3.5-9b \
+  --text-model qwen/qwen3.5-9b \
+  --whisper-model mlx-community/whisper-small-mlx
+
+# Render a censored copy from the scan JSON (fast; no models needed).
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
+  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
+  --nudity blur --intimate-scenes blur --foul-language mute --mute-scope word
+```
 
 ## 8. Non-goals / explicit exclusions
 

@@ -1,0 +1,2 @@
+
+I'd like a feature that uses AI voice to replace profanity with equivalent, family-friendly speech. Instead of muting the profanity, replace it. Use the same voice with cloning or whatever and map bad words to good words. May need to replace a whole sentance instead of just the word for some things. Make sure the meaning is still kept. So probably use that qwen model to even DECIDE what to replace and what to replace it with. Like give it the context and the line in question. 

@@ -1,9 +1,9 @@
 """Local cache directory for NuclearCutter sidecar files.
 
 When a video file is on a read-only volume (network drive, external disk),
-we can't write `.fingerprint.json`, `.stage_a_checkpoint.json`, etc. next to
-it.  This module maps those paths to `~/.cache/nuclearcutter/` instead, using
-a hash of the video's absolute path to keep filenames unique and predictable.
+we can't write `.fingerprint.json`, etc. next to it.  This module maps those
+paths to `~/.cache/nuclearcutter/` instead, using a hash of the video's
+absolute path to keep filenames unique and predictable.
 """
 
 from __future__ import annotations

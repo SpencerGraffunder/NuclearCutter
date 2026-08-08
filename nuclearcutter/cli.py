@@ -3,8 +3,19 @@ CLI entrypoint. See docs/SPEC.md section 7 — CLI-only for v1, two primary
 commands mapping to the two-pass architecture.
 
 Usage:
-    nuclearcutter scan MOVIE.mkv [--timestamps-dir timestamps/] [--title "..." --year 2024]
-    nuclearcutter render MOVIE.mkv [--scan MOVIE.json] [--prefs prefs.json]
+    nuclearcutter scan MOVIE.mkv --vlm-model qwen3.5 --text-model qwen3.5 --whisper-model mlx-community/whisper-small-mlx
+    nuclearcutter render MOVIE.mkv [--scan MOVIE.nuclearcutter.json] [--prefs prefs.json]
+
+Example:
+    nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \\
+        --base-url http://localhost:1234/v1 \\
+        --vlm-model qwen3.5 --text-model qwen3.5 \\
+        --whisper-model mlx-community/whisper-small-mlx
+    nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \\
+        --nudity blur --intimate-scenes blur --foul-language mute
+
+Models are never defaulted — scan always requires --vlm-model, --text-model,
+and --whisper-model to be passed explicitly.
 """
 
 from __future__ import annotations
@@ -18,7 +29,6 @@ from nuclearcutter.scan.repo_match import find_matching_scan, spot_check_match
 from nuclearcutter.scan.scanner import scan as scan_pass
 from nuclearcutter.schema import Preferences, ScanResult
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
-from nuclearcutter.detection.transcribe import DEFAULT_MODEL, LOW_MEMORY_MODEL, LOW_MEMORY_VLM, LOW_MEMORY_TEXT
 
 
 def _default_scan_path(video_path: Path) -> Path:
@@ -31,20 +41,29 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(f"error: file not found: {video_path}", file=sys.stderr)
         return 1
 
+    # No hardcoded model defaults: the scan needs an explicit VLM and text
+    # model (and a Whisper model for transcription). Fail fast with a clear
+    # message instead of guessing.
+    missing = []
+    if not args.vlm_model:
+        missing.append("--vlm-model (vision model, e.g. qwen3.5)")
+    if not args.text_model:
+        missing.append("--text-model (text model, e.g. qwen3.5)")
+    if not args.whisper_model:
+        missing.append("--whisper-model (e.g. mlx-community/whisper-small-mlx)")
+    if missing:
+        print(
+            "error: scan requires explicit models — no defaults are built in.\n"
+            "  Provide: " + "\n           ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+
     llm_config = LLMConfig(base_url=args.base_url, vlm_model=args.vlm_model, text_model=args.text_model)
     if args.vision_timeout is not None:
         llm_config.vision_timeout = args.vision_timeout
 
-    if args.low_memory:
-        print("Low-memory mode: using tiny Whisper + 3B LLM models.")
-        if not args.whisper_model:
-            args.whisper_model = LOW_MEMORY_MODEL
-        if args.vlm_model == "qwen2.5-vl:7b":
-            llm_config.vlm_model = LOW_MEMORY_VLM
-        if args.text_model == "qwen2.5:7b":
-            llm_config.text_model = LOW_MEMORY_TEXT
-
-    whisper_model = args.whisper_model or DEFAULT_MODEL
+    whisper_model = args.whisper_model
 
     if not args.force_rescan and args.timestamps_dir:
         timestamps_dir = Path(args.timestamps_dir)
@@ -70,16 +89,24 @@ def cmd_scan(args: argparse.Namespace) -> int:
     def progress(stage: str, detail):
         if detail is None:
             print(f"[{stage}]")
-        elif stage in ("nsfw_stage_a",) and detail:
+        elif stage in ("visual_sweep",) and detail:
             t, total = detail
             print(f"\r[{stage}] {t:.0f}s / {total:.0f}s", end="", flush=True)
-        elif stage == "nsfw_stage_b" and detail:
+        elif stage == "visual_confirm" and detail:
             i, total = detail
             print(f"\r[{stage}] {i} / {total} candidates", end="", flush=True)
 
     print(f"Scanning {video_path.name}...")
     try:
-        result: ScanResult = scan_pass(video_path, llm_config=llm_config, title=args.title, year=args.year, progress_callback=progress, whisper_model=whisper_model)
+        result: ScanResult = scan_pass(
+            video_path,
+            llm_config=llm_config,
+            title=args.title,
+            year=args.year,
+            progress_callback=progress,
+            whisper_model=whisper_model,
+            sweep_interval=args.sweep_interval,
+        )
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -124,6 +151,8 @@ def cmd_render(args: argparse.Namespace) -> int:
             nudity_blur_mute_audio=args.nudity_blur_mute_audio,
             intimate_scenes_action=args.intimate_scenes,
             intimate_scenes_blur_mute_audio=args.intimate_scenes_blur_mute_audio,
+            gore_violence_action=args.gore_violence,
+            gore_violence_blur_mute_audio=args.gore_violence_blur_mute_audio,
             foul_language_action=args.foul_language,
             foul_language_mute_scope=args.mute_scope,
         )
@@ -146,13 +175,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--force-rescan", action="store_true", help="Skip the shared-repo match check")
     p_scan.add_argument("--title", help="Movie title, stored in the scan file for reference")
     p_scan.add_argument("--year", type=int, help="Release year, stored in the scan file for reference")
-    p_scan.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible API base URL (Ollama/LM Studio)")
-    p_scan.add_argument("--vlm-model", default="qwen2.5-vl:7b", help="Vision model name")
-    p_scan.add_argument("--text-model", default="qwen2.5:7b", help="Text model name for profanity context checks")
-    p_scan.add_argument("--whisper-model", help=f"Whisper model for transcription (default: {DEFAULT_MODEL})")
-    p_scan.add_argument("--low-memory", action="store_true", help="Use smallest models (tiny Whisper + 3B LLMs) for ≤16 GB RAM")
+    p_scan.add_argument("--base-url", default="http://localhost:1234/v1", help="OpenAI-compatible API base URL (Ollama/LM Studio)")
+    p_scan.add_argument("--vlm-model", help="Vision model name (required, e.g. qwen3.5)")
+    p_scan.add_argument("--text-model", help="Text model name for profanity context checks (required, e.g. qwen3.5)")
+    p_scan.add_argument("--whisper-model", help="Whisper model for transcription (required, e.g. mlx-community/whisper-small-mlx)")
     p_scan.add_argument("--vision-timeout", type=int, default=None,
                         help="Timeout in seconds for VLM vision requests (default: 300)")
+    p_scan.add_argument("--sweep-interval", type=float, default=None,
+                        help="Seconds between sampled frames in the full-film VLM sweep "
+                             "(default: 5). Smaller catches shorter scenes but makes more "
+                             "VLM calls; larger is faster but can miss brief flashes.")
     p_scan.set_defaults(func=cmd_scan)
 
     p_render = sub.add_parser("render", help="Render a cleaned copy of a movie file using a scan JSON + preferences.")
@@ -164,6 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_render.add_argument("--nudity-blur-mute-audio", action="store_true")
     p_render.add_argument("--intimate-scenes", choices=["blur", "none"], default="blur")
     p_render.add_argument("--intimate-scenes-blur-mute-audio", action="store_true")
+    p_render.add_argument("--gore-violence", choices=["blur", "none"], default="blur")
+    p_render.add_argument("--gore-violence-blur-mute-audio", action="store_true")
     p_render.add_argument("--foul-language", choices=["mute", "none"], default="mute")
     p_render.add_argument("--mute-scope", choices=["word", "utterance"], default="word")
     p_render.add_argument("--font", help="Path to a .ttf font file for blur overlay text (optional)")
