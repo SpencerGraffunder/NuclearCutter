@@ -158,8 +158,13 @@ class Preferences:
     gore_violence_action: Action = Action.BLUR
     gore_violence_blur_mute_audio: bool = False
 
+    # Multiplier on blur intensity. 1.0 = the standard intense boxblur
+    # (radius 30, 3 passes); 2.0 = twice as extreme (radius 60, 6 passes).
+    blur_strength: float = 1.0
+
     foul_language_action: Action = Action.MUTE
     foul_language_mute_scope: str = "word"  # "word" or "utterance"
+    foul_language_mute_padding: float = 0.5  # seconds of extra mute before/after each flagged word
 
     def action_for(self, category: Category) -> Action:
         if category == Category.NUDITY:
@@ -193,6 +198,8 @@ class Preferences:
             intimate_scenes_blur_mute_audio=d.get("intimate_scenes_blur_mute_audio", False),
             gore_violence_action=Action(d.get("gore_violence_action", "blur")),
             gore_violence_blur_mute_audio=d.get("gore_violence_blur_mute_audio", False),
+            blur_strength=float(d.get("blur_strength", 1.0)),
             foul_language_action=Action(d.get("foul_language_action", "mute")),
             foul_language_mute_scope=d.get("foul_language_mute_scope", "word"),
+            foul_language_mute_padding=float(d.get("foul_language_mute_padding", 0.5)),
         )

@@ -89,12 +89,12 @@ def test_language_mute_ranges_convert_to_segment_relative_time():
         word="damn", transcript_source="whisper", llm_confirmed=True,
     )
     scan = ScanResult(schema_version=1, identity=identity, visual_detections=[], language_detections=[ld])
+    # Default padding is 0.5s each side: (70-0.5, 70.3+0.5) -> (69.5, 70.8)
     prefs = Preferences(foul_language_action=Action.MUTE, foul_language_mute_scope="word")
 
     ranges = _language_mute_ranges_within(scan, prefs, seg_start=60.0, seg_end=100.0)
-    assert ranges == [(10.0, 10.299999999999997)] or (
-        abs(ranges[0][0] - 10.0) < 1e-6 and abs(ranges[0][1] - 10.3) < 1e-6
-    )
+    assert abs(ranges[0][0] - 9.5) < 1e-6  # (69.5 - 60)
+    assert abs(ranges[0][1] - 10.8) < 1e-6  # (70.8 - 60)
 
 
 def test_language_mute_respects_utterance_scope():
@@ -107,8 +107,25 @@ def test_language_mute_respects_utterance_scope():
     prefs = Preferences(foul_language_action=Action.MUTE, foul_language_mute_scope="utterance")
 
     ranges = _language_mute_ranges_within(scan, prefs, seg_start=60.0, seg_end=100.0)
-    assert abs(ranges[0][0] - 9.0) < 1e-6
-    assert abs(ranges[0][1] - 11.0) < 1e-6
+    # Utterance (69, 71) padded 0.5 each side -> (68.5, 71.5)
+    assert abs(ranges[0][0] - 8.5) < 1e-6
+    assert abs(ranges[0][1] - 11.5) < 1e-6
+
+
+def test_language_mute_padding_clamped_to_segment():
+    """Padding must not push a mute outside this segment's bounds."""
+    identity = make_identity(100.0)
+    ld = LanguageDetection(
+        start=2.0, end=2.3, utterance_start=1.0, utterance_end=3.0,
+        word="damn", transcript_source="whisper", llm_confirmed=True,
+    )
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[], language_detections=[ld])
+    prefs = Preferences(foul_language_action=Action.MUTE, foul_language_mute_scope="word")
+
+    ranges = _language_mute_ranges_within(scan, prefs, seg_start=0.0, seg_end=5.0)
+    # (2-0.5, 2.3+0.5) -> (1.5, 2.8), both inside the segment
+    assert abs(ranges[0][0] - 1.5) < 1e-6
+    assert abs(ranges[0][1] - 2.8) < 1e-6
 
 
 def test_unconfirmed_language_detection_ignored():
@@ -122,6 +139,22 @@ def test_unconfirmed_language_detection_ignored():
 
     ranges = _language_mute_ranges_within(scan, prefs, seg_start=60.0, seg_end=100.0)
     assert ranges == []
+
+
+def test_language_mute_zero_padding_disabled():
+    """Padding can be set to 0 to mute only the exact word window."""
+    identity = make_identity(100.0)
+    ld = LanguageDetection(
+        start=70.0, end=70.3, utterance_start=69.0, utterance_end=71.0,
+        word="damn", transcript_source="whisper", llm_confirmed=True,
+    )
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[], language_detections=[ld])
+    prefs = Preferences(foul_language_action=Action.MUTE, foul_language_mute_scope="word",
+                        foul_language_mute_padding=0.0)
+
+    ranges = _language_mute_ranges_within(scan, prefs, seg_start=60.0, seg_end=100.0)
+    assert abs(ranges[0][0] - 10.0) < 1e-6
+    assert abs(ranges[0][1] - 10.3) < 1e-6
 
 
 def test_foul_language_action_none_produces_no_mutes():

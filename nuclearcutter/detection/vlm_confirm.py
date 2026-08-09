@@ -51,22 +51,26 @@ MAX_VLM_RETRIES = 3
 # Seconds between sampled frames in the full-film sweep. Smaller = catches
 # shorter scenes but makes more VLM calls (each call reviews SWEEP_FRAMES_PER_CALL
 # frames). 5.0s catches any scene that lasts >= ~5 seconds.
-DEFAULT_SWEEP_INTERVAL_SECONDS = 5.0
+DEFAULT_SWEEP_INTERVAL_SECONDS = 2.0
 DEFAULT_SWEEP_INTERVAL = DEFAULT_SWEEP_INTERVAL_SECONDS
 
 # How many sampled frames go into a single batched VLM review call. Kept at 4:
 # this is the batch size that proved reliable and accurate with local VLMs.
 SWEEP_FRAMES_PER_CALL = 4
 
-# When merging adjacent flagged batch windows into a candidate range, allow this
-# much of a gap before splitting into a separate range.
-SWEEP_MERGE_GAP_SECONDS = 20.0
+# Padding and merge distance are DERIVED from the sweep interval, not hardcoded:
+# frames are sampled every `interval` seconds, and any sampled frame that was
+# NOT in a flagged batch is a verified-clean frame we must never blur past. So
+# we pad by exactly one interval (reaching up to, not past, the next clean
+# sample), and merge two flagged batches if they're within one interval of each
+# other (i.e. adjacent bad frames whose padding just touches). This keeps the
+# blur window tight around actual content and never extends over clean footage.
+def _padding_for_interval(interval: float) -> float:
+    return interval
 
-# Padding added to BOTH ends of a merged candidate range before confirmation.
-# Generous on purpose: the goal is to never clip a scene, not to minimize
-# how much gets blurred.
-SWEEP_PADDING_SECONDS = 10.0
 
+def _merge_gap_for_interval(interval: float) -> float:
+    return interval
 UNIFIED_SWEEP_PROMPT = """You are reviewing {n} sampled frames from a movie, shown in \
 chronological order, to help a parental-content-filtering tool decide what is in this batch.
 
@@ -167,9 +171,21 @@ class VisualSweepDetector:
     def __init__(self, client: LLMClient):
         self.client = client
 
-    def sweep(self, video_path: Path, sample_interval: float = DEFAULT_SWEEP_INTERVAL_SECONDS) -> list[SweepRange]:
+    def sweep(
+        self,
+        video_path: Path,
+        sample_interval: float = DEFAULT_SWEEP_INTERVAL_SECONDS,
+        on_flagged_window=None,
+        on_progress=None,
+    ) -> list[SweepRange]:
         """Sample the whole film; return merged, padded candidate ranges that contain
-        nudity, intimate scenes, or gore/violence."""
+        nudity, intimate scenes, or gore/violence.
+
+        `on_flagged_window(start, end, category, confidence)` is called with each
+        raw flagged batch window as it's found (for live status/markers).
+        `on_progress(done, total)` is called after each batch (for live progress).
+        Both are optional.
+        """
         duration = probe_duration(video_path)
         flagged_windows: list[tuple[float, float, Category, str, float]] = []
         tmp_dir = Path(tempfile.mkdtemp(prefix="cleancut_sweep_"))
@@ -195,15 +211,25 @@ class VisualSweepDetector:
 
                 if result and result.get("contains_flagged_content"):
                     category = _category_from_str(result.get("category"))
+                    confidence = float(result.get("confidence", 0.5))
                     flagged_windows.append((
                         batch_ts[0],
                         batch_ts[-1],
                         category,
                         result.get("description", ""),
-                        float(result.get("confidence", 0.5)),
+                        confidence,
                     ))
+                    if on_flagged_window:
+                        on_flagged_window(
+                            start=batch_ts[0],
+                            end=batch_ts[-1],
+                            category=category.value,
+                            confidence=confidence,
+                        )
 
                 if done := i + len(batch_ts):
+                    if on_progress:
+                        on_progress(done, len(timestamps))
                     if done % 100 == 0 or done >= len(timestamps):
                         print(
                             f"[sweep] {done} / {len(timestamps)} frames",
@@ -212,7 +238,9 @@ class VisualSweepDetector:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        return _merge_flagged_windows(flagged_windows, duration)
+        padding = _padding_for_interval(sample_interval)
+        merge_gap = _merge_gap_for_interval(sample_interval)
+        return _merge_flagged_windows(flagged_windows, duration, padding=padding, merge_gap=merge_gap)
 
     def _query_sweep_batch(self, frame_paths: list[Path]) -> dict | None:
         """Ask the VLM whether a batch contains ANY flagged content (single verdict)."""
@@ -308,8 +336,15 @@ def _arange(start: float, stop: float, step: float) -> list[float]:
 def _merge_flagged_windows(
     flagged_windows: list[tuple[float, float, Category, str, float]],
     duration: float,
+    padding: float,
+    merge_gap: float,
 ) -> list[SweepRange]:
-    """Merge adjacent flagged batch windows into padded candidate ranges."""
+    """Merge adjacent flagged batch windows into padded candidate ranges.
+
+    `padding` is added to both ends of a merged range (derived from the sweep
+    interval so it reaches up to, not past, the next verified-clean sampled
+    frame). `merge_gap` is how close two flagged windows must be to merge.
+    """
     if not flagged_windows:
         return []
     flagged_windows = sorted(flagged_windows, key=lambda w: w[0])
@@ -321,15 +356,15 @@ def _merge_flagged_windows(
     def _flush():
         nonlocal start, end, category, description, peak_confidence
         ranges.append(SweepRange(
-            start=max(0.0, start - SWEEP_PADDING_SECONDS),
-            end=min(duration, end + SWEEP_PADDING_SECONDS),
+            start=max(0.0, start - padding),
+            end=min(duration, end + padding),
             category=category,
             description=description,
             confidence=peak_confidence,
         ))
 
     for w_start, w_end, w_cat, w_desc, w_conf in flagged_windows[1:]:
-        if w_start - end <= SWEEP_MERGE_GAP_SECONDS:
+        if w_start - end <= merge_gap:
             end = max(end, w_end)
             peak_confidence = max(peak_confidence, w_conf)
             if not description and w_desc:

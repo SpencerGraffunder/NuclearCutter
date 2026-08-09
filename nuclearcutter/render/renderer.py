@@ -17,7 +17,9 @@ reasonable future optimization (see README known-limitations).
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +105,7 @@ def render(
     prefs: Preferences,
     output_path: Path = None,
     font_path: str = None,
+    status_path: Path | str = None,
 ) -> Path:
     output_path = output_path or build_output_path(input_path)
     stream_info = probe_streams(input_path)
@@ -119,16 +122,58 @@ def render(
 
     timeline = plan_timeline(scan, prefs, duration)
 
+    # Optional live status for `nuclearcutter`'s inline TUI (see tui.py).
+    status = None
+    if status_path:
+        from nuclearcutter.utils.scan_status import ScanStatus, _now_iso
+
+        status = ScanStatus(
+            video=Path(input_path).name,
+            duration_seconds=duration,
+            sweep_interval=None,
+            pid=os.getpid(),
+            started_at=_now_iso(),
+            phase="render",
+            frames_total=len(timeline),
+        )
+        # Seed the timeline markers with the detections that will be applied.
+        for d in scan.visual_detections:
+            status.add_visual_detection(d.category, d.start, d.end, d.description or "", d.confidence)
+        for d in scan.language_detections:
+            if d.llm_confirmed:
+                status.add_language_detection(d.word, d.start, d.end, d.utterance_start, d.utterance_end)
+        status_path = Path(status_path)
+
+    def _write_status():
+        if status is not None:
+            try:
+                status.write(status_path)
+            except Exception as exc:
+                print(f"warning: status write failed: {exc}", file=sys.stderr)
+
     with tempfile.TemporaryDirectory(prefix="cleancut_render_") as tmp:
         tmp_dir = Path(tmp)
 
         video_files, audio_files = _render_track_segments(
             input_path, timeline, scan, prefs, width, height, fps, tmp_dir, font_path, video_encoder,
+            on_segment=(lambda i, total, seg_start: (
+                status and (status.set_phase("render"),
+                            setattr(status, "frames_done", i),
+                            setattr(status, "position_seconds", seg_start),
+                            _write_status())
+            )),
         )
-
+        if status is not None:
+            status.set_phase("concat"); _write_status()
         final_video = _concat_track(video_files, tmp_dir, "video_concat.mp4")
         final_audio = _concat_track(audio_files, tmp_dir, "audio_concat.m4a")
+        if status is not None:
+            status.set_phase("mux"); _write_status()
         _mux_final_output(final_video, final_audio, output_path)
+        if status is not None:
+            status.set_phase("done")
+            status.frames_done = len(timeline)
+            _write_status()
 
     return output_path
 
@@ -180,15 +225,28 @@ def _ffmpeg_has_filter(filter_name: str) -> bool:
     return filter_name in _FFMPEG_FILTERS
 
 
-def _build_blur_filter(text: str, font_path: str | None) -> str:
+def _build_blur_filter(text: str, font_path: str | None, strength: float = 1.0) -> str:
     """Return the -vf filter chain for a blur segment.
 
     We always apply the intense boxblur. The summary-text overlay is NOT drawn
     here: this ffmpeg build lacks the drawtext filter (no freetype), so text is
     composited separately via a PIL-generated PNG + the overlay filter (see
     _make_overlay_png / _extract_video_segment's overlay_path).
+
+    `strength` scales the blur intensity: boxblur's luma_radius (how far each
+    pass spreads) and luma_power (how many passes) are both multiplied. 1.0 =
+    the standard radius 30 / 3 passes; 2.0 = twice as extreme (radius 60 /
+    6 passes). The radius is clamped so it never exceeds the frame plane size.
     """
-    filters = ["boxblur=luma_radius=30:luma_power=3:chroma_radius=30:chroma_power=3"]
+    strength = max(0.1, float(strength))
+    radius = int(round(30 * strength))
+    power = max(1, int(round(3 * strength)))
+    # boxblur radius max is min(luma_w/2, luma_h/2); clamp to a safe cap.
+    radius = min(radius, 200)
+    filters = [
+        f"boxblur=luma_radius={radius}:luma_power={power}:"
+        f"chroma_radius={radius}:chroma_power={power}"
+    ]
     return ",".join(filters)
 
 
@@ -262,17 +320,20 @@ def _render_track_segments(
     tmp_dir: Path,
     font_path: str,
     video_encoder: str,
+    on_segment=None,
 ) -> tuple[list[Path], list[Path]]:
     video_files: list[Path] = []
     audio_files: list[Path] = []
 
     for i, seg in enumerate(timeline):
+        if on_segment:
+            on_segment(i, len(timeline), seg.start)
         v_out = tmp_dir / f"v_{i:04d}.mp4"
         a_out = tmp_dir / f"a_{i:04d}.m4a"
 
         if seg.action is None:
             output_duration = seg.source_duration
-            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_encoder, video_filter=None)
+            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_encoder, video_filter=None, fps=fps)
             _extract_audio_segment(
                 input_path, seg.start, output_duration, a_out,
                 mute_ranges=_language_mute_ranges_within(scan, prefs, seg.start, seg.end),
@@ -280,14 +341,14 @@ def _render_track_segments(
 
         elif seg.action == Action.BLUR:
             output_duration = seg.source_duration
-            blur_filter = _build_blur_filter(seg.description, font_path)
+            blur_filter = _build_blur_filter(seg.description, font_path, strength=getattr(prefs, "blur_strength", 1.0))
             overlay_path: Path | None = None
             if seg.description.strip() and _ffmpeg_has_filter("overlay"):
                 overlay_path = tmp_dir / f"overlay_{i:04d}.png"
                 _make_overlay_png(seg.description, width, height, font_path, overlay_path)
             _extract_video_segment(
                 input_path, seg.start, output_duration, v_out, video_encoder,
-                video_filter=blur_filter, overlay_path=overlay_path,
+                video_filter=blur_filter, fps=fps, overlay_path=overlay_path,
             )
             if seg.audio_muted:
                 _silent_audio(output_duration, a_out)
@@ -305,10 +366,17 @@ def _render_track_segments(
 
 def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg_start: float, seg_end: float) -> list[tuple[float, float]]:
     """Foul-language mute windows that fall within [seg_start, seg_end), converted to
-    times relative to the segment's own start (0-based) for use in a per-segment audio filter."""
+    times relative to the segment's own start (0-based) for use in a per-segment audio filter.
+
+    Each window is padded by `prefs.foul_language_mute_padding` on both sides so the
+    onset/offset of the flagged word is fully covered (whisper's word timestamps can be
+    tight, letting a word's leading/trailing audio bleed through the mute). The pad is
+    clamped to the segment bounds so a mute never reaches outside this segment.
+    """
     if prefs.foul_language_action != Action.MUTE:
         return []
 
+    pad = max(0.0, float(getattr(prefs, "foul_language_mute_padding", 0.5)))
     ranges = []
     for d in scan.language_detections:
         if not d.llm_confirmed:
@@ -318,8 +386,9 @@ def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg_start
         else:
             m_start, m_end = d.start, d.end
 
-        overlap_start = max(m_start, seg_start)
-        overlap_end = min(m_end, seg_end)
+        # Padded window, clamped to this segment's bounds.
+        overlap_start = max(m_start - pad, seg_start)
+        overlap_end = min(m_end + pad, seg_end)
         if overlap_start < overlap_end:
             ranges.append((overlap_start - seg_start, overlap_end - seg_start))
     return ranges
@@ -345,9 +414,10 @@ def _wrap_for_display(text: str, max_chars_per_line: int = 40) -> str:
 
 def _extract_video_segment(
     input_path: Path, start: float, duration: float, out_path: Path,
-    video_encoder: str, video_filter: str | None, overlay_path: Path | None = None,
+    video_encoder: str, video_filter: str | None, fps: float,
+    overlay_path: Path | None = None,
 ) -> None:
-    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", str(input_path)]
+    cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-ss", str(start), "-i", str(input_path)]
     if overlay_path is not None:
         # Composite a pre-rendered text overlay (PIL PNG) on top of the blurred
         # video. -loop 1 turns the still PNG into a stream; -t is given as an
@@ -362,14 +432,21 @@ def _extract_video_segment(
         cmd += ["-filter_complex", fc, "-map", "[v]"]
     elif video_filter:
         cmd += ["-vf", video_filter]
-    # Use the source-codec-preserving encoder (libx265 for HEVC input, libx264 for
-    # H.264, etc.) so output size tracks the source family. CRF 17 ≈ visually
-    # lossless; -tag:v hvc1 keeps HEVC playable in QuickTime/Apple tooling.
-    # -t here is an output option bounding the segment to `duration`.
-    cmd += ["-t", str(duration), "-an", "-c:v", video_encoder, "-crf", "17", "-preset", "medium"]
+    # Encode at a fixed frame rate and a shared, whole-number timebase so every
+    # segment lands on the same timestamp grid. Without this, independently
+    # encoded segments have slightly different timebases/timings, and the concat
+    # produces timestamp discontinuities at each boundary — which VLC reads as a
+    # "new file" (title + black flash). -r + -vsync cfr force constant frames;
+    # -video_track_timescale pins the MP4 timebase so concat joins cleanly.
+    cmd += [
+        "-t", str(duration), "-an",
+        "-r", f"{fps:.6f}", "-vsync", "cfr",
+        "-video_track_timescale", "15360",
+        "-c:v", video_encoder, "-crf", "17", "-preset", "medium",
+    ]
     if video_encoder == "libx265":
         cmd += ["-tag:v", "hvc1"]
-    cmd += [str(out_path)]
+    cmd += ["-movflags", "+faststart", str(out_path)]
     subprocess.run(cmd, **_FFMPEG_KW)
 
 
@@ -403,6 +480,7 @@ def _concat_track(files: list[Path], tmp_dir: Path, out_name: str) -> Path:
         [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-fflags", "+genpts",
             "-c", "copy",
             str(out_path),
         ],
@@ -415,9 +493,17 @@ def _mux_final_output(video_path: Path, audio_path: Path, output_path: Path) -> 
     subprocess.run(
         [
             "ffmpeg", "-y",
+            "-fflags", "+genpts",
             "-i", str(video_path), "-i", str(audio_path),
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy", "-c:a", "copy",
+            # Normalize timestamps so there are no gaps/jumps across the concat
+            # boundaries. `-avoid_negative_ts make_zero` shifts the earliest
+            # timestamp to zero, and `+faststart` moves the moov atom to the
+            # front so players open immediately. Together these stop VLC from
+            # re-detecting the stream (title + black flash) at each blur cut.
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
             str(output_path),
         ],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,

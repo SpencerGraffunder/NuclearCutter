@@ -10,6 +10,9 @@ dependencies = [
     "Pillow>=10.0",
     "ImageHash>=4.3",
     "mlx-whisper>=0.4",
+    "mlx-vlm>=0.6.10",
+    "rich>=13.0",
+    "psutil>=5.9",
     "pysrt>=1.1",
 ]
 

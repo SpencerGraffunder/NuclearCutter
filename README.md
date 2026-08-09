@@ -38,23 +38,31 @@ You can re-render the same scan with different preferences without rescanning
 | Nudity | `blur`, `none` | blur = intense box blur over the video; audio mute during blur is a separate toggle |
 | Intimate scenes | `blur`, `none` | same as above; distinct category from nudity (e.g. a clothed sex scene) |
 | Gore / violence | `blur`, `none` | graphic gore (blood, wounds, mutilation) and graphic violence (brutal fighting, murder, torture) |
-| Foul language | `mute`, `none` | mutes audio only; defaults to muting just the flagged word, configurable to the whole sentence/utterance |
+| Foul language | `mute`, `none` | mutes audio only; defaults to muting just the flagged word (plus a small padding), configurable to the whole sentence/utterance |
 
 **`blur`** applies an intense box blur to the flagged video range and overlays a short, clean, AI-generated summary so you keep story context. This keeps the scene intact and less disruptive than replacing the footage entirely, while still obscuring the flagged content. Audio can be muted separately for each blur category using `--nudity-blur-mute-audio`, `--intimate-scenes-blur-mute-audio`, and `--gore-violence-blur-mute-audio`.
+
+Blur intensity is tunable with `--blur-strength N` (or `blur_strength` in
+`config.toml`): `1.0` is the standard intense blur, `2.0` is twice as extreme
+(bigger radius + more passes), `0.5` is lighter.
+
+Foul-language muting pads each flagged word by `--mute-padding` seconds (default 0.5) on both sides, so the word's onset/offset audio doesn't leak through — whisper's word timestamps can be tight.
 
 ## Setup
 
 ### Requirements
 
-- macOS on Apple Silicon (M-series) recommended — `mlx-whisper` is
-  MLX-accelerated and Apple-Silicon-specific. The rest of the pipeline is
+- macOS on Apple Silicon (M-series) recommended — `mlx-whisper` and `mlx-vlm`
+  are MLX-accelerated and Apple-Silicon-specific. The rest of the pipeline is
   plain Python/ffmpeg and should run elsewhere, but isn't the primary target.
 - Python 3.10+
 - `ffmpeg` and `ffprobe` on your PATH
-- A local OpenAI-compatible inference server — **Ollama** or **LM Studio**,
-  running both a vision-capable model and a text model (see below). NuclearCutter
-  talks to it over the standard `/v1/chat/completions` API, so any
-  OpenAI-compatible local server works, not just these two.
+- An inference backend. The default backend is **mlx-vlm**, which NuclearCutter
+  starts for you automatically (a local MLX vision model served over an
+  OpenAI-compatible `/v1` API on port 1234). You can also point it at any
+  OpenAI-compatible local server you run yourself (`standalone` backend — LM
+  Studio, Ollama, or a manually started mlx-vlm server) — see "Configuration"
+  below.
 
 ### Install
 
@@ -78,40 +86,75 @@ Or:
 ./.venv/bin/nuclearcutter scan "/path/to/Movie.mkv"
 ```
 
-### Suggested models
+### Configuration (config.toml)
 
-NuclearCutter needs two local models available through your OpenAI-compatible
-server. For an 8GB VRAM Apple Silicon setup, use a single recommended vision+
-text model pair:
-
-- `qwen3.5:4b-mlx` — the one recommended model for this workflow.
-  - vision-language capable for scene confirmation and descriptions
-  - 64K context is sufficient for the scan and render prompts used here
-  - the smallest practical MLX model for stable local performance on 8GB
-
-Pull it in Ollama:
+Settings live in a single `config.toml` file in the project root
+(`Documents/NuclearCutter/config.toml` on this machine) — plain text, editable
+in any editor (TextEdit / Notepad / VS Code). A fully commented template is
+created for you; every key is optional and has a sane default. After you set it
+once, the only thing you pass on the command line is the movie path:
 
 ```bash
-ollama pull qwen3.5:4b-mlx
-ollama serve
+nuclearcutter scan  "/path/to/Movie.mkv"
+nuclearcutter render "/path/to/Movie.mkv"
 ```
 
-Specify the model used during the scan step with `--vlm-model` and
-`--text-model`. For example:
+The default config file looks like this (all commented-out = defaults):
 
-```bash
-nuclearcutter scan "/path/to/Movie.mkv" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen3.5:4b-mlx \
-  --text-model qwen3.5:4b-mlx \
-  --whisper-model mlx-community/whisper-small-mlx
+```toml
+# ---- Inference backend -------------------------------------------------
+# model_backend = "mlx-vlm"   # "mlx-vlm" (auto-start its own server) | "standalone"
+# model_path = "/Users/<you>/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit"
+# base_url = "http://localhost:1234/v1"
+
+# ---- Models ------------------------------------------------------------
+# vlm_model = "Qwen3.5-9B-MLX-4bit"
+# text_model = "Qwen3.5-9B-MLX-4bit"
+# whisper_model = "mlx-community/whisper-small-mlx"
+
+# ---- Scan tuning -------------------------------------------------------
+# sweep_interval = 5.0
+# vision_timeout = 8000
+# timestamps_dir = ""
+
+# ---- Render preferences ------------------------------------------------
+# nudity = "blur"                 # "blur" | "none"
+# nudity_blur_mute_audio = false
+# intimate_scenes = "blur"
+# intimate_scenes_blur_mute_audio = false
+# gore_violence = "blur"
+# gore_violence_blur_mute_audio = false
+# foul_language = "mute"          # "mute" | "none"
+# mute_scope = "word"             # "word" | "utterance"
+# font = ""
 ```
 
-NuclearCutter has **no built-in model defaults** — you must always pass
-`--vlm-model`, `--text-model` (and `--whisper-model` for the scan) explicitly,
-so it only ever uses the models you name. Point it at your server with
-`--base-url` (e.g. LM Studio's `http://localhost:1234/v1` or Ollama's
-`http://localhost:11434/v1`).
+Use a different config file with `nuclearcutter --config /path/to/config.toml ...`.
+Every setting can still be overridden per-run with a CLI flag — see `--help`.
+
+### The mlx-vlm backend (default)
+
+The default backend is **mlx-vlm**, a fast MLX vision-language model server that
+runs entirely on your Mac's GPU. NuclearCutter:
+
+1. checks it's installed (`pip install mlx-vlm`; note there is no Homebrew
+   formula for mlx-vlm, so it's pip-installed into your venv),
+2. starts its own server (`python -m mlx_vlm.server --port 1234 --model <path>`,
+   with 4-bit KV-cache quantization) pointed at your `model_path`,
+3. waits for it to come up, runs the scan against it, and shuts it down when
+   the scan finishes.
+
+The default `model_path` is the same Qwen MLX 4-bit model that the project was
+previously using through LM Studio:
+`/Users/<you>/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit`. If
+your model lives elsewhere, set `model_path` in `config.toml`. Images sent to
+the model are downscaled (~480px) before upload, which is the single biggest
+speed lever in the whole pipeline.
+
+If you'd rather run your own server (LM Studio, Ollama, or a manual
+`python -m mlx_vlm.server ...`), set `model_backend = "standalone"` in
+`config.toml` and point `base_url` at it. NuclearCutter will use it without
+starting or stopping anything.
 
 ### Full-film VLM sweep (the only visual detector)
 
@@ -153,79 +196,86 @@ point is the *codec* is preserved, not that output is bit-identical.)
 
 ## Usage
 
-The two commands, at a glance (models are required — see Examples below):
+The two commands, at a glance (settings come from `config.toml` — see above):
 
 ```bash
 # Scan a movie (slow — hours to a day+ depending on length/hardware)
-nuclearcutter scan "/path/to/Movie.mkv" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen3.5 \
-  --text-model qwen3.5 \
-  --whisper-model mlx-community/whisper-small-mlx
+nuclearcutter scan "/path/to/Movie.mkv"
 
 # Render with your preferred actions per category
-nuclearcutter render "/path/to/Movie.mkv" \
-  --scan "/path/to/Movie.nuclearcutter.json" \
-  --nudity blur \
-  --nudity-blur-mute-audio \
-  --intimate-scenes blur \
-  --intimate-scenes-blur-mute-audio \
-  --foul-language mute \
-  --mute-scope word
+nuclearcutter render "/path/to/Movie.mkv"
 ```
 
 This produces `/path/to/Movie_cleaned.mkv`.
 
+## Live dashboard (integrated into scan/render)
+
+Both `scan` and `render` show a **live TUI dashboard** while they run — no
+separate command needed. It displays a film timeline with markers for detected
+visual/language cut locations, a current-position cursor, a time estimate, and
+live CPU/RAM (GPU/temps when passwordless `sudo powermetrics` is available;
+otherwise shown as n/a). The dashboard appears automatically when you run the
+command in a terminal; pass `--no-tui` to get plain text output instead (also
+auto-disabled when stdout is piped/redirected).
+
+The dashboard also streams a live status JSON to a temp file (phase, position,
+and every detection as it's found). You can watch a scan started elsewhere with:
+
+```bash
+nuclearcutter tui --status /path/to/Movie.nuclearcutter.status.json
+# or attach to an older scan's log (no status file):
+nuclearcutter tui --log /path/to/scan.log
+```
+
+With no `--status`/`--log`, `nuclearcutter tui` auto-detects the most recent
+status file or scan log.
+
 ## Examples
 
-All examples below are complete, runnable commands. Swap in your own video
-path, model names, and base URL. **There are no built-in model defaults** —
-every scan must name `--vlm-model`, `--text-model`, and `--whisper-model`
-explicitly.
+All examples below are complete, runnable commands — with `config.toml` set up
+once, none of them need model flags. CLI flags shown override the config for
+that single run.
 
-### Example 1 — Full scan + render (LM Studio, Apple Silicon)
+### Example 1 — Full scan + render (mlx-vlm backend, defaults)
 
-The most common case: a local movie, LM Studio serving on the default port,
-using a single `qwen3.5` model for both vision and text.
+The most common case: a local movie, config.toml set, default mlx-vlm backend
+auto-starting on port 1234.
 
 ```bash
 # 1. Scan (slow — run it and walk away)
-nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen/qwen3.5-9b \
-  --text-model qwen/qwen3.5-9b \
-  --whisper-model mlx-community/whisper-small-mlx
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
 
 # 2. Render the censored copy (fast)
-nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
-  --nudity blur \
-  --nudity-blur-mute-audio \
-  --intimate-scenes blur \
-  --intimate-scenes-blur-mute-audio \
-  --foul-language mute \
-  --mute-scope word
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
 ```
 
 Result: `/Volumes/Media/Movies/The.Martian.2015.1080p_cleaned.mkv` (original
 left untouched).
 
-### Example 2 — Ollama instead of LM Studio
+### Example 2 — Standalone backend (LM Studio / Ollama)
 
-Same workflow, different server. Ollama's default port is `11434`, and its
-model names use the `name:tag` form.
+Run your own server instead of letting NuclearCutter start one. Set
+`model_backend = "standalone"` in `config.toml` (and `base_url` to your
+server), then start it:
 
 ```bash
-# Make sure the model is pulled first
+# LM Studio serving on port 1234 (default) — just open LM Studio and load the model
+# OR Ollama (different port + model names):
 ollama pull qwen3.5:7b
 ollama serve
+```
 
+```bash
 nuclearcutter scan "/Users/you/Movies/The.Martian.2015.1080p.mkv" \
   --base-url http://localhost:11434/v1 \
   --vlm-model qwen3.5:7b \
   --text-model qwen3.5:7b \
   --whisper-model mlx-community/whisper-large-v3-turbo
 ```
+
+(Here the flags override `config.toml` just for this run — with
+`model_backend = "standalone"` set in the config, the `--base-url`/model flags
+are the only ones needed each time.)
 
 ### Example 3 — Re-render an old scan with different preferences (no rescan)
 
@@ -264,14 +314,10 @@ reuses the result.
 
 ```bash
 nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen/qwen3.5-9b \
-  --text-model qwen/qwen3.5-9b \
-  --whisper-model mlx-community/whisper-small-mlx \
   --timestamps-dir ~/Code/nuclearcutter/timestamps
 ```
 
-Note: `--timestamps-dir` still needs the models for the VLM spot-check.
+(Or set `timestamps_dir` in `config.toml` and just pass the movie path.)
 
 ### Example 6 — Write the scan JSON to a specific location
 
@@ -280,11 +326,7 @@ On a read-only or shared drive you can send it somewhere writable instead.
 
 ```bash
 nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --output "$HOME/scans/The.Martian.2015.1080p.json" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen/qwen3.5-9b \
-  --text-model qwen/qwen3.5-9b \
-  --whisper-model mlx-community/whisper-small-mlx
+  --output "$HOME/scans/The.Martian.2015.1080p.json"
 ```
 
 ### Using the shared timestamps repo
@@ -294,10 +336,6 @@ see fingerprinting below), you can skip the expensive scan entirely:
 
 ```bash
 nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen/qwen3.5-9b \
-  --text-model qwen/qwen3.5-9b \
-  --whisper-model mlx-community/whisper-small-mlx \
   --timestamps-dir ./timestamps
 ```
 

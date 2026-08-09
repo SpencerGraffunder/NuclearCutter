@@ -97,9 +97,24 @@ blind fast pass can't be the gatekeeper if it can silently drop real content.
   dialogue that happens during the scene, since the whole point of the `blur`
   card is that the viewer doesn't miss story content.
 - Model access is via an **OpenAI-compatible chat completions API**
-  (`/v1/chat/completions` with image content blocks), so the user can point
-  NuclearCutter at a local Ollama or LM Studio server by base URL. No hard dependency
-  on a specific inference backend. See README for suggested models.
+  (`/v1/chat/completions` with image content blocks). Two backends, one API:
+  - **`mlx-vlm` (default):** NuclearCutter spawns its own
+    `python -m mlx_vlm.server` on `localhost:1234`, pre-loads the configured
+    MLX model (a Qwen MLX 4-bit model, defaulting to the same filesystem path
+    the project previously used through LM Studio), and serves it in-process.
+    Speed knobs: images are downscaled (~480px) before upload — the single
+    biggest latency lever (~6x) — plus 4-bit KV-cache quantization and
+    continuous batching (already on by default in mlx-vlm). The server is shut
+    down when the scan finishes.
+  - **`standalone`:** talk to an already-running OpenAI-compatible server (LM
+    Studio, Ollama, a manual mlx-vlm server) via `base_url`. No process is
+    started or stopped.
+  - Important mlx-vlm detail: the server caches models keyed by the exact
+    `model` string from each request, and it pre-loads the model under its
+    **full filesystem path**. Requests must therefore send the full
+    `model_path` as the model id (not the short name), or the server tries to
+    fetch the short name as a Hugging Face repo. Both VLM and text checks go
+    through the same loaded model.
 
 ### 4.2 Foul language
 
@@ -116,6 +131,10 @@ blind fast pass can't be the gatekeeper if it can silently drop real content.
   non-profane homophone, a word used in a non-profane sense). Wordlist match
   alone is never sufficient on its own; the LLM pass always runs on top of it.
 - Output: word-level (or utterance-level) timestamps for each flagged instance.
+  Muting pads each flagged window by `foul_language_mute_padding` seconds (default
+  0.5) on both sides so the word's onset/offset audio doesn't leak through —
+  whisper word timestamps can be tight, and an exact window lets the first/last
+  phoneme escape the mute.
 
 ## 5. Fingerprinting (for matching shared timestamp files to a local file)
 
@@ -161,22 +180,40 @@ CLI only for the initial version. Two primary commands: `scan` and `render`
 UI for inspecting/editing flagged scenes before rendering is a valid future
 addition but explicitly out of scope for v1.
 
-Models are never defaulted in code — the user names every model explicitly on
-the command line. Concrete examples (see README for the full set):
+All persistent settings (backend, models, sweep interval, render preferences)
+live in a single **`config.toml`** in the project root — plain text, editable
+in any editor, every key optional with a sane default. The only required
+argument on the command line is the movie path; per-run CLI flags override the
+config. This replaced the earlier "every model must be named on the command
+line every time" approach, which was error-prone for a tool meant to be run
+daily on a whole library. Concrete examples (see README for the full set):
 
 ```bash
-# Scan a film (slow; hours on a long feature). All three models are required.
-nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --base-url http://localhost:1234/v1 \
-  --vlm-model qwen/qwen3.5-9b \
-  --text-model qwen/qwen3.5-9b \
-  --whisper-model mlx-community/whisper-small-mlx
+# Scan a film (slow; hours on a long feature). Everything is read from config.toml.
+nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
 
 # Render a censored copy from the scan JSON (fast; no models needed).
-nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
-  --nudity blur --intimate-scenes blur --foul-language mute --mute-scope word
+nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
 ```
+
+Key configuration keys: `model_backend` (`mlx-vlm` auto-start or `standalone`),
+`model_path` (filesystem path to the MLX model), `base_url`, `vlm_model`,
+`text_model`, `whisper_model`, `sweep_interval`, `vision_timeout`,
+`timestamps_dir`, plus per-category render actions
+(`nudity`/`intimate_scenes`/`gore_violence`/`foul_language`), the
+`nudity_blur_mute_audio`/`intimate_scenes_blur_mute_audio`/
+`gore_violence_blur_mute_audio` toggles, and `foul_language_mute_padding`
+(extra seconds muted around each flagged word).
+
+### 7.1 Live dashboard
+
+`scan` and `render` render an inline TUI dashboard while they run (film
+timeline with detection markers, current-position cursor, ETA, and CPU/RAM).
+It's enabled by default on a TTY and disabled by `--no-tui` or when output is
+piped. Both commands also stream a live status JSON (`ScanStatus`, see
+`nuclearcutter/utils/scan_status.py`); the same dashboard can be attached to a
+scan running elsewhere via `nuclearcutter tui --status FILE` (or `--log FILE`
+to tail an older scan's log that predates status files).
 
 ## 8. Non-goals / explicit exclusions
 

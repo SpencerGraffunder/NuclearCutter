@@ -72,7 +72,7 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
         def __init__(self, client):
             pass
 
-        def sweep(self, video_path, sample_interval=5.0):
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None):
             captured["interval"] = sample_interval
             return [
                 SweepRange(start=10.0, end=20.0, category=Category.NUDITY,
@@ -106,7 +106,7 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
     )
 
     result = scan(mock_video, llm_config=llm_config)
-    assert captured["interval"] == 5.0, "scanner should use the default sweep interval"
+    assert captured["interval"] == 2.0, "scanner should use the default sweep interval"
     assert len(result.visual_detections) == 2
     assert result.visual_detections[0].category == Category.NUDITY
     assert result.visual_detections[1].category == Category.GORE_VIOLENCE
@@ -125,7 +125,7 @@ def test_scan_forwards_custom_sweep_interval(monkeypatch, mock_video):
         def __init__(self, client):
             pass
 
-        def sweep(self, video_path, sample_interval=5.0):
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None):
             captured["interval"] = sample_interval
             return []
 
@@ -163,7 +163,7 @@ def test_scan_raises_when_all_confirmations_fail(monkeypatch, mock_video):
         def __init__(self, client):
             pass
 
-        def sweep(self, video_path, sample_interval=5.0):
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None):
             return [SweepRange(start=1.0, end=2.0, category=Category.NUDITY,
                                description="x", confidence=0.5)]
 

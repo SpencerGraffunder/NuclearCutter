@@ -13,6 +13,7 @@ gore/violence in one pass.
 from __future__ import annotations
 
 import gc
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from nuclearcutter.detection.vlm_confirm import DEFAULT_SWEEP_INTERVAL, VisualSw
 from nuclearcutter.fingerprint.fingerprint import cache_fingerprint, compute_fingerprint, load_cached_fingerprint
 from nuclearcutter.schema import FilmIdentity, ScanResult
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
+from nuclearcutter.utils.scan_status import ScanStatus
 
 
 def scan(
@@ -32,13 +34,36 @@ def scan(
     progress_callback=None,
     whisper_model: str = None,
     sweep_interval: float = None,
+    status_path: Path | str = None,
 ) -> ScanResult:
     llm_config = llm_config or LLMConfig()
     client = LLMClient(llm_config)
     client.test_connection()
 
+    # Optional live status file for `nuclearcutter tui` (see utils/scan_status.py).
+    status = None
+    if status_path:
+        from nuclearcutter.utils.scan_status import _now_iso
+
+        status = ScanStatus(video=Path(video_path).name, pid=os.getpid(), started_at=_now_iso())
+        status.sweep_interval = sweep_interval or DEFAULT_SWEEP_INTERVAL
+        status_path = Path(status_path)
+
+    def _write_status():
+        if status is not None:
+            try:
+                status.write(status_path)
+            except Exception as exc:  # never let status-write failures kill the scan
+                print(f"warning: status write failed: {exc}", file=sys.stderr)
+
+    def _phase(phase: str):
+        if status is not None:
+            status.set_phase(phase)
+            _write_status()
+
     if progress_callback:
         progress_callback("fingerprinting", None)
+    _phase("fingerprinting")
     cached = load_cached_fingerprint(video_path)
     if cached:
         duration, phash_samples = cached
@@ -50,9 +75,13 @@ def scan(
         title=title, year=year, duration_seconds=duration,
         phash_samples=[s.to_dict() for s in phash_samples],
     )
+    if status is not None:
+        status.duration_seconds = duration
+        _write_status()
 
     if progress_callback:
         progress_callback("transcribing", None)
+    _phase("transcribing")
     utterances = transcribe(video_path, model=whisper_model)
 
     subtitle_path = find_subtitle_file(video_path)
@@ -67,10 +96,24 @@ def scan(
     # ------------------------------------------------------------------
     if progress_callback:
         progress_callback("visual_sweep", None)
+    _phase("visual_sweep")
     sweep_detector = VisualSweepDetector(client)
+
+    def _on_flagged_window(start, end, category, confidence):
+        if status is not None:
+            status.add_candidate(start, end, category, confidence)
+            _write_status()
+
+    def _on_sweep_progress(done, total):
+        if status is not None:
+            status.set_sweep(done, total)
+            _write_status()
+
     sweep_ranges = sweep_detector.sweep(
         video_path,
         sample_interval=sweep_interval or DEFAULT_SWEEP_INTERVAL,
+        on_flagged_window=_on_flagged_window,
+        on_progress=_on_sweep_progress,
     )
     print(
         f"[visual_sweep] {len(sweep_ranges)} candidate range(s) from VLM sweep",
@@ -79,11 +122,18 @@ def scan(
 
     visual_detections = []
     vlm_failures = 0
+    _phase("visual_confirm")
     for i, candidate in enumerate(sweep_ranges):
         dialogue = _dialogue_in_range(utterances, candidate.start, candidate.end)
         detection = sweep_detector.confirm_and_describe(video_path, candidate, dialogue)
         if detection:
             visual_detections.append(detection)
+            if status is not None:
+                status.add_visual_detection(
+                    detection.category, detection.start, detection.end,
+                    detection.description or "", detection.confidence,
+                )
+                _write_status()
         else:
             vlm_failures += 1
         if progress_callback:
@@ -97,8 +147,13 @@ def scan(
 
     if progress_callback:
         progress_callback("language_detection", None)
+    _phase("language_detection")
     wordlist = load_wordlist()
     language_detections = detect_foul_language(utterances, client, wordlist, subtitle_utterances)
+    for d in language_detections:
+        if status is not None:
+            status.add_language_detection(d.word, d.start, d.end, d.utterance_start, d.utterance_end)
+    _write_status()
 
     result = ScanResult(
         schema_version=1,
@@ -110,6 +165,12 @@ def scan(
             "text_model": llm_config.text_model,
         },
     )
+
+    if status is not None:
+        status.set_phase("done")
+        if status.position_seconds is None and duration:
+            status.position_seconds = duration
+        _write_status()
 
     if progress_callback:
         progress_callback("done", None)

@@ -1,0 +1,17 @@
+Starting model backend: mlx-vlm ...
+Scanning Monty.Pythons.Life.of.Brian.1979.1080p.BluRay.x265-RARBG.mp4...
+[fingerprinting]
+[fingerprinting] loaded cached fingerprint (6 samples, 5624s)
+[transcribing]
+Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 9709.04it/s]
+[sweep] 100 / 2812 frames
+[sweep] 200 / 2812 frames
+[sweep] 300 / 2812 frames
+[sweep] 400 / 2812 frames
+[sweep] 500 / 2812 frames
+[sweep] 600 / 2812 frames
+[sweep] 700 / 2812 frames
+[sweep] 800 / 2812 frames
+[sweep] 900 / 2812 frames
+[sweep] 1000 / 2812 frames
+[sweep] 1100 / 2812 frames

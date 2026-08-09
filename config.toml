@@ -1,0 +1,37 @@
+# NuclearCutter configuration
+# ----------------------------
+# Edit this file in any plain-text editor (TextEdit, Notepad, VS Code).
+# Every setting is optional; delete a line to use its default.
+# After saving, just run:
+#     nuclearcutter scan  "/path/to/Movie.mkv"
+#     nuclearcutter render "/path/to/Movie.mkv"
+
+# ---- Inference backend -------------------------------------------------
+# model_backend = "mlx-vlm"   # "mlx-vlm" auto-starts its own server (default)
+#                             # "standalone" uses a server you start yourself
+#                             #   (LM Studio / Ollama / a manual mlx-vlm server)
+# model_path = "/Users/spencer/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit"
+# base_url = "http://localhost:1234/v1"
+
+# ---- Models ------------------------------------------------------------
+# vlm_model = "Qwen3.5-9B-MLX-4bit"   # name or path fragment to match on the server
+# text_model = "Qwen3.5-9B-MLX-4bit"
+# whisper_model = "mlx-community/whisper-small-mlx"
+
+# ---- Scan tuning -------------------------------------------------------
+# sweep_interval = 2.0   # seconds between sampled frames (smaller = catches shorter scenes)
+# vision_timeout = 8000  # per-request timeout (seconds) for vision calls
+# timestamps_dir = ""    # shared scan dir to check for an existing match (optional)
+
+# ---- Render preferences ------------------------------------------------
+# nudity = "blur"                 # "blur" | "none"
+# nudity_blur_mute_audio = false
+# intimate_scenes = "blur"
+# intimate_scenes_blur_mute_audio = false
+# gore_violence = "blur"
+# gore_violence_blur_mute_audio = false
+# blur_strength = 3.0             # blur intensity multiplier: 1.0 = standard, 2.0 = twice as extreme, 0.5 = lighter
+# foul_language = "mute"          # "mute" | "none"
+mute_scope = "utterance"             # "word" | "utterance"
+# mute_padding = 0.5              # extra seconds muted before/after each flagged word/utterance
+# font = ""                       # path to a .ttf for blur overlay text (optional)
