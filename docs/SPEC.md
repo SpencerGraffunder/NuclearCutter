@@ -37,33 +37,86 @@ scan data.
 
 ## 3. Content categories and actions
 
-Three categories, each independently configurable to one of the available actions:
+Four categories. Each category has **two independent corrections**: a *visual*
+action (what to do to the video) and an *audio* action (what to do to the
+audio). Both are configurable per category (defaults in `config.toml`,
+overridable per-run by CLI flags or a saved `Preferences` file).
 
-| Category | Available actions |
+**Categories and severity levels:**
+
+Every detection is classified into a **fixed severity level** — `low` / `med` /
+`high` / `exhigh` — using a standardized, built-in scale per category (NOT
+user-editable). This level is recorded in the scan JSON, which is what makes
+scan files **shareable**: the scan records *how bad* a scene is, and each
+person picks their own cutoff. A per-category `*_level` setting in
+`config.toml` is the user's threshold.
+
+**The level is the amount of censorship** (not the severity of the scene on its
+own): `low` = least censorship (only the worst content is caught), `exhigh` =
+max censorship (basically everything is caught). A detection is corrected when
+its level rank is at or above the threshold rank — i.e. the same scene gets
+corrected by a stricter (higher) threshold and left alone by a laxer (lower)
+one. A `low` threshold corrects only the most extreme content; an `exhigh`
+threshold corrects essentially everything (the film "plays like a
+documentary", which is safe because every blur/black segment shows a clean
+text summary of the scene).
+
+| Category | Built-in level scale (low = WORST → exhigh = mildest-flagged) |
 |---|---|
-| `nudity`, `immodesty` | `blur` |
-| `intimate_scenes` (sex scenes, not necessarily nudity — e.g. implied/clothed) | `blur` |
-| `gore_violence` (graphic gore/blood/wounds and graphic violence, e.g. brutal fighting, murder, torture) | `blur` |
-| `foul_language` | `mute` |
+| `nudity` | bare genitals/breasts/buttocks, full nudity → + underwear/swimwear/lingerie, partly covered → + revealing clothing, shirtless men, bikinis → + any immodesty (bare shoulders/legs, towels, pajamas, kissing, any romantic/intimate situation) |
+| `gore` | extreme graphic content (organs, dismemberment, mass casualties) → + visible blood/open wounds/surgery → + any blood/wound however small → + anything medical/bloody (bandages, bruises, hospitals, illness) |
+| `violence` | graphic/brutal acts (murder, torture, weapons) → + fighting/punching/attacks → + any physical aggression (slap, shove, threat) → + any aggression/hostility (yelling, arguing, intimidation) |
+| `foul_language` | severe slurs, most offensive expletives → + common profanity (fuck, shit, bitch) → + mild words (crap, darn, sucks) → + anything rude/mean/disrespectful ("omg", "I hate you", sarcasm, mockery) |
 
-Actions:
+The level scale is the ONLY definition of what counts: the same scan JSON
+classifies a scene identically for every user. An OPTIONAL custom prompt
+(`nudity_prompt`, `gore_prompt`, `violence_prompt`, `foul_language_prompt`) in
+`config.toml` replaces the built-in scale for that category entirely (empty =
+built-in), for users who really want a custom definition.
 
-- **`blur`** — apply an intense box blur to the video for the flagged range.
-  Whether audio is also muted during a blur is a **separate configurable
-  sub-option per category** (`blur_mute_audio: true/false`), not implied by blur
-  itself. On top of the blur display a short, clean, VLM-generated text summary of what happens during
-  that segment (see §4 for how this is generated and timed). This approach is
-  chosen because an intense blur obscures the flagged content while preserving
-  scene flow and avoiding the abrupt disruption of a skip card. Runtime is
-  preserved, which matters for sync with subtitles, chapter markers, etc.
-- **`mute`** — silence the audio only, video untouched. Used for foul language.
-  Default granularity is **the offending word only** (tightest mute window
-  possible), but this is configurable to mute the whole sentence/utterance
-  instead.
+**Visual actions:**
+
+| Action | Effect |
+|---|---|
+| `none` | leave the video untouched |
+| `blur` | intense box blur over the flagged range + a short, clean VLM summary overlaid |
+| `black` | replace the flagged range entirely with a black screen + the clean summary |
+
+**Audio actions:**
+
+Visual categories (nudity/gore/violence) have no per-sound recognition, so their
+only audio options are `none` / `mute_scene` (silence the whole flagged scene).
+
+| Action (visual categories) | Effect |
+|---|---|
+| `none` | leave audio untouched |
+| `mute_scene` | silence the whole flagged scene |
+
+Foul language has word-level timestamps, so it keeps the finer-grained set:
+
+| Action (foul language) | Effect |
+|---|---|
+| `none` | leave audio untouched |
+| `mute_word` | silence just the flagged word |
+| `mute_phrase` | silence the whole utterance/phrase |
+| `replace_word` / `replace_phrase` | (upcoming) AI voice replacement; currently falls back to the equivalent mute with a warning |
+
+**Default corrections per category:** nudity `blur`/`none`/`med`, gore
+`blur`/`none`/`med`, violence `blur`/`none`/`med`, foul language
+`none`/`mute_phrase`/`med`.
+
+**`blur`** obscures the flagged content while preserving scene flow and avoiding
+the abrupt disruption of a skip card; **`black`** shows nothing but the clean
+summary text. For a visual category with `mute_scene`, the audio of
+the **whole flagged segment** is silenced (the segment *is* the event). Foul
+language is audio-only: its windows are layered on top of whichever segment(s)
+they fall within. Runtime is always preserved, which matters for sync with
+subtitles, chapter markers, etc. Blur intensity is tunable via `blur_strength`
+(1.0 = standard, 2.0 = twice as extreme).
 
 ## 4. Detection pipeline
 
-### 4.1 Nudity / intimate scenes / gore (unified VLM sweep)
+### 4.1 Nudity / gore / violence (unified VLM sweep)
 
 Visual detection is a single **full-film VLM sweep** — there is no separate
 cheap classifier anymore. A two-stage NudeNet-then-VLM design was tried and
@@ -73,23 +126,26 @@ confidence, which meant the VLM never got a chance to confirm the scene. A
 blind fast pass can't be the gatekeeper if it can silently drop real content.
 
 - **Sweep:** Sample frames across the whole film at a configurable interval
-  (default 5s — catches any scene that lasts ≥ ~5s). Frames are sent to the
+  (default 2s — catches any scene that lasts ≥ ~2s). Frames are sent to the
   vision model in small batches (4 per call), and the model is asked one
   single-verdict question per batch: *"does this batch contain ANY flagged
-  content?"* covering nudity, intimate scenes, and gore/violence in one pass.
+  content?"* covering nudity, gore, and violence in one pass. The built-in
+  per-category level scales are composed into the single sweep prompt, so what
+  counts as "flagged" is standardized (custom prompts optional).
   This single-verdict format (rather than per-frame index JSON) is what proved
   reliable with local reasoning VLMs.
 - **Merge + pad:** Flagged batch windows are merged into ranges with generous
-  before/after padding (`SWEEP_PADDING_SECONDS`, default 10s) so a scene is
-  never clipped. The sweep verdict is authoritative: a range that was flagged
-  is never dropped, even if a later pass can't enrich it — the goal is to
-  never show bad content, at the cost of occasionally blurring more than the
-  minimum.
-- **Confirm + describe:** Each merged range is sent to the vision model with
-  the per-category confirm prompt to (a) produce the human-readable scene
-  description used for `blur` cards and (b) refine the category. The nudity
-  confirm prompt deliberately treats underwear/swimwear/lingerie/suggestive
-  clothing as flagged content.
+  before/after padding so a scene is never clipped. The sweep verdict is
+  authoritative: a range that was flagged is never dropped, even if a later
+  pass can't enrich it — the goal is to never show bad content, at the cost of
+  occasionally blurring more than the minimum. When merging, the WORST level
+  seen is kept (lowest rank = `low`, the most restrictive) so severity is never
+  downgraded.
+- **Confirm + describe + classify:** Each merged range is sent to the vision
+  model with the per-category confirm prompt to (a) produce the human-readable
+  scene description used for `blur`/`black` cards, (b) refine the category, and
+  (c) assign the severity level (low/med/high/exhigh) using the fixed scale.
+  The level is stored in the scan JSON, which is what makes scans shareable.
 - The VLM description must weave together **both** what is visually happening
   and what is being said/plot-relevant during the scene (dialogue content from
   the audio pipeline, see §4.2) — not just a visual description. E.g. not just
@@ -130,11 +186,14 @@ blind fast pass can't be the gatekeeper if it can silently drop real content.
   catches things a static wordlist misses and reduces false positives (e.g. a
   non-profane homophone, a word used in a non-profane sense). Wordlist match
   alone is never sufficient on its own; the LLM pass always runs on top of it.
+- The LLM also assigns each confirmed word a **severity level** (low/med/high/
+  exhigh) using the fixed foul-language scale, recorded in the scan.
 - Output: word-level (or utterance-level) timestamps for each flagged instance.
   Muting pads each flagged window by `foul_language_mute_padding` seconds (default
   0.5) on both sides so the word's onset/offset audio doesn't leak through —
   whisper word timestamps can be tight, and an exact window lets the first/last
-  phoneme escape the mute.
+  phoneme escape the mute. Only words meeting the user's `foul_language_level`
+  threshold are muted.
 
 ## 5. Fingerprinting (for matching shared timestamp files to a local file)
 
@@ -199,11 +258,16 @@ nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
 Key configuration keys: `model_backend` (`mlx-vlm` auto-start or `standalone`),
 `model_path` (filesystem path to the MLX model), `base_url`, `vlm_model`,
 `text_model`, `whisper_model`, `sweep_interval`, `vision_timeout`,
-`timestamps_dir`, plus per-category render actions
-(`nudity`/`intimate_scenes`/`gore_violence`/`foul_language`), the
-`nudity_blur_mute_audio`/`intimate_scenes_blur_mute_audio`/
-`gore_violence_blur_mute_audio` toggles, and `foul_language_mute_padding`
-(extra seconds muted around each flagged word).
+`timestamps_dir`; per-category severity thresholds
+(`nudity_level`/`gore_level`/`violence_level`/`foul_language_level`, each
+`low`/`med`/`high`/`exhigh`); optional per-category custom prompts
+(`nudity_prompt`/`gore_prompt`/`violence_prompt`/`foul_language_prompt`,
+empty = built-in fixed level scale); per-category render corrections, each with
+a visual and an audio action
+(`nudity_visual`/`nudity_audio`/`gore_visual`/`gore_audio`/`violence_visual`/
+`violence_audio`/`foul_language_visual`/`foul_language_audio`); and shared
+render settings `blur_strength`, `mute_padding` (extra seconds muted around
+each flagged word), and `font`.
 
 ### 7.1 Live dashboard
 

@@ -24,7 +24,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from nuclearcutter.schema import Action, Category, Preferences, ScanResult
+from nuclearcutter.schema import AudioAction, Category, Preferences, ScanResult, VisualAction
 from nuclearcutter.utils.ffmpeg import probe_streams
 
 # Discard ffmpeg stderr (progress lines) to avoid memory accumulation.
@@ -35,14 +35,16 @@ _FFMPEG_KW = {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL, "check": 
 class TimelineSegment:
     """One span of the ORIGINAL source timeline, and what to do with it.
 
-    For blur and mute segments, output duration equals the source duration.
+    Each segment carries a VISUAL action (what to do to the video: none/blur/
+    black) and an AUDIO action (what to do to the audio: none/mute/replace).
+    For blur/black/mute segments, output duration equals the source duration.
     """
     start: float
     end: float
-    action: Action | None  # None = untouched passthrough
+    visual: VisualAction  # what to do to the VIDEO
+    audio: AudioAction  # what to do to the AUDIO (usually for language)
     category: Category | None = None
-    description: str = ""
-    audio_muted: bool = False  # for blur segments with blur_mute_audio enabled
+    description: str = ""  # clean summary shown as text overlay for blur/black
 
     @property
     def source_duration(self) -> float:
@@ -56,45 +58,66 @@ def build_output_path(input_path: Path) -> Path:
 def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list[TimelineSegment]:
     """Build the full ordered, non-overlapping timeline covering the whole film.
 
-    Visual detections (nudity/intimate_scenes) drive segment boundaries.
-    Foul-language detections never create a new segment boundary on their
-    own (video is untouched for pure language mutes) — they're applied as
-    an audio-only mute layered on top of whichever segment(s) they fall
-    within, via _language_mute_ranges_within.
+    Visual detections (nudity/gore/violence) drive segment boundaries whenever
+    their category's VISUAL action is not "none" AND the detection's severity
+    level meets the user's threshold for that category (prefs.level_for). So a
+    user who sets `nudity_level = "high"` leaves low/med nudity untouched.
+
+    Foul-language detections never create a new segment boundary on their own
+    (video is untouched for pure language mutes) — they're applied as an
+    audio-only mute layered on top of whichever segment(s) they fall within,
+    via _language_mute_ranges_within.
+
+    Exception: if the user sets foul_language_visual to a non-"none" action,
+    confirmed language detections DO drive visual segments (e.g. blur the video
+    while someone is swearing), over the whole utterance window — still subject
+    to the foul_language_level threshold.
     """
-    active = [
-        d for d in scan.visual_detections
-        if prefs.action_for(d.category) == Action.BLUR
-    ]
-    active.sort(key=lambda d: d.start)
+    events: list[tuple[float, float, Category, VisualAction, AudioAction, str]] = []
+
+    for d in scan.visual_detections:
+        va = prefs.visual_for(d.category)
+        if va != VisualAction.NONE and d.level.is_corrected_by(prefs.level_for(d.category)):
+            events.append((
+                d.start, d.end, d.category, va,
+                prefs.audio_for(d.category), d.description,
+            ))
+
+    lang_va = prefs.visual_for(Category.FOUL_LANGUAGE)
+    lang_threshold = prefs.level_for(Category.FOUL_LANGUAGE)
+    if lang_va != VisualAction.NONE:
+        for d in scan.language_detections:
+            if not d.llm_confirmed or not d.level.is_corrected_by(lang_threshold):
+                continue
+            events.append((
+                d.utterance_start, d.utterance_end, Category.FOUL_LANGUAGE,
+                lang_va, prefs.audio_for(Category.FOUL_LANGUAGE),
+                f'Speaker says "{d.word}".',
+            ))
+
+    events.sort(key=lambda e: e[0])
 
     segments: list[TimelineSegment] = []
     cursor = 0.0
-    for d in active:
-        start = max(d.start, cursor)
-        if start >= d.end:
+    for start, end, cat, va, aa, desc in events:
+        start = max(start, cursor)
+        if start >= end:
             continue  # fully overlapped by a previous (already-planned) detection
         if start > cursor:
-            segments.append(TimelineSegment(start=cursor, end=start, action=None))
-
-        action = prefs.action_for(d.category)
-        audio_muted = False
-        if action == Action.BLUR:
-            if d.category == Category.NUDITY:
-                audio_muted = prefs.nudity_blur_mute_audio
-            elif d.category == Category.INTIMATE_SCENES:
-                audio_muted = prefs.intimate_scenes_blur_mute_audio
-            elif d.category == Category.GORE_VIOLENCE:
-                audio_muted = prefs.gore_violence_blur_mute_audio
-
+            segments.append(TimelineSegment(start=cursor, end=start,
+                                            visual=VisualAction.NONE, audio=AudioAction.NONE))
         segments.append(TimelineSegment(
-            start=start, end=d.end, action=action, category=d.category,
-            description=d.description, audio_muted=audio_muted,
+            start=start, end=end,
+            visual=va,
+            audio=aa,
+            category=cat,
+            description=desc,
         ))
-        cursor = d.end
+        cursor = end
 
     if cursor < duration:
-        segments.append(TimelineSegment(start=cursor, end=duration, action=None))
+        segments.append(TimelineSegment(start=cursor, end=duration,
+                                        visual=VisualAction.NONE, audio=AudioAction.NONE))
 
     return segments
 
@@ -331,32 +354,39 @@ def _render_track_segments(
         v_out = tmp_dir / f"v_{i:04d}.mp4"
         a_out = tmp_dir / f"a_{i:04d}.m4a"
 
-        if seg.action is None:
-            output_duration = seg.source_duration
-            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_encoder, video_filter=None, fps=fps)
-            _extract_audio_segment(
-                input_path, seg.start, output_duration, a_out,
-                mute_ranges=_language_mute_ranges_within(scan, prefs, seg.start, seg.end),
-            )
+        output_duration = seg.source_duration
 
-        elif seg.action == Action.BLUR:
-            output_duration = seg.source_duration
-            blur_filter = _build_blur_filter(seg.description, font_path, strength=getattr(prefs, "blur_strength", 1.0))
+        if seg.visual == VisualAction.NONE:
+            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_encoder, video_filter=None, fps=fps)
+        elif seg.visual in (VisualAction.BLUR, VisualAction.BLACK):
             overlay_path: Path | None = None
             if seg.description.strip() and _ffmpeg_has_filter("overlay"):
                 overlay_path = tmp_dir / f"overlay_{i:04d}.png"
                 _make_overlay_png(seg.description, width, height, font_path, overlay_path)
-            _extract_video_segment(
-                input_path, seg.start, output_duration, v_out, video_encoder,
-                video_filter=blur_filter, fps=fps, overlay_path=overlay_path,
-            )
-            if seg.audio_muted:
-                _silent_audio(output_duration, a_out)
-            else:
-                _extract_audio_segment(
-                    input_path, seg.start, output_duration, a_out,
-                    mute_ranges=_language_mute_ranges_within(scan, prefs, seg.start, seg.end),
+            if seg.visual == VisualAction.BLUR:
+                video_filter = _build_blur_filter(seg.description, font_path, strength=getattr(prefs, "blur_strength", 1.0))
+                _extract_video_segment(
+                    input_path, seg.start, output_duration, v_out, video_encoder,
+                    video_filter=video_filter, fps=fps, overlay_path=overlay_path,
                 )
+            else:  # BLACK: solid black frames + text overlay
+                _extract_black_segment(output_duration, width, height, fps, v_out, video_encoder, overlay_path)
+
+        # ---- Audio correction ----
+        # Visual categories (nudity/gore/violence): the only muting option is
+        # MUTE_SCENE, which silences the WHOLE flagged segment (no per-sound
+        # recognition). Foul-language windows layer on top of any segment
+        # otherwise (word/phrase granularity from whisper timestamps).
+        if (seg.audio.mutes_audio
+                and seg.category is not None
+                and seg.category != Category.FOUL_LANGUAGE):
+            _silent_audio(output_duration, a_out)
+        else:
+            mute_ranges = _language_mute_ranges_within(scan, prefs, seg)
+            if mute_ranges:
+                _extract_audio_segment(input_path, seg.start, output_duration, a_out, mute_ranges=mute_ranges)
+            else:
+                _extract_audio_segment(input_path, seg.start, output_duration, a_out, mute_ranges=None)
 
         video_files.append(v_out)
         audio_files.append(a_out)
@@ -364,34 +394,42 @@ def _render_track_segments(
     return video_files, audio_files
 
 
-def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg_start: float, seg_end: float) -> list[tuple[float, float]]:
-    """Foul-language mute windows that fall within [seg_start, seg_end), converted to
-    times relative to the segment's own start (0-based) for use in a per-segment audio filter.
+def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg: TimelineSegment) -> list[tuple[float, float]]:
+    """Foul-language mute windows that fall within this segment, as times relative
+    to the segment's own start (0-based).
 
-    Each window is padded by `prefs.foul_language_mute_padding` on both sides so the
-    onset/offset of the flagged word is fully covered (whisper's word timestamps can be
-    tight, letting a word's leading/trailing audio bleed through the mute). The pad is
-    clamped to the segment bounds so a mute never reaches outside this segment.
+    Word vs phrase scope is taken from `prefs.foul_language_audio`. Each window is
+    padded by `prefs.mute_padding` on both sides so word onset/offset audio doesn't
+    leak through (whisper word timestamps can be tight). Clamped to the segment.
     """
-    if prefs.foul_language_action != Action.MUTE:
+    lang_action = prefs.audio_for(Category.FOUL_LANGUAGE)
+    if not lang_action.mutes_audio:
         return []
+    if lang_action in (AudioAction.REPLACE_WORD, AudioAction.REPLACE_PHRASE):
+        print("warning: replace_* not implemented yet — muting instead", file=sys.stderr)
 
-    pad = max(0.0, float(getattr(prefs, "foul_language_mute_padding", 0.5)))
-    ranges = []
+    pad = max(0.0, float(getattr(prefs, "mute_padding", 0.5)))
+    phrase_scope = lang_action in (AudioAction.MUTE_PHRASE, AudioAction.REPLACE_PHRASE)
+    threshold = prefs.level_for(Category.FOUL_LANGUAGE)
+    ranges: list[tuple[float, float]] = []
     for d in scan.language_detections:
-        if not d.llm_confirmed:
+        if not d.llm_confirmed or not d.level.is_corrected_by(threshold):
             continue
-        if prefs.foul_language_mute_scope == "utterance":
+        if phrase_scope:
             m_start, m_end = d.utterance_start, d.utterance_end
         else:
             m_start, m_end = d.start, d.end
-
-        # Padded window, clamped to this segment's bounds.
-        overlap_start = max(m_start - pad, seg_start)
-        overlap_end = min(m_end + pad, seg_end)
-        if overlap_start < overlap_end:
-            ranges.append((overlap_start - seg_start, overlap_end - seg_start))
+        ranges.extend(_clamped_window(m_start, m_end, pad, seg.start, seg.end, seg.start))
     return ranges
+
+
+def _clamped_window(start: float, end: float, pad: float, seg_start: float, seg_end: float, base: float) -> list[tuple[float, float]]:
+    """Return the padded [start,end) window clamped to [seg_start,seg_end), relative to `base`."""
+    overlap_start = max(start - pad, seg_start)
+    overlap_end = min(end + pad, seg_end)
+    if overlap_start < overlap_end:
+        return [(overlap_start - base, overlap_end - base)]
+    return []
 
 
 def _wrap_for_display(text: str, max_chars_per_line: int = 40) -> str:
@@ -438,6 +476,38 @@ def _extract_video_segment(
     # produces timestamp discontinuities at each boundary — which VLC reads as a
     # "new file" (title + black flash). -r + -vsync cfr force constant frames;
     # -video_track_timescale pins the MP4 timebase so concat joins cleanly.
+    cmd += [
+        "-t", str(duration), "-an",
+        "-r", f"{fps:.6f}", "-vsync", "cfr",
+        "-video_track_timescale", "15360",
+        "-c:v", video_encoder, "-crf", "17", "-preset", "medium",
+    ]
+    if video_encoder == "libx265":
+        cmd += ["-tag:v", "hvc1"]
+    cmd += ["-movflags", "+faststart", str(out_path)]
+    subprocess.run(cmd, **_FFMPEG_KW)
+
+
+def _extract_black_segment(
+    duration: float, width: int, height: int, fps: float, out_path: Path,
+    video_encoder: str, overlay_path: Path | None = None,
+) -> None:
+    """Encode a segment of solid BLACK video (optionally with a text overlay).
+
+    Used for the `black` visual action: replaces the flagged footage entirely
+    with a black screen, so the viewer sees nothing but the clean summary text.
+    Uses the same fixed-framerate/timescale discipline as _extract_video_segment
+    so it concatenates cleanly with the other segments.
+    """
+    cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={fps:.6f}"]
+    if overlay_path is not None:
+        cmd += ["-loop", "1", "-i", str(overlay_path)]
+        fc = (
+            "[0:v]format=rgba[bg];"
+            "[1:v]format=rgba,scale=iw:ih[ovr];"
+            "[bg][ovr]overlay=0:0:format=auto[v]"
+        )
+        cmd += ["-filter_complex", fc, "-map", "[v]"]
     cmd += [
         "-t", str(duration), "-an",
         "-r", f"{fps:.6f}", "-vsync", "cfr",

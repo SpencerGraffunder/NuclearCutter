@@ -14,31 +14,57 @@ import re
 from pathlib import Path
 
 from nuclearcutter.detection.transcribe import Utterance, Word
-from nuclearcutter.schema import LanguageDetection
+from nuclearcutter.schema import LanguageDetection, SeverityLevel
 from nuclearcutter.utils.llm_client import LLMClient
 
 DEFAULT_WORDLIST_PATH = Path(__file__).parent / "data" / "profanity_wordlist.txt"
 
+# Fixed severity scale for foul language. low = WORST (severe slurs only),
+# exhigh = anything rude/mean/disrespectful (basically everything). This is the
+# standardized, shareable definition — the LLM context check assigns each
+# confirmed word to one of these levels.
+DEFAULT_FOUL_LANGUAGE_SCALE = (
+    "- low: ONLY the strongest words — severe slurs and the most offensive expletives. "
+    "Ignore mild or common profanity.\n"
+    "- med: profanity and crude words such as fuck, shit, bitch, asshole, bastard, "
+    "damn, hell, dick, pussy, cunt, and their variants. Ignore mild words (crap, "
+    "darn) and non-profane uses (e.g. \"hell\" as a place).\n"
+    "- high: ANY crude or offensive word, including mild ones like crap, darn, sucks, "
+    "and euphemisms for profanity, in addition to common profanity and slurs. "
+    "Be aggressive about flagging.\n"
+    "- exhigh: ANYTHING rude, mean, disrespectful, or unkind — including 'omg', "
+    "'I hate you', 'shut up', 'idiot', sarcasm, mockery, or any harsh or dismissive "
+    "tone — in addition to all profanity and crude words. Basically any line that "
+    "isn't purely polite should be flagged; err on the side of flagging."
+)
+
 CONTEXT_CHECK_PROMPT = """You are helping a content-filtering tool review a line of movie \
-dialogue for profanity/foul language.
+dialogue for foul language.
+
+Here is the severity scale for foul language (low = the WORST words, exhigh = anything \
+rude/mean/disrespectful) — the ONLY measure of what counts:
+{definition}
 
 Line: "{text}"
 
 Wordlist matches found in this line (may be false positives — e.g. homophones or non-profane \
 usage): {matches}
 
-For EACH wordlist match, decide if it is genuinely profane/foul language as used in this \
-specific line, or a false positive. Also flag any OTHER profane words in the line that \
+For EACH wordlist match, decide if it is genuinely foul language as used in this \
+specific line, or a false positive. Also flag any OTHER foul words in the line that \
 the wordlist missed.
 
 Respond with ONLY a JSON object with this exact structure:
 {{
   "confirmed_words": ["word1", "word2"],
+  "levels": {{"word1": "high", "word2": "med"}},
   "reasoning": "one short sentence explaining any false-positive rejections or additions"
 }}
 
 confirmed_words should be the exact word(s) as they appear in the line, lowercase, that \
-should be flagged as foul language. Empty list if none."""
+should be flagged as foul language. Empty list if none. levels maps each confirmed word \
+to its severity: "low", "med", "high", or "exhigh" (use the scale above; assign the \
+LOWEST level whose definition the word fits — the worst words get "low")."""
 
 
 def load_wordlist(path: Path = DEFAULT_WORDLIST_PATH) -> set[str]:
@@ -62,10 +88,12 @@ def detect_foul_language(
     client: LLMClient,
     wordlist: set[str] = None,
     subtitle_utterances: list[Utterance] = None,
+    foul_language_prompt: str | None = None,
 ) -> list[LanguageDetection]:
     """Run wordlist + LLM context check over all utterances. Returns confirmed detections."""
     wordlist = wordlist if wordlist is not None else load_wordlist()
     subtitle_utterances = subtitle_utterances or []
+    definition = foul_language_prompt or DEFAULT_FOUL_LANGUAGE_SCALE
 
     detections: list[LanguageDetection] = []
 
@@ -76,7 +104,7 @@ def detect_foul_language(
 
         try:
             result = client.text_query_json(
-                CONTEXT_CHECK_PROMPT.format(text=utt.text, matches=matches)
+                CONTEXT_CHECK_PROMPT.format(definition=definition, text=utt.text, matches=matches)
             )
         except Exception:
             # If the LLM call fails, fall back to trusting the wordlist match
@@ -87,6 +115,8 @@ def detect_foul_language(
         if not confirmed:
             continue
 
+        # Per-word severity from the LLM; default to MED if missing/unparseable.
+        levels_map = result.get("levels") or {}
         source = _cross_check_source(utt, subtitle_utterances)
 
         for confirmed_word in confirmed:
@@ -108,6 +138,7 @@ def detect_foul_language(
                 transcript_source=source,
                 llm_confirmed=True,
                 llm_reasoning=result.get("reasoning"),
+                level=SeverityLevel.from_any(levels_map.get(confirmed_word)),
             ))
 
     return detections

@@ -22,7 +22,7 @@ from pathlib import Path
 from nuclearcutter.render.renderer import build_output_path, render as render_pass
 from nuclearcutter.scan.repo_match import find_matching_scan, spot_check_match
 from nuclearcutter.scan.scanner import scan as scan_pass
-from nuclearcutter.schema import Preferences, ScanResult
+from nuclearcutter.schema import AudioAction, Preferences, ScanResult, SeverityLevel, VisualAction
 from nuclearcutter.utils.config import AppConfig, default_config_path, load_config
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 from nuclearcutter.utils.model_server import ModelServerConfig, ensure_backend
@@ -167,6 +167,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             whisper_model=cfg.whisper_model,
             sweep_interval=cfg.sweep_interval,
             status_path=status_path,
+            category_prompts=_category_prompts_from_config(cfg),
         )
 
     use_tui = _tui_enabled(args)
@@ -225,17 +226,32 @@ def cmd_tui(args: argparse.Namespace) -> int:
 def _prefs_from_config(cfg: AppConfig, args) -> Preferences:
     """Build Preferences from config.toml, with CLI flags overriding."""
     return Preferences(
-        nudity_action=_arg_or_cfg(args, "nudity", cfg.nudity),
-        nudity_blur_mute_audio=_flag_or_cfg(args, "nudity_blur_mute_audio", cfg.nudity_blur_mute_audio),
-        intimate_scenes_action=_arg_or_cfg(args, "intimate_scenes", cfg.intimate_scenes),
-        intimate_scenes_blur_mute_audio=_flag_or_cfg(args, "intimate_scenes_blur_mute_audio", cfg.intimate_scenes_blur_mute_audio),
-        gore_violence_action=_arg_or_cfg(args, "gore_violence", cfg.gore_violence),
-        gore_violence_blur_mute_audio=_flag_or_cfg(args, "gore_violence_blur_mute_audio", cfg.gore_violence_blur_mute_audio),
+        nudity_visual=VisualAction(_arg_or_cfg(args, "nudity_visual", cfg.nudity_visual)),
+        nudity_audio=AudioAction(_arg_or_cfg(args, "nudity_audio", cfg.nudity_audio)),
+        nudity_level=SeverityLevel.from_any(_arg_or_cfg(args, "nudity_level", cfg.nudity_level)),
+        gore_visual=VisualAction(_arg_or_cfg(args, "gore_visual", cfg.gore_visual)),
+        gore_audio=AudioAction(_arg_or_cfg(args, "gore_audio", cfg.gore_audio)),
+        gore_level=SeverityLevel.from_any(_arg_or_cfg(args, "gore_level", cfg.gore_level)),
+        violence_visual=VisualAction(_arg_or_cfg(args, "violence_visual", cfg.violence_visual)),
+        violence_audio=AudioAction(_arg_or_cfg(args, "violence_audio", cfg.violence_audio)),
+        violence_level=SeverityLevel.from_any(_arg_or_cfg(args, "violence_level", cfg.violence_level)),
+        foul_language_visual=VisualAction(_arg_or_cfg(args, "foul_language_visual", cfg.foul_language_visual)),
+        foul_language_audio=AudioAction(_arg_or_cfg(args, "foul_language_audio", cfg.foul_language_audio)),
+        foul_language_level=SeverityLevel.from_any(_arg_or_cfg(args, "foul_language_level", cfg.foul_language_level)),
         blur_strength=_float_or_cfg(args, "blur_strength", cfg.blur_strength),
-        foul_language_action=_arg_or_cfg(args, "foul_language", cfg.foul_language),
-        foul_language_mute_scope=_arg_or_cfg(args, "mute_scope", cfg.mute_scope),
-        foul_language_mute_padding=_float_or_cfg(args, "mute_padding", cfg.mute_padding),
+        mute_padding=_float_or_cfg(args, "mute_padding", cfg.mute_padding),
     )
+
+
+def _category_prompts_from_config(cfg: AppConfig) -> dict:
+    """Per-category CUSTOM prompts from config (empty = use the built-in fixed
+    level scale). Only passed when the user explicitly overrides."""
+    return {
+        "nudity": cfg.nudity_prompt,
+        "gore": cfg.gore_prompt,
+        "violence": cfg.violence_prompt,
+        "foul_language": cfg.foul_language_prompt,
+    }
 
 
 def _float_or_cfg(args, name: str, cfg_value: float) -> float:
@@ -246,13 +262,6 @@ def _float_or_cfg(args, name: str, cfg_value: float) -> float:
 def _arg_or_cfg(args, name: str, cfg_value: str) -> str:
     val = getattr(args, name, None)
     return val if val else cfg_value
-
-
-def _flag_or_cfg(args, name: str, cfg_value: bool) -> bool:
-    # Only override if the user passed the flag (True or False); argparse
-    # store_true flags are None when absent.
-    val = getattr(args, name, None)
-    return bool(val) if val is not None else cfg_value
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -329,16 +338,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_render.add_argument("--scan", "-s", help="Path to scan JSON (default: MOVIE.nuclearcutter.json)")
     p_render.add_argument("--output", "-o", help="Output path (default: MOVIE_cleaned.ext)")
     p_render.add_argument("--prefs", help="Path to a saved Preferences JSON, overrides config below")
-    p_render.add_argument("--nudity", choices=["blur", "none"], default=None)
-    p_render.add_argument("--nudity-blur-mute-audio", action="store_true")
-    p_render.add_argument("--intimate-scenes", choices=["blur", "none"], default=None)
-    p_render.add_argument("--intimate-scenes-blur-mute-audio", action="store_true")
-    p_render.add_argument("--gore-violence", choices=["blur", "none"], default=None)
-    p_render.add_argument("--gore-violence-blur-mute-audio", action="store_true")
+    p_render.add_argument("--nudity-visual", choices=["none", "blur", "black"], default=None)
+    p_render.add_argument("--nudity-audio", choices=["none", "mute_scene"], default=None)
+    p_render.add_argument("--nudity-level", choices=["low", "med", "high", "exhigh"], default=None,
+                          help="Correct nudity at/above this severity level")
+    p_render.add_argument("--gore-visual", choices=["none", "blur", "black"], default=None)
+    p_render.add_argument("--gore-audio", choices=["none", "mute_scene"], default=None)
+    p_render.add_argument("--gore-level", choices=["low", "med", "high", "exhigh"], default=None)
+    p_render.add_argument("--violence-visual", choices=["none", "blur", "black"], default=None)
+    p_render.add_argument("--violence-audio", choices=["none", "mute_scene"], default=None)
+    p_render.add_argument("--violence-level", choices=["low", "med", "high", "exhigh"], default=None)
+    p_render.add_argument("--foul-language-visual", choices=["none", "blur", "black"], default=None)
+    p_render.add_argument("--foul-language-audio", choices=["none", "mute_word", "mute_phrase", "replace_word", "replace_phrase"], default=None)
+    p_render.add_argument("--foul-language-level", choices=["low", "med", "high", "exhigh"], default=None)
     p_render.add_argument("--blur-strength", type=float, default=None,
                           help="Blur intensity multiplier (1.0 = standard, 2.0 = twice as extreme)")
-    p_render.add_argument("--foul-language", choices=["mute", "none"], default=None)
-    p_render.add_argument("--mute-scope", choices=["word", "utterance"], default=None)
     p_render.add_argument("--mute-padding", type=float, default=None,
                           help="Extra seconds muted before/after each flagged word (default: from config, 0.5)")
     p_render.add_argument("--no-tui", action="store_true", help="Disable the inline live dashboard")

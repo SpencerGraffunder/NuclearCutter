@@ -274,8 +274,8 @@ class SystemStats:
 
 _CAT_COLORS = {
     "NUDITY": "red",
-    "INTIMATE_SCENES": "bright_red",
-    "GORE_VIOLENCE": "yellow",
+    "GORE": "bright_red",
+    "VIOLENCE": "yellow",
     "FOUL_LANGUAGE": "magenta",
 }
 
@@ -320,8 +320,8 @@ def _timeline(v: View, width: int = 70) -> Text:
     for c in v.candidates:
         place(c.get("start"), c.get("end"), "v")
     for d in v.detections:
-        ch = {"NUDITY": "V", "INTIMATE_SCENES": "I", "GORE_VIOLENCE": "G"}.get(
-            _cat_key(d.get("category")), "V"
+        ch = {"NUDITY": "N", "GORE": "G", "VIOLENCE": "V"}.get(
+            _cat_key(d.get("category")), "N"
         )
         place(d.get("start"), d.get("end"), ch)
     for d in v.lang_detections:
@@ -337,12 +337,10 @@ def _timeline(v: View, width: int = 70) -> Text:
         style = "default"
         if ch == "v":
             style = "dim yellow"
-        elif ch == "V":
+        elif ch == "N":
             style = _CAT_COLORS["NUDITY"]
-        elif ch == "I":
-            style = _CAT_COLORS["INTIMATE_SCENES"]
         elif ch == "G":
-            style = _CAT_COLORS["GORE_VIOLENCE"]
+            style = _CAT_COLORS["GORE"]
         elif ch == "L":
             style = "magenta"
         elif ch == "█":
@@ -355,9 +353,10 @@ def _detection_rows(v: View) -> list[str]:
     rows = []
     for d in v.detections[:8]:
         cat = _cat_key(d.get("category"))
+        lvl = d.get("level", "med")
         rows.append(
             f"[{_fmt_secs(d.get('start'))}–{_fmt_secs(d.get('end'))}] "
-            f"{cat} ({(d.get('confidence') or 0):.2f}) — {d.get('description','')[:60]}"
+            f"{cat}·{lvl} ({(d.get('confidence') or 0):.2f}) — {d.get('description','')[:60]}"
         )
     for d in v.lang_detections[:5]:
         rows.append(

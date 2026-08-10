@@ -20,7 +20,7 @@ def test_status_roundtrip(tmp_path):
     st.set_phase("visual_sweep")
     st.set_sweep(50, 100)
     st.add_candidate(10.0, 12.0, "NUDITY", 0.9)
-    st.add_visual_detection("GORE_VIOLENCE", 30.0, 40.0, "desc", 0.7)
+    st.add_visual_detection("GORE", 30.0, 40.0, "desc", 0.7)
     st.add_language_detection("fuck", 5.0, 5.2, 4.0, 6.0)
     st.write(p)
 
@@ -30,8 +30,9 @@ def test_status_roundtrip(tmp_path):
     assert loaded.frames_total == 100
     assert loaded.position_seconds == 100.0  # 50 * 2.0
     assert loaded.visual_candidates == [{"category": "NUDITY", "start": 10.0,
-                                         "end": 12.0, "confidence": 0.9}]
-    assert loaded.visual_detections[0]["category"] == "GORE_VIOLENCE"
+                                         "end": 12.0, "confidence": 0.9,
+                                         "level": "med"}]
+    assert loaded.visual_detections[0]["category"] == "GORE"
     assert loaded.language_detections[0]["word"] == "fuck"
 
 

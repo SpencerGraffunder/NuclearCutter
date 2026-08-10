@@ -54,7 +54,7 @@ def _mock_profanity(monkeypatch):
     )
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.detect_foul_language",
-        lambda _u, _c, _w, _s: [],
+        lambda _u, _c, _w, _s, foul_language_prompt=None: [],
     )
 
 
@@ -77,7 +77,7 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
             return [
                 SweepRange(start=10.0, end=20.0, category=Category.NUDITY,
                            description="sweep desc", confidence=0.9),
-                SweepRange(start=50.0, end=60.0, category=Category.GORE_VIOLENCE,
+                SweepRange(start=50.0, end=60.0, category=Category.GORE,
                            description="gore", confidence=0.8),
             ]
 
@@ -93,7 +93,7 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client: FakeDetector(client),
+        lambda client, prompts=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -109,7 +109,7 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
     assert captured["interval"] == 2.0, "scanner should use the default sweep interval"
     assert len(result.visual_detections) == 2
     assert result.visual_detections[0].category == Category.NUDITY
-    assert result.visual_detections[1].category == Category.GORE_VIOLENCE
+    assert result.visual_detections[1].category == Category.GORE
 
 
 def test_scan_forwards_custom_sweep_interval(monkeypatch, mock_video):
@@ -134,7 +134,7 @@ def test_scan_forwards_custom_sweep_interval(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client: FakeDetector(client),
+        lambda client, prompts=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -172,7 +172,7 @@ def test_scan_raises_when_all_confirmations_fail(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client: FailingDetector(client),
+        lambda client, prompts=None: FailingDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan

@@ -33,14 +33,78 @@ You can re-render the same scan with different preferences without rescanning
 
 ## Actions available per category
 
-| Category | Actions | Notes |
-|---|---|---|
-| Nudity | `blur`, `none` | blur = intense box blur over the video; audio mute during blur is a separate toggle |
-| Intimate scenes | `blur`, `none` | same as above; distinct category from nudity (e.g. a clothed sex scene) |
-| Gore / violence | `blur`, `none` | graphic gore (blood, wounds, mutilation) and graphic violence (brutal fighting, murder, torture) |
-| Foul language | `mute`, `none` | mutes audio only; defaults to muting just the flagged word (plus a small padding), configurable to the whole sentence/utterance |
+Every category has **two independent corrections**: a *visual* action (what to
+do to the video) and an *audio* action (what to do to the audio). They default
+per category and can be overridden per-run with CLI flags or in `config.toml`.
 
-**`blur`** applies an intense box blur to the flagged video range and overlays a short, clean, AI-generated summary so you keep story context. This keeps the scene intact and less disruptive than replacing the footage entirely, while still obscuring the flagged content. Audio can be muted separately for each blur category using `--nudity-blur-mute-audio`, `--intimate-scenes-blur-mute-audio`, and `--gore-violence-blur-mute-audio`.
+**Visual actions:**
+
+| Visual action | Effect |
+|---|---|
+| `none` | leave the video untouched |
+| `blur` | intense box blur over the flagged range + a short, clean AI summary overlaid |
+| `black` | replace the flagged range entirely with a black screen + the clean summary |
+
+**Audio actions:**
+
+For **visual categories** (nudity/gore/violence) there's no per-sound
+recognition, so the only options are:
+
+| Audio action | Effect |
+|---|---|
+| `none` | leave the audio untouched |
+| `mute_scene` | silence the whole flagged scene |
+
+For **foul language** (which has word-level timestamps):
+
+| Audio action | Effect |
+|---|---|
+| `none` | leave the audio untouched |
+| `mute_word` | silence just the flagged word |
+| `mute_phrase` | silence the whole utterance/phrase |
+| `replace_word` | (upcoming) AI voice replacement of the word — falls back to mute for now |
+| `replace_phrase` | (upcoming) AI voice replacement of the phrase — falls back to mute for now |
+
+**Categories and defaults:**
+
+| Category | Default visual | Default audio | Default level | Notes |
+|---|---|---|---|---|
+| Nudity | `blur` | `none` | `med` | bare/partly covered private parts, underwear/swimwear/lingerie in an intimate context, sex scenes. (Formerly two categories — nudity + intimate scenes — now merged into one.) |
+| Gore | `blur` | `none` | `med` | visible blood, open wounds, surgery showing blood/incisions, corpses with wounds, mutilation |
+| Violence | `blur` | `none` | `med` | characters deliberately hurting each other (fighting, punching, attacks, murder, torture) even if no blood is shown |
+| Foul language | `none` | `mute_phrase` | `med` | profanity; audio-only by default |
+
+### Severity levels (shareable scans)
+
+Every detection is classified into a **fixed severity level** — `low` / `med` /
+`high` / `exhigh` — by the model during the scan. This level is recorded in the
+scan JSON, so **scan files are shareable**: the scan says *how bad* a scene is,
+and each person decides their own cutoff.
+
+The level is the amount of **censorship**:
+- `low` = **low censorship** — only the worst content is corrected
+- `med` = medium
+- `high` = high
+- `exhigh` = **max censorship** — basically everything gets corrected
+
+Your per-category `*_level` setting is that threshold: content at or above it
+gets corrected, below is left alone. E.g. `nudity_level = "low"` blurs only the
+most extreme nudity, while `nudity_level = "exhigh"` blurs essentially anything
+that isn't fully modest (it makes the film play like a documentary — which is
+fine, since every blur/black segment shows a clean text summary of the scene).
+
+The level *scale itself* is standardized (built in, not per-user), so the same
+scan JSON produces consistent results for everyone. The **DETECTION LEVELS**
+section of `config.toml` shows the **full prompt** used for each level of each
+category, so you can see exactly what will be caught at each setting. If you
+really want a fully custom definition for a category, set its `*_prompt` in
+`config.toml` — that replaces the built-in scale entirely.
+
+**`blur`** keeps the scene intact and less disruptive than replacing the footage
+entirely, while still obscuring the flagged content. **`black`** shows nothing
+but the clean summary text. Audio can be set independently per category, so
+e.g. nudity can be `visual=blur` + `audio=none`, or violence can be
+`visual=black` + `audio=mute_scene`.
 
 Blur intensity is tunable with `--blur-strength N` (or `blur_strength` in
 `config.toml`): `1.0` is the standard intense blur, `2.0` is twice as extreme
@@ -117,15 +181,31 @@ The default config file looks like this (all commented-out = defaults):
 # vision_timeout = 8000
 # timestamps_dir = ""
 
-# ---- Render preferences ------------------------------------------------
-# nudity = "blur"                 # "blur" | "none"
-# nudity_blur_mute_audio = false
-# intimate_scenes = "blur"
-# intimate_scenes_blur_mute_audio = false
-# gore_violence = "blur"
-# gore_violence_blur_mute_audio = false
-# foul_language = "mute"          # "mute" | "none"
-# mute_scope = "word"             # "word" | "utterance"
+# ---- Per-category severity threshold (correct at/above this) ------------
+# nudity_level = "med"      # "low" | "med" | "high" | "exhigh"
+# gore_level = "med"
+# violence_level = "med"
+# foul_language_level = "med"
+# (The level SCALE itself is fixed/standardized so scans are shareable — see
+#  the DETECTION LEVELS section of config.toml. Only these thresholds vary.)
+
+# ---- Optional custom prompts (empty = built-in fixed level scale) -------
+# nudity_prompt = ""
+# gore_prompt = ""
+# violence_prompt = ""
+# foul_language_prompt = ""
+
+# ---- Render corrections (per category: visual + audio) -----------------
+# nudity_visual = "blur"            # "none" | "blur" | "black"
+# nudity_audio = "none"             # "none" | "mute_scene"
+# gore_visual = "blur"
+# gore_audio = "none"
+# violence_visual = "blur"
+# violence_audio = "none"
+# foul_language_visual = "none"
+# foul_language_audio = "mute_phrase"
+# blur_strength = 1.0
+# mute_padding = 0.5
 # font = ""
 ```
 
@@ -165,19 +245,19 @@ The Martian that a vision model immediately flagged at 0.95 confidence).
 
 The sweep samples frames across the whole film, sends them to the vision
 model in small batches, and asks one question per batch: *"does this batch
-contain ANY flagged content?"* — covering nudity, intimate scenes, **and**
-gore/violence in a single pass. Flagged batch windows are merged into ranges
-with generous before/after padding, so a scene is never clipped and nothing
-is silently dropped. Each range is then confirmed and described (the nudity
-confirm prompt deliberately treats underwear/swimwear/lingerie/suggestive
-clothing as flagged content).
+contain ANY flagged content?"* — covering nudity, gore, and violence in a
+single pass. Flagged batch windows are merged into ranges with generous
+before/after padding, so a scene is never clipped and nothing is silently
+dropped. Each range is then confirmed, described, **and classified into a
+severity level** (low/med/high/exhigh) using the fixed, standardized scale.
+The level is stored in the scan JSON, which is what makes scans shareable.
 
 `--sweep-interval` controls sampling density (seconds between samples;
-default 5). Smaller catches shorter scenes but makes more VLM calls; larger
+default 2). Smaller catches shorter scenes but makes more VLM calls; larger
 is faster but can miss brief flashes:
 
 ```bash
-nuclearcutter scan ... --sweep-interval 5   # default — densest, most thorough
+nuclearcutter scan ... --sweep-interval 2   # default — densest, most thorough
 nuclearcutter scan ... --sweep-interval 10  # faster, still catches ~10s+ scenes
 ```
 
@@ -352,16 +432,21 @@ of what they each want censored.
 
 ### Saving preferences
 
-Instead of passing `--nudity`/`--intimate-scenes`/`--foul-language` flags
-every time, you can save a preferences file and reuse it:
+Instead of passing visual/audio flags every time, you can save a preferences
+file and reuse it:
 
 ```python
-from nuclearcutter.schema import Preferences, Action
+from pathlib import Path
+from nuclearcutter.schema import AudioAction, Preferences, VisualAction
 prefs = Preferences(
-    nudity_action=Action.BLUR,
-    intimate_scenes_action=Action.BLUR,
-    foul_language_action=Action.MUTE,
-    foul_language_mute_scope="utterance",
+    nudity_visual=VisualAction.BLUR,
+    nudity_audio=AudioAction.NONE,
+    gore_visual=VisualAction.BLUR,
+    gore_audio=AudioAction.NONE,
+    violence_visual=VisualAction.BLUR,
+    violence_audio=AudioAction.NONE,
+    foul_language_visual=VisualAction.NONE,
+    foul_language_audio=AudioAction.MUTE_PHRASE,
 )
 prefs.save(Path("my_prefs.json"))
 ```

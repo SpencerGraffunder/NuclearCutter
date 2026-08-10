@@ -14,7 +14,7 @@ import pytest
 from nuclearcutter.fingerprint.fingerprint import compare_fingerprints, compute_fingerprint
 from nuclearcutter.render.renderer import build_output_path, render
 from nuclearcutter.schema import (
-    Action, Category, FilmIdentity, LanguageDetection, Preferences, ScanResult, VisualDetection,
+    Category, FilmIdentity, LanguageDetection, Preferences, ScanResult, VisualDetection, VisualAction,
 )
 from nuclearcutter.utils.ffmpeg import probe_duration
 
@@ -40,9 +40,9 @@ def synthetic_video(tmp_path):
 @requires_ffmpeg
 def test_render_blur_preserves_duration(synthetic_video, tmp_path):
     identity = FilmIdentity(title="T", year=2024, duration_seconds=20.0, phash_samples=[])
-    vd_blur = VisualDetection(category=Category.INTIMATE_SCENES, start=8.0, end=12.0, description="A short scene happens here.", confidence=0.9)
+    vd_blur = VisualDetection(category=Category.GORE, start=8.0, end=12.0, description="A short scene happens here.", confidence=0.9)
     scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd_blur], language_detections=[])
-    prefs = Preferences(intimate_scenes_action=Action.BLUR)
+    prefs = Preferences(gore_visual=VisualAction.BLUR)
 
     out_path = tmp_path / "out.mp4"
     result_path = render(synthetic_video, scan, prefs, output_path=out_path)
@@ -53,11 +53,11 @@ def test_render_blur_preserves_duration(synthetic_video, tmp_path):
 
 
 @requires_ffmpeg
-def test_render_blur_preserves_duration(synthetic_video, tmp_path):
+def test_render_nudity_blur_preserves_duration(synthetic_video, tmp_path):
     identity = FilmIdentity(title="T", year=2024, duration_seconds=20.0, phash_samples=[])
     vd_blur = VisualDetection(category=Category.NUDITY, start=5.0, end=8.0, description="d", confidence=0.9)
     scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd_blur], language_detections=[])
-    prefs = Preferences(nudity_action=Action.BLUR)
+    prefs = Preferences(nudity_visual=VisualAction.BLUR)
 
     out_path = tmp_path / "out_blur.mp4"
     result_path = render(synthetic_video, scan, prefs, output_path=out_path)

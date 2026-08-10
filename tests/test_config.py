@@ -14,8 +14,18 @@ def test_defaults_when_no_file(tmp_path):
     assert cfg.model_backend == "mlx-vlm"
     assert cfg.base_url == "http://localhost:1234/v1"
     assert cfg.sweep_interval == 2.0
-    assert cfg.nudity == "blur"
-    assert cfg.foul_language == "mute"
+    assert cfg.nudity_visual == "blur"
+    assert cfg.nudity_audio == "none"
+    assert cfg.gore_visual == "blur"
+    assert cfg.violence_visual == "blur"
+    assert cfg.foul_language_visual == "none"
+    assert cfg.foul_language_audio == "mute_phrase"
+    assert cfg.blur_strength == 1.0
+    assert cfg.mute_padding == 0.5
+    assert cfg.nudity_level == "med"
+    assert cfg.gore_level == "med"
+    assert cfg.violence_level == "med"
+    assert cfg.foul_language_level == "med"
 
 
 def test_loads_known_keys(tmp_path):
@@ -24,15 +34,21 @@ def test_loads_known_keys(tmp_path):
         "model_backend = \"standalone\"\n"
         "base_url = \"http://localhost:11434/v1\"\n"
         "sweep_interval = 2.0\n"
-        "nudity = \"none\"\n"
-        "mute_scope = \"utterance\"\n"
+        "nudity_visual = \"black\"\n"
+        "foul_language_audio = \"mute_word\"\n"
+        "nudity_prompt = \"custom nudity def\"\n"
+        "nudity_level = \"high\"\n"
+        "gore_level = \"exhigh\"\n"
     )
     cfg = load_config(p)
     assert cfg.model_backend == "standalone"
     assert cfg.base_url == "http://localhost:11434/v1"
     assert cfg.sweep_interval == 2.0
-    assert cfg.nudity == "none"
-    assert cfg.mute_scope == "utterance"
+    assert cfg.nudity_visual == "black"
+    assert cfg.foul_language_audio == "mute_word"
+    assert cfg.nudity_prompt == "custom nudity def"
+    assert cfg.nudity_level == "high"
+    assert cfg.gore_level == "exhigh"
 
 
 def test_ignores_unknown_keys(tmp_path):
@@ -45,8 +61,22 @@ def test_ignores_unknown_keys(tmp_path):
 
 def test_invalid_enum_raises(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text("nudity = \"zoom\"\n")
-    with pytest.raises(ValueError, match="nudity"):
+    p.write_text("nudity_visual = \"zoom\"\n")
+    with pytest.raises(ValueError, match="nudity_visual"):
+        load_config(p)
+
+
+def test_invalid_audio_enum_raises(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("foul_language_audio = \"fade\"\n")
+    with pytest.raises(ValueError, match="foul_language_audio"):
+        load_config(p)
+
+
+def test_invalid_level_raises(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("nudity_level = \"extreme\"\n")
+    with pytest.raises(ValueError, match="nudity_level"):
         load_config(p)
 
 

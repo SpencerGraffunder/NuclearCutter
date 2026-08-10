@@ -23,15 +23,189 @@
 # vision_timeout = 8000  # per-request timeout (seconds) for vision calls
 # timestamps_dir = ""    # shared scan dir to check for an existing match (optional)
 
-# ---- Render preferences ------------------------------------------------
-# nudity = "blur"                 # "blur" | "none"
-# nudity_blur_mute_audio = false
-# intimate_scenes = "blur"
-# intimate_scenes_blur_mute_audio = false
-# gore_violence = "blur"
-# gore_violence_blur_mute_audio = false
-# blur_strength = 3.0             # blur intensity multiplier: 1.0 = standard, 2.0 = twice as extreme, 0.5 = lighter
-# foul_language = "mute"          # "mute" | "none"
-mute_scope = "utterance"             # "word" | "utterance"
-# mute_padding = 0.5              # extra seconds muted before/after each flagged word/utterance
-# font = ""                       # path to a .ttf for blur overlay text (optional)
+# ============================================================================
+# DETECTION LEVELS & SENSITIVITY
+# ============================================================================
+# Every detection is classified into a FIXED severity level — low / med / high
+# / exhigh — by the model during the scan. The level scale is STANDARDIZED and
+# built in, so scan files can be shared: the scan records how BAD each scene
+# is, and each person picks their own threshold for what to correct.
+#
+# IMPORTANT — what the levels mean (this is the amount of CENSORSHIP):
+#   low    = LOW censorship   -> only the WORST content is corrected
+#   med    = medium censorship
+#   high   = high censorship  -> a lot gets corrected
+#   exhigh = MAX censorship   -> basically everything gets corrected
+#
+# Below, for each category, the FULL actual prompt used for each level (in
+# order: low, med, high, exhigh), then YOUR threshold, then an optional CUSTOM
+# prompt. Content at/above your chosen level is corrected; below is left alone.
+# ----------------------------------------------------------------------------
+
+# ---- NUDITY ------------------------------------------------------------
+# level low    (LOW censorship — only the worst):
+#   "Flag as nudity any of these: bare genitals, breasts, or buttocks (female
+#   nipples count; a bare male chest does not); a person visibly nude or mostly
+#   nude; a couple in bed or having sex where any inappropriate part of them
+#   can be seen, even briefly or partly covered. Do NOT flag: clothed people,
+#   kissing/embracing, bare male chests alone."
+#
+# level med    (medium censorship):
+#   "Flag as nudity any of these: bare genitals, breasts, or buttocks; people
+#   in underwear, swimwear, or lingerie, or otherwise partly covering private
+#   parts in an intimate context; a couple in bed or having sex where any part
+#   of them is shown or can be seen, even if briefly. Do NOT flag: fully
+#   clothed people, bare male chests alone, kissing/embracing."
+#
+# level high   (high censorship):
+#   "Flag as nudity ANY of these: bare or partly covered genitals, breasts, or
+#   buttocks; revealing clothing or suggestive state: shirtless men, women in
+#   bikinis or lingerie, people in underwear, anything that shows skin in an
+#   intimate or sexualized way; a couple in bed or having sex, whether or not
+#   anything is fully visible. Do NOT flag: fully clothed people in non-intimate
+#   settings."
+#
+# level exhigh (MAX censorship — basically everything):
+#   "Flag as nudity or immodesty ANY of these: any skin that is not fully
+#   covered by normal everyday clothing — bare shoulders, bare arms, bare legs,
+#   bare midriffs, low-cut or tight clothing; people in swimwear, underwear,
+#   lingerie, pajamas, towels, or any state of partial undress; shirtless men;
+#   anyone in bed, embracing, kissing, or any romantic or intimate situation;
+#   anything that could be considered revealing or suggestive. The goal is to
+#   censor essentially everything that isn't fully modest, so err on the side
+#   of flagging."
+#
+# Your threshold (correct nudity at/above this):
+nudity_level = "high"     # "low" = least | "med" | "high" | "exhigh" = most
+#
+# Optional custom prompt (replaces the built-in nudity scale entirely):
+# nudity_prompt = ""
+
+# ---- GORE --------------------------------------------------------------
+# level low    (LOW censorship — only the worst):
+#   "Flag as gore only EXTREME graphic content: exposed organs, dismemberment,
+#   mutilation, mass casualties with visible flesh. Do NOT flag ordinary blood,
+#   small wounds, or medical procedures."
+#
+# level med    (medium censorship):
+#   "Flag as gore: visible blood, open wounds, injuries to flesh, surgery or
+#   medical procedures showing blood/incisions, dead bodies with wounds, or
+#   mutilation. Do NOT flag blood-free violence (that's the 'violence'
+#   category)."
+#
+# level high   (high censorship):
+#   "Flag as gore: ANY visible blood or wound, however small — a cut, a bruise,
+#   a bloody nose, a surgery scene, a corpse, or any blood on screen."
+#
+# level exhigh (MAX censorship — anything remotely medical/bloody):
+#   "Flag as gore or anything related to injury/illness: any blood, any wound,
+#   any bandage, any bruise, any scar, any hospital or medical scene, any
+#   illness, any hint of blood, or anything that could be considered graphic or
+#   disturbing. The goal is to censor essentially anything remotely medical or
+#   bloody, so err on the side of flagging."
+#
+# Your threshold (correct gore at/above this):
+gore_level = "high"       # "low" = least | "med" | "high" | "exhigh" = most
+#
+# Optional custom prompt (replaces the built-in gore scale entirely):
+# gore_prompt = ""
+
+# ---- VIOLENCE ----------------------------------------------------------
+# Violence = characters deliberately hurting each other on purpose, even if no
+# blood is shown. Gore (above) is the blood/flesh version.
+# level low    (LOW censorship — only the worst):
+#   "Flag as violence only GRAPHIC or brutal acts: brutal fighting, murder,
+#   torture, assault with a weapon, or anything clearly life-threatening. Do
+#   NOT flag shouting, mild shoving, or cartoonish/implicit violence."
+#
+# level med    (medium censorship):
+#   "Flag as violence: characters deliberately hurting each other — fighting,
+#   punching, kicking, hitting, attacks with weapons, murder, torture, or
+#   attempted murder. Do NOT flag gore itself (that's the 'gore' category) or
+#   everyday non-aggressive action."
+#
+# level high   (high censorship):
+#   "Flag as violence: ANY intentional physical aggression between characters —
+#   a slap, a shove, a punch, a kick, grabbing someone roughly, or a threat
+#   with a weapon — whether or not anyone is visibly injured."
+#
+# level exhigh (MAX censorship — any aggression/hostility):
+#   "Flag as violence or aggression ANY of these: any forceful physical contact
+#   — shoving, pushing, grabbing, slapping, punching, kicking; any yelling,
+#   shouting, arguing, threatening, or intimidation; any weapon shown or
+#   implied; any tense or hostile confrontation — even if no one is visibly
+#   injured. The goal is to censor essentially any aggression or hostility, so
+#   err on the side of flagging."
+#
+# Your threshold (correct violence at/above this):
+violence_level = "low"   # "low" = least | "med" | "high" | "exhigh" = most
+#
+# Optional custom prompt (replaces the built-in violence scale entirely):
+# violence_prompt = ""
+
+# ---- FOUL LANGUAGE -----------------------------------------------------
+# level low    (LOW censorship — only the worst):
+#   "ONLY the strongest words — severe slurs and the most offensive expletives.
+#   Ignore mild or common profanity."
+#
+# level med    (medium censorship):
+#   "Profanity and crude words such as fuck, shit, bitch, asshole, bastard,
+#   damn, hell, dick, pussy, cunt, and their variants. Ignore mild words (crap,
+#   darn) and non-profane uses (e.g. 'hell' as a place)."
+#
+# level high   (high censorship):
+#   "ANY crude or offensive word, including mild ones like crap, darn, sucks,
+#   and euphemisms for profanity, in addition to common profanity and slurs.
+#   Be aggressive about flagging."
+#
+# level exhigh (MAX censorship — anything rude/mean/disrespectful):
+#   "ANYTHING rude, mean, disrespectful, or unkind — including 'omg', 'I hate
+#   you', 'shut up', 'idiot', sarcasm, mockery, or any harsh or dismissive tone
+#   — in addition to all profanity and crude words. Basically any line that
+#   isn't purely polite should be flagged; err on the side of flagging."
+#
+# Your threshold (mute foul language at/above this):
+foul_language_level = "med"   # "low" = least | "med" | "high" | "exhigh" = most
+#
+# Optional custom prompt (replaces the built-in foul-language scale entirely):
+# foul_language_prompt = ""
+
+
+# ============================================================================
+# RENDER CORRECTIONS — per category, a visual action AND an audio action
+# ============================================================================
+# Visual actions:  "none" (leave video) | "blur" (blur + text overlay) | "black" (black screen + text overlay)
+# Audio actions:   "none" | "mute_scene"  (visual categories)
+#                  "none" | "mute_word" | "mute_phrase" | "replace_word" | "replace_phrase"  (foul language)
+#   (replace_* = AI voice replacement — NOT implemented yet; falls back to the equivalent mute)
+#
+# EVERY category has BOTH a visual and an audio correction:
+#   - Nudity / Gore / Violence: the only audio option is mute_scene (silence
+#     the whole flagged scene) — there's no per-word/per-phrase sound
+#     recognition in a visual scene. The level thresholds for these live in the
+#     DETECTION LEVELS section above — not here.
+#   - Foul language: mute_word silences just the word, mute_phrase the whole
+#     utterance. A visual action of blur/black ALSO hides lip-reading/mouth
+#     movement while someone swears.
+# ----------------------------------------------------------------------------
+
+# ---- Nudity ------------------------------------------------------------
+nudity_visual = "blur"          # "none" | "blur" | "black"
+nudity_audio = "none"           # "none" | "mute_scene"
+
+# ---- Gore --------------------------------------------------------------
+gore_visual = "blur"            # "none" | "blur" | "black"
+gore_audio = "none"             # "none" | "mute_scene"
+
+# ---- Violence ----------------------------------------------------------
+violence_visual = "blur"        # "none" | "blur" | "black"
+violence_audio = "none"         # "none" | "mute_scene"
+
+# ---- Foul language -----------------------------------------------------
+foul_language_visual = "none"   # "none" | "blur" | "black" — blur/black hides lip-reading while swearing
+foul_language_audio = "mute_word"   # "none" | "mute_word" | "mute_phrase" | "replace_word" | "replace_phrase"
+
+# ---- Shared render settings --------------------------------------------
+blur_strength = 3.0             # blur intensity multiplier: 1.0 = standard, 2.0 = twice as extreme, 0.5 = lighter
+mute_padding = 0.5              # extra seconds muted before/after each flagged word/utterance
+# font = ""                       # path to a .ttf for blur/black overlay text (optional)

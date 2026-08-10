@@ -27,46 +27,142 @@ SCHEMA_VERSION = 1
 
 class Category(str, Enum):
     NUDITY = "nudity"
-    INTIMATE_SCENES = "intimate_scenes"
-    GORE_VIOLENCE = "gore_violence"
+    GORE = "gore"
+    VIOLENCE = "violence"
     FOUL_LANGUAGE = "foul_language"
 
+    @classmethod
+    def from_legacy(cls, value: str) -> "Category":
+        """Map old category names (from pre-2026-08 scan files) to the new set.
 
-class Action(str, Enum):
-    BLUR = "blur"
-    MUTE = "mute"
-    NONE = "none"  # detected but user chose to leave it untouched
+        NOTE: don't use `legacy.get(value, cls(value))` here — the default
+        argument is evaluated eagerly, so an unknown-but-legacy value would
+        raise before the mapping is consulted.
+        """
+        legacy = {
+            "intimate_scenes": cls.NUDITY,
+            "gore_violence": cls.GORE,
+        }
+        if value in legacy:
+            return legacy[value]
+        return cls(value)
 
 
-# Which actions are valid for which category — enforced at render time.
-VALID_ACTIONS = {
-    Category.NUDITY: {Action.BLUR, Action.NONE},
-    Category.INTIMATE_SCENES: {Action.BLUR, Action.NONE},
-    Category.GORE_VIOLENCE: {Action.BLUR, Action.NONE},
-    Category.FOUL_LANGUAGE: {Action.MUTE, Action.NONE},
-}
+class VisualAction(str, Enum):
+    """What to do to the VIDEO for a flagged category."""
+    NONE = "none"
+    BLUR = "blur"  # intense box blur + clean text description overlay
+    BLACK = "black"  # black screen + clean text description overlay
+
+
+class AudioAction(str, Enum):
+    """What to do to the AUDIO for a flagged category.
+
+    Foul language has word-level timestamps, so it can mute/replace individual
+    words or whole phrases. Visual categories (nudity/gore/violence) have NO
+    per-sound recognition, so their only audio options are none / mute_scene
+    (silence the whole flagged scene).
+    """
+    NONE = "none"
+    MUTE_WORD = "mute_word"  # silence the flagged word (foul language only)
+    MUTE_PHRASE = "mute_phrase"  # silence the whole utterance/phrase (foul language only)
+    MUTE_SCENE = "mute_scene"  # silence the whole flagged scene (visual categories)
+    REPLACE_WORD = "replace_word"  # (upcoming) AI voice replacement
+    REPLACE_PHRASE = "replace_phrase"  # (upcoming) AI voice replacement
+
+    @property
+    def mutes_audio(self) -> bool:
+        return self in (AudioAction.MUTE_WORD, AudioAction.MUTE_PHRASE,
+                        AudioAction.MUTE_SCENE,
+                        AudioAction.REPLACE_WORD, AudioAction.REPLACE_PHRASE)
+
+
+# Module-level (NOT class attributes — a `str`-Enum would turn them into
+# members). Valid audio actions by category type.
+# Visual categories (nudity/gore/violence): no per-sound recognition, so only
+# none / mute_scene. Foul language has word-level timestamps: full set.
+VISUAL_AUDIO_ACTIONS = ("none", "mute_scene")
+LANGUAGE_AUDIO_ACTIONS = ("none", "mute_word", "mute_phrase",
+                          "replace_word", "replace_phrase")
+
+
+class SeverityLevel(str, Enum):
+    """The FIXED severity scale every detection is classified into.
+
+    Standardized (NOT user-editable) so scan files can be shared. The level a
+    detection is assigned = how MUCH censorship is needed to catch it:
+
+      low    — the WORST content; caught even by the most restrictive filter
+               (bare genitals/full nudity, extreme gore, murder, slurs)
+      med    — caught by a moderate filter
+      high   — caught by a broad filter (revealing clothing, any blood, slaps)
+      exhigh — the MILDEST flagged content; only caught by a maximal filter
+               (anything even slightly bad — a towel, a shove, "omg")
+
+    A user's per-category threshold (`nudity_level` etc.) is how strict they
+    want to be: `low` = low censorship (only the worst), `exhigh` = censor
+    basically everything. Ordering by rank: low < med < high < exhigh.
+    """
+    LOW = "low"
+    MED = "med"
+    HIGH = "high"
+    EXHIGH = "exhigh"
+
+    @property
+    def rank(self) -> int:
+        return _SEVERITY_RANK[self.value]
+
+    def is_corrected_by(self, threshold: "SeverityLevel") -> bool:
+        """True if a detection at this level gets corrected by a user whose
+        threshold is `threshold`. Content at/above the threshold's strictness
+        is corrected — i.e. this level's rank <= the threshold's rank.
+
+        `low` threshold -> only rank-0 (worst) content corrected (low censorship).
+        `exhigh` threshold -> everything (rank <= 3) corrected (max censorship).
+        """
+        return self.rank <= threshold.rank
+
+    @classmethod
+    def from_any(cls, value) -> "SeverityLevel":
+        """Tolerant parse (str, enum member, None). Unknown -> MED (safe default)."""
+        if isinstance(value, SeverityLevel):
+            return value
+        if value is None:
+            return SeverityLevel.MED
+        try:
+            return SeverityLevel(str(value).strip().lower())
+        except ValueError:
+            return SeverityLevel.MED
+
+
+# Module-level (NOT a class attribute — a `str`-Enum would turn a class attr
+# into a member). Used for ordering comparisons.
+_SEVERITY_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
 
 
 @dataclass
 class VisualDetection:
-    """A single visual detection (nudity/intimate_scenes/gore_violence) from the VLM sweep."""
+    """A single visual detection (nudity/gore/violence) from the VLM sweep."""
 
     category: Category
     start: float  # seconds
     end: float  # seconds
     description: str  # VLM-generated summary, visual + dialogue content woven together
     confidence: float  # 0-1, from the VLM confirmation stage
+    level: SeverityLevel = SeverityLevel.MED  # how severe (low/med/high/exhigh)
     stage_a_score: Optional[float] = None  # retained for backward-compat; always None with the VLM sweep
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["category"] = self.category.value
+        d["level"] = self.level.value
         return d
 
     @staticmethod
     def from_dict(d: dict) -> "VisualDetection":
         d = dict(d)
-        d["category"] = Category(d["category"])
+        d["category"] = Category.from_legacy(d["category"])
+        d["level"] = SeverityLevel.from_any(d.get("level"))
         return VisualDetection(**d)
 
 
@@ -82,12 +178,17 @@ class LanguageDetection:
     transcript_source: str  # "whisper", "subtitle", or "whisper+subtitle"
     llm_confirmed: bool  # result of the always-on LLM context check
     llm_reasoning: Optional[str] = None
+    level: SeverityLevel = SeverityLevel.MED  # severity of this word (low/med/high/exhigh)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["level"] = self.level.value
+        return d
 
     @staticmethod
     def from_dict(d: dict) -> "LanguageDetection":
+        d = dict(d)
+        d["level"] = SeverityLevel.from_any(d.get("level"))
         return LanguageDetection(**d)
 
 
@@ -147,42 +248,78 @@ class ScanResult:
 
 @dataclass
 class Preferences:
-    """User's personal choice of action per category. Never shared."""
+    """User's personal choice of action per category. Never shared.
 
-    nudity_action: Action = Action.BLUR
-    nudity_blur_mute_audio: bool = False
+    Each category has TWO independent corrections: a visual one (what to do
+    to the video) and an audio one (what to do to the audio). E.g. nudity
+    might be visual=BLUR with audio=NONE, while foul language is visual=NONE
+    with audio=MUTE_PHRASE. See VisualAction / AudioAction for options.
+    """
 
-    intimate_scenes_action: Action = Action.BLUR
-    intimate_scenes_blur_mute_audio: bool = False
+    nudity_visual: VisualAction = VisualAction.BLUR
+    nudity_audio: AudioAction = AudioAction.NONE
+    nudity_level: SeverityLevel = SeverityLevel.MED  # correct nudity at/above this
 
-    gore_violence_action: Action = Action.BLUR
-    gore_violence_blur_mute_audio: bool = False
+    gore_visual: VisualAction = VisualAction.BLUR
+    gore_audio: AudioAction = AudioAction.NONE
+    gore_level: SeverityLevel = SeverityLevel.MED
+
+    violence_visual: VisualAction = VisualAction.BLUR
+    violence_audio: AudioAction = AudioAction.NONE
+    violence_level: SeverityLevel = SeverityLevel.MED
+
+    foul_language_visual: VisualAction = VisualAction.NONE
+    foul_language_audio: AudioAction = AudioAction.MUTE_PHRASE
+    foul_language_level: SeverityLevel = SeverityLevel.MED
 
     # Multiplier on blur intensity. 1.0 = the standard intense boxblur
     # (radius 30, 3 passes); 2.0 = twice as extreme (radius 60, 6 passes).
     blur_strength: float = 1.0
+    # Extra seconds muted before/after each flagged word/utterance window.
+    mute_padding: float = 0.5
 
-    foul_language_action: Action = Action.MUTE
-    foul_language_mute_scope: str = "word"  # "word" or "utterance"
-    foul_language_mute_padding: float = 0.5  # seconds of extra mute before/after each flagged word
-
-    def action_for(self, category: Category) -> Action:
+    def visual_for(self, category: Category) -> VisualAction:
         if category == Category.NUDITY:
-            return self.nudity_action
-        if category == Category.INTIMATE_SCENES:
-            return self.intimate_scenes_action
-        if category == Category.GORE_VIOLENCE:
-            return self.gore_violence_action
+            return self.nudity_visual
+        if category == Category.GORE:
+            return self.gore_visual
+        if category == Category.VIOLENCE:
+            return self.violence_visual
         if category == Category.FOUL_LANGUAGE:
-            return self.foul_language_action
+            return self.foul_language_visual
+        raise ValueError(f"Unknown category: {category}")
+
+    def audio_for(self, category: Category) -> AudioAction:
+        if category == Category.NUDITY:
+            return self.nudity_audio
+        if category == Category.GORE:
+            return self.gore_audio
+        if category == Category.VIOLENCE:
+            return self.violence_audio
+        if category == Category.FOUL_LANGUAGE:
+            return self.foul_language_audio
+        raise ValueError(f"Unknown category: {category}")
+
+    def level_for(self, category: Category) -> SeverityLevel:
+        """The user's threshold level for a category — correct at/above this."""
+        if category == Category.NUDITY:
+            return self.nudity_level
+        if category == Category.GORE:
+            return self.gore_level
+        if category == Category.VIOLENCE:
+            return self.violence_level
+        if category == Category.FOUL_LANGUAGE:
+            return self.foul_language_level
         raise ValueError(f"Unknown category: {category}")
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["nudity_action"] = self.nudity_action.value
-        d["intimate_scenes_action"] = self.intimate_scenes_action.value
-        d["gore_violence_action"] = self.gore_violence_action.value
-        d["foul_language_action"] = self.foul_language_action.value
+        for key in ("nudity_visual", "gore_visual", "violence_visual", "foul_language_visual"):
+            d[key] = getattr(self, key).value
+        for key in ("nudity_audio", "gore_audio", "violence_audio", "foul_language_audio"):
+            d[key] = getattr(self, key).value
+        for key in ("nudity_level", "gore_level", "violence_level", "foul_language_level"):
+            d[key] = getattr(self, key).value
         return d
 
     def save(self, path: Path) -> None:
@@ -192,14 +329,18 @@ class Preferences:
     def load(path: Path) -> "Preferences":
         d = json.loads(path.read_text())
         return Preferences(
-            nudity_action=Action(d.get("nudity_action", "blur")),
-            nudity_blur_mute_audio=d.get("nudity_blur_mute_audio", False),
-            intimate_scenes_action=Action(d.get("intimate_scenes_action", "blur")),
-            intimate_scenes_blur_mute_audio=d.get("intimate_scenes_blur_mute_audio", False),
-            gore_violence_action=Action(d.get("gore_violence_action", "blur")),
-            gore_violence_blur_mute_audio=d.get("gore_violence_blur_mute_audio", False),
+            nudity_visual=VisualAction(d.get("nudity_visual", "blur")),
+            nudity_audio=AudioAction(d.get("nudity_audio", "none")),
+            nudity_level=SeverityLevel.from_any(d.get("nudity_level")),
+            gore_visual=VisualAction(d.get("gore_visual", "blur")),
+            gore_audio=AudioAction(d.get("gore_audio", "none")),
+            gore_level=SeverityLevel.from_any(d.get("gore_level")),
+            violence_visual=VisualAction(d.get("violence_visual", "blur")),
+            violence_audio=AudioAction(d.get("violence_audio", "none")),
+            violence_level=SeverityLevel.from_any(d.get("violence_level")),
+            foul_language_visual=VisualAction(d.get("foul_language_visual", "none")),
+            foul_language_audio=AudioAction(d.get("foul_language_audio", "mute_phrase")),
+            foul_language_level=SeverityLevel.from_any(d.get("foul_language_level")),
             blur_strength=float(d.get("blur_strength", 1.0)),
-            foul_language_action=Action(d.get("foul_language_action", "mute")),
-            foul_language_mute_scope=d.get("foul_language_mute_scope", "word"),
-            foul_language_mute_padding=float(d.get("foul_language_mute_padding", 0.5)),
+            mute_padding=float(d.get("mute_padding", 0.5)),
         )

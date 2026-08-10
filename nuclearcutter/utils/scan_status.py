@@ -73,20 +73,23 @@ class ScanStatus:
         if self.sweep_interval:
             self.position_seconds = round(done * self.sweep_interval, 1)
 
-    def add_candidate(self, start: float, end: float, category: str, confidence: float) -> None:
+    def add_candidate(self, start: float, end: float, category: str, confidence: float,
+                      level: str = "med") -> None:
         """A raw, unconfirmed VLM sweep hit (shown as a dim marker in the TUI)."""
         self.visual_candidates.append(
             {"category": category, "start": round(start, 1), "end": round(end, 1),
-             "confidence": round(confidence, 3)}
+             "confidence": round(confidence, 3), "level": level}
         )
 
     def add_visual_detection(self, category, start: float, end: float,
-                             description: str = "", confidence: float = 0.5) -> None:
+                             description: str = "", confidence: float = 0.5,
+                             level: str = "med") -> None:
         """A confirmed detection from the confirm pass."""
         cat = category.value if hasattr(category, "value") else str(category)
         self.visual_detections.append(
             {"category": cat, "start": round(start, 1), "end": round(end, 1),
-             "description": description, "confidence": round(confidence, 3)}
+             "description": description, "confidence": round(confidence, 3),
+             "level": level}
         )
 
     def add_language_detection(self, word: str, start: float, end: float,

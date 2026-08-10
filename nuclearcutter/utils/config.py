@@ -21,16 +21,30 @@ Example config.toml:
     vision_timeout = 8000
     timestamps_dir = ""
 
-    # --- Render preferences ---
-    nudity = "blur"
-    nudity_blur_mute_audio = false
-    intimate_scenes = "blur"
-    intimate_scenes_blur_mute_audio = false
-    gore_violence = "blur"
-    gore_violence_blur_mute_audio = false
-    foul_language = "mute"
-    mute_scope = "word"
+    # --- Render preferences — per-category visual + audio corrections ---
+    nudity_visual = "blur"
+    nudity_audio = "none"
+    gore_visual = "blur"
+    gore_audio = "none"
+    violence_visual = "blur"
+    violence_audio = "none"
+    foul_language_visual = "none"
+    foul_language_audio = "mute_phrase"
+    blur_strength = 1.0
+    mute_padding = 0.5
     font = ""
+
+    # --- Per-category severity threshold ("low"/"med"/"high"/"exhigh") ---
+    nudity_level = "med"
+    gore_level = "med"
+    violence_level = "med"
+    foul_language_level = "med"
+
+    # --- Optional custom prompts (empty = built-in fixed level scale) ---
+    nudity_prompt = ""
+    gore_prompt = ""
+    violence_prompt = ""
+    foul_language_prompt = ""
 """
 
 from __future__ import annotations
@@ -66,28 +80,61 @@ class AppConfig:
     vision_timeout: int = 8000
     timestamps_dir: str = ""
 
-    # render preferences
-    nudity: str = "blur"
-    nudity_blur_mute_audio: bool = False
-    intimate_scenes: str = "blur"
-    intimate_scenes_blur_mute_audio: bool = False
-    gore_violence: str = "blur"
-    gore_violence_blur_mute_audio: bool = False
+    # render preferences — per-category visual + audio corrections
+    nudity_visual: str = "blur"       # "none" | "blur" | "black"
+    nudity_audio: str = "none"        # "none" | "mute_word" | "mute_phrase" | "replace_word" | "replace_phrase"
+    gore_visual: str = "blur"
+    gore_audio: str = "none"
+    violence_visual: str = "blur"
+    violence_audio: str = "none"
+    foul_language_visual: str = "none"
+    foul_language_audio: str = "mute_phrase"
     blur_strength: float = 1.0
-    foul_language: str = "mute"
-    mute_scope: str = "word"
     mute_padding: float = 0.5
     font: str = ""
 
+    # Per-category severity THRESHOLD — correct content at/above this level.
+    # The level scale itself is FIXED (built into the scan, so scans are
+    # shareable); this is just each user's personal cutoff.
+    # "low" | "med" | "high" | "exhigh"
+    nudity_level: str = "med"
+    gore_level: str = "med"
+    violence_level: str = "med"
+    foul_language_level: str = "med"
+
+    # OPTIONAL custom prompts — replace the built-in fixed level scale for a
+    # category entirely. Empty (default) = use the built-in standardized scale.
+    # Only set these if you really want fully custom definitions.
+    nudity_prompt: str = ""
+    gore_prompt: str = ""
+    violence_prompt: str = ""
+    foul_language_prompt: str = ""
+
     def __post_init__(self):
         # Validate enums early with clear messages.
-        for f in ("nudity", "intimate_scenes", "gore_violence"):
-            if getattr(self, f) not in ("blur", "none"):
-                raise ValueError(f"config: {f} must be 'blur' or 'none', got {getattr(self, f)!r}")
-        if self.foul_language not in ("mute", "none"):
-            raise ValueError(f"config: foul_language must be 'mute' or 'none', got {self.foul_language!r}")
-        if self.mute_scope not in ("word", "utterance"):
-            raise ValueError(f"config: mute_scope must be 'word' or 'utterance', got {self.mute_scope!r}")
+        for f in ("nudity_visual", "gore_visual", "violence_visual", "foul_language_visual"):
+            if getattr(self, f) not in ("none", "blur", "black"):
+                raise ValueError(f"config: {f} must be 'none', 'blur' or 'black', got {getattr(self, f)!r}")
+        # Visual categories can only mute the whole scene (no per-word/per-phrase
+        # sound recognition in a visual scene). Foul language has word-level
+        # timestamps, so it keeps the full word/phrase/replace set.
+        for f in ("nudity_audio", "gore_audio", "violence_audio"):
+            if getattr(self, f) not in ("none", "mute_scene"):
+                raise ValueError(
+                    f"config: {f} must be 'none' or 'mute_scene' (visual scenes "
+                    f"can't do word/phrase-level audio), got {getattr(self, f)!r}"
+                )
+        if self.foul_language_audio not in ("none", "mute_word", "mute_phrase",
+                                            "replace_word", "replace_phrase"):
+            raise ValueError(
+                f"config: foul_language_audio must be 'none'/'mute_word'/'mute_phrase'/"
+                f"'replace_word'/'replace_phrase', got {self.foul_language_audio!r}"
+            )
+        for f in ("nudity_level", "gore_level", "violence_level", "foul_language_level"):
+            if getattr(self, f) not in ("low", "med", "high", "exhigh"):
+                raise ValueError(
+                    f"config: {f} must be 'low'/'med'/'high'/'exhigh', got {getattr(self, f)!r}"
+                )
         if self.model_backend not in ("mlx-vlm", "standalone"):
             raise ValueError(f"config: model_backend must be 'mlx-vlm' or 'standalone', got {self.model_backend!r}")
 

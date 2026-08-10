@@ -15,3 +15,10 @@ Scanning Monty.Pythons.Life.of.Brian.1979.1080p.BluRay.x265-RARBG.mp4...
 [sweep] 900 / 2812 frames
 [sweep] 1000 / 2812 frames
 [sweep] 1100 / 2812 frames
+[sweep] 1200 / 2812 frames
+[sweep] 1300 / 2812 frames
+[sweep] 1400 / 2812 frames
+[sweep] 1500 / 2812 frames
+[sweep] 1600 / 2812 frames
+/opt/homebrew/Cellar/python@3.12/3.12.13_4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

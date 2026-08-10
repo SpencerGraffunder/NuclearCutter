@@ -1,13 +1,13 @@
 """
 Pass 1 of the two-pass architecture (docs/SPEC.md section 2): orchestrates
-the full detection pipeline (unified VLM visual sweep for nudity/intimate/
-gore, Whisper transcription, subtitle cross-check, profanity wordlist + LLM
-check) and produces a ScanResult.
+the full detection pipeline (unified VLM visual sweep for nudity/gore/
+violence, Whisper transcription, subtitle cross-check, profanity wordlist +
+LLM check) and produces a ScanResult.
 
 Visual detection is a single full-film VLM sweep (see detection/vlm_confirm.py)
 — NudeNet was removed because it missed a real nude scene entirely; the VLM
-sweep is the only visual detector and catches nudity, intimate scenes, and
-gore/violence in one pass.
+sweep is the only visual detector and catches nudity, gore, and violence in
+one pass.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ def scan(
     whisper_model: str = None,
     sweep_interval: float = None,
     status_path: Path | str = None,
+    category_prompts: dict = None,
 ) -> ScanResult:
     llm_config = llm_config or LLMConfig()
     client = LLMClient(llm_config)
@@ -92,16 +93,16 @@ def scan(
 
     # ------------------------------------------------------------------
     # Unified full-film VLM sweep (the only visual detector — no NudeNet).
-    # One sweep pass catches nudity, intimate scenes, AND gore/violence.
+    # One sweep pass catches nudity, gore, AND violence.
     # ------------------------------------------------------------------
     if progress_callback:
         progress_callback("visual_sweep", None)
     _phase("visual_sweep")
-    sweep_detector = VisualSweepDetector(client)
+    sweep_detector = VisualSweepDetector(client, prompts=category_prompts)
 
-    def _on_flagged_window(start, end, category, confidence):
+    def _on_flagged_window(start, end, category, confidence, level="med"):
         if status is not None:
-            status.add_candidate(start, end, category, confidence)
+            status.add_candidate(start, end, category, confidence, level)
             _write_status()
 
     def _on_sweep_progress(done, total):
@@ -132,6 +133,7 @@ def scan(
                 status.add_visual_detection(
                     detection.category, detection.start, detection.end,
                     detection.description or "", detection.confidence,
+                    detection.level.value,
                 )
                 _write_status()
         else:
@@ -149,7 +151,8 @@ def scan(
         progress_callback("language_detection", None)
     _phase("language_detection")
     wordlist = load_wordlist()
-    language_detections = detect_foul_language(utterances, client, wordlist, subtitle_utterances)
+    foul_prompt = (category_prompts or {}).get("foul_language")
+    language_detections = detect_foul_language(utterances, client, wordlist, subtitle_utterances, foul_language_prompt=foul_prompt)
     for d in language_detections:
         if status is not None:
             status.add_language_detection(d.word, d.start, d.end, d.utterance_start, d.utterance_end)
