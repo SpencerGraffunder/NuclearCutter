@@ -462,6 +462,15 @@ def run_with_tui(worker, status_path: Path, interval: float = 1.0,
     status_path = Path(status_path)
     result: dict = {"value": None, "error": None}
 
+    # Capture the REAL terminal streams BEFORE the worker thread redirects
+    # sys.stdout/sys.stderr to the log file. rich's Console reads sys.stdout at
+    # construction time — if it grabs the redirected (log) stream instead, the
+    # dashboard silently renders into the log file and the terminal stays black
+    # (empty alternate screen). So build the Console here, before t.start().
+    real_stdout = sys.stdout
+    real_stderr = sys.stderr
+    console = Console(file=real_stdout)
+
     def _worker():
         target = open(log_path, "w") if log_path else open("/dev/null", "w")
         try:
@@ -476,7 +485,6 @@ def run_with_tui(worker, status_path: Path, interval: float = 1.0,
     t.start()
 
     stats = SystemStats()
-    console = Console()
     try:
         with Live(console=console, refresh_per_second=1 / interval, screen=True) as live:
             while t.is_alive():

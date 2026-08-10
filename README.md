@@ -1,7 +1,7 @@
 # NuclearCutter
 
 Self-hosted, open-source content censoring for your local movie collection.
-Detects nudity, intimate scenes, and foul language and produces a permanently
+Detects nudity, gore, violence, and foul language and produces a permanently
 modified copy of the file — no live-playback plugin, no dependency on Plex or
 any particular player. Runs on your own hardware, targeting Apple Silicon.
 
@@ -10,6 +10,29 @@ playback time. NuclearCutter edits the file itself, once, and you keep the resul
 
 **Status:** early / actively developed. See `docs/SPEC.md` for the full design
 rationale behind every decision below — read that first if you're contributing.
+
+## Quick start
+
+Requirements: macOS on Apple Silicon (recommended), Python 3.10+, and
+`ffmpeg`/`ffprobe` on your PATH. Everything else is handled for you — the
+first run creates a local virtual environment and installs dependencies
+automatically (no `pip install`, no `source activate`).
+
+```bash
+git clone https://github.com/SpencerGraffunder/NuclearCutter.git
+cd NuclearCutter
+
+# Scan a movie (slow — hours, run it and walk away)
+python3 nuclearcutter.py scan "/path/to/Movie.mkv"
+
+# Once the scan finishes, produce the cleaned copy (fast)
+python3 nuclearcutter.py render "/path/to/Movie.mkv"
+```
+
+That's it. `python3 nuclearcutter.py` creates `.venv/` and installs everything
+on first run, then runs the real CLI inside it. You can also run
+`./nuclearcutter.py` (it's executable) or, if you prefer, activate the venv
+manually: `source .venv/bin/activate && nuclearcutter scan ...`.
 
 ## What it does
 
@@ -130,25 +153,17 @@ Foul-language muting pads each flagged word by `--mute-padding` seconds (default
 
 ### Install
 
-```bash
-git clone <this-repo>
-cd nuclearcutter
-pip install -e .
-```
-
-Activate the local virtual environment before running the CLI, or invoke the
-installed binary directly:
+No install step needed — `python3 nuclearcutter.py` sets up a local virtual
+environment (`.venv/`) and installs the package + dependencies automatically
+on first run. After that, every invocation is just:
 
 ```bash
-source .venv/bin/activate
-nuclearcutter scan "/path/to/Movie.mkv"
+python3 nuclearcutter.py scan "/path/to/Movie.mkv"
+python3 nuclearcutter.py render "/path/to/Movie.mkv"
 ```
 
-Or:
-
-```bash
-./.venv/bin/nuclearcutter scan "/path/to/Movie.mkv"
-```
+(Equivalently: `./nuclearcutter.py ...`, or activate the venv once and use
+`nuclearcutter ...` — `source .venv/bin/activate` then `nuclearcutter scan ...`.)
 
 ### Configuration (config.toml)
 
@@ -215,10 +230,11 @@ Every setting can still be overridden per-run with a CLI flag — see `--help`.
 ### The mlx-vlm backend (default)
 
 The default backend is **mlx-vlm**, a fast MLX vision-language model server that
-runs entirely on your Mac's GPU. NuclearCutter:
+runs entirely on your Mac's GPU. It's installed automatically into the venv by
+`nuclearcutter.py` on first run (there's no Homebrew formula for mlx-vlm, so
+it's pip-installed). At scan time NuclearCutter:
 
-1. checks it's installed (`pip install mlx-vlm`; note there is no Homebrew
-   formula for mlx-vlm, so it's pip-installed into your venv),
+1. checks it's installed,
 2. starts its own server (`python -m mlx_vlm.server --port 1234 --model <path>`,
    with 4-bit KV-cache quantization) pointed at your `model_path`,
 3. waits for it to come up, runs the scan against it, and shuts it down when
@@ -280,13 +296,15 @@ The two commands, at a glance (settings come from `config.toml` — see above):
 
 ```bash
 # Scan a movie (slow — hours to a day+ depending on length/hardware)
-nuclearcutter scan "/path/to/Movie.mkv"
+python3 nuclearcutter.py scan "/path/to/Movie.mkv"
 
 # Render with your preferred actions per category
-nuclearcutter render "/path/to/Movie.mkv"
+python3 nuclearcutter.py render "/path/to/Movie.mkv"
 ```
 
-This produces `/path/to/Movie_cleaned.mkv`.
+This produces `/path/to/Movie_cleaned.mkv`. (If you've activated the venv with
+`source .venv/bin/activate`, you can drop the `python3 nuclearcutter.py` and just
+run `nuclearcutter scan ...`.)
 
 ## Live dashboard (integrated into scan/render)
 

@@ -120,3 +120,35 @@ def test_build_panel_renders(tmp_path):
     out = console.export_text()
     assert "visual_sweep" in out
     assert "Timeline" in out
+
+
+def test_console_captures_real_stdout_before_worker_redirect():
+    """Regression: run_with_tui builds its rich Console from the REAL terminal
+    stdout BEFORE the worker thread redirects sys.stdout to a log file. If the
+    Console were built after the redirect (a global swap), the dashboard would
+    silently render into the log and the terminal would show a black screen.
+
+    We can't easily run the full threaded Live loop here, but we can assert the
+    invariant that matters: a Console given `file=real_stdout` keeps writing to
+    that captured stream even while another thread redirects sys.stdout."""
+    import contextlib
+    import io
+    import threading
+    import time
+    from rich.console import Console
+
+    real_out = io.StringIO()
+    leak = io.StringIO()
+    console = Console(file=real_out, width=40)
+
+    def worker():
+        with contextlib.redirect_stdout(leak):
+            time.sleep(0.05)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    console.print("DASHBOARD_FRAME")
+    t.join()
+
+    assert "DASHBOARD_FRAME" in real_out.getvalue(), "must render to captured stdout"
+    assert "DASHBOARD_FRAME" not in leak.getvalue(), "must NOT leak into redirected stream"
