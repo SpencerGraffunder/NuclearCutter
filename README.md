@@ -309,12 +309,27 @@ run `nuclearcutter scan ...`.)
 ## Live dashboard (integrated into scan/render)
 
 Both `scan` and `render` show a **live TUI dashboard** while they run — no
-separate command needed. It displays a film timeline with markers for detected
-visual/language cut locations, a current-position cursor, a time estimate, and
-live CPU/RAM (GPU/temps when passwordless `sudo powermetrics` is available;
-otherwise shown as n/a). The dashboard appears automatically when you run the
-command in a terminal; pass `--no-tui` to get plain text output instead (also
-auto-disabled when stdout is piped/redirected).
+separate command needed. It displays a color-coded film timeline with markers
+for detected visual/language cut locations (a legend shows what each letter
+means), a current-position cursor, a time estimate, and live CPU/RAM + scan
+memory. GPU usage and temperature are shown when passwordless `sudo
+powermetrics` is available; otherwise the dashboard says n/a and tells you the
+one-line sudoers rule to enable it. The dashboard appears automatically when
+you run the command in a terminal; pass `--no-tui` to get plain text output
+instead (also auto-disabled when stdout is piped/redirected).
+
+### Why a scan takes hours
+
+A scan samples a frame every 2 seconds across the whole film and sends each
+batch of 4 frames to the vision model for review. That's a lot of model calls —
+a ~2-hour film is roughly **900 model calls** (3600 sampled frames ÷ 4), and
+each one takes several seconds on a MacBook's GPU. Whisper transcription and
+the per-scene confirm pass add more on top. So hours are normal (roughly
+proportional to film length × your GPU speed). To trade thoroughness for speed,
+raise the sweep interval: `python3 nuclearcutter.py scan MOVIE.mkv
+--sweep-interval 5` halves the model calls (but can miss scenes shorter than
+~5s); `10` is faster still. Lower intervals (the 2s default) catch short
+flashes at the cost of more calls.
 
 The dashboard also streams a live status JSON to a temp file (phase, position,
 and every detection as it's found). You can watch a scan started elsewhere with:

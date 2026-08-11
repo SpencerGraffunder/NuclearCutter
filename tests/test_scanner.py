@@ -72,7 +72,8 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
         def __init__(self, client):
             pass
 
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None):
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
+                  resume_from=0, existing_windows=None):
             captured["interval"] = sample_interval
             return [
                 SweepRange(start=10.0, end=20.0, category=Category.NUDITY,
@@ -125,7 +126,8 @@ def test_scan_forwards_custom_sweep_interval(monkeypatch, mock_video):
         def __init__(self, client):
             pass
 
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None):
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
+                  resume_from=0, existing_windows=None):
             captured["interval"] = sample_interval
             return []
 
@@ -163,7 +165,8 @@ def test_scan_raises_when_all_confirmations_fail(monkeypatch, mock_video):
         def __init__(self, client):
             pass
 
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None):
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
+                  resume_from=0, existing_windows=None):
             return [SweepRange(start=1.0, end=2.0, category=Category.NUDITY,
                                description="x", confidence=0.5)]
 
@@ -186,3 +189,86 @@ def test_scan_raises_when_all_confirmations_fail(monkeypatch, mock_video):
 
     with pytest.raises(RuntimeError, match="confirmation queries failed"):
         scan(mock_video, llm_config=llm_config)
+
+
+def test_scan_resumes_from_prior_status(monkeypatch, mock_video, tmp_path):
+    """An interrupted scan resumes: the sweep gets resume_from + existing
+    windows, and already-confirmed candidates are not re-confirmed."""
+    _fake_identity_patches(monkeypatch)
+    _mock_transcription(monkeypatch)
+    _mock_profanity(monkeypatch)
+    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
+
+    status_path = tmp_path / "test_movie.nuclearcutter.status.json"
+    # Simulate a prior run that swept 8 frames, found one candidate (already
+    # confirmed) and one unconfirmed candidate.
+    prior = {
+        "schema": 1, "video": mock_video.name, "duration_seconds": 100.0,
+        "sweep_interval": 2.0, "pid": 1, "started_at": "2026-01-01T00:00:00",
+        "phase": "visual_confirm", "frames_done": 8, "frames_total": 50,
+        "position_seconds": 16.0,
+        "visual_candidates": [
+            {"category": "nudity", "start": 10.0, "end": 12.0, "confidence": 0.9, "level": "low"},
+            {"category": "gore", "start": 50.0, "end": 52.0, "confidence": 0.8, "level": "low"},
+        ],
+        "visual_detections": [
+            {"category": "nudity", "start": 8.0, "end": 14.0, "description": "already done",
+             "confidence": 0.9, "level": "high"},
+        ],
+        "language_detections": [],
+    }
+    import json as _json
+    status_path.write_text(_json.dumps(prior))
+
+    captured = {"resume_from": None, "existing": None}
+
+    class FakeDetector:
+        def __init__(self, client):
+            pass
+
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
+                  resume_from=0, existing_windows=None):
+            captured["resume_from"] = resume_from
+            captured["existing"] = existing_windows
+            # Return the two candidates from the prior status (reconstructed
+            # from the seeded windows by the merge).
+            return [
+                SweepRange(start=8.0, end=14.0, category=Category.NUDITY,
+                           description="already done", confidence=0.9, level="high"),
+                SweepRange(start=50.0, end=54.0, category=Category.GORE,
+                           description="new", confidence=0.8),
+            ]
+
+        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
+            from nuclearcutter.schema import VisualDetection
+            # Only the GORE candidate is new — the NUDITY one was confirmed.
+            if candidate.category == Category.GORE:
+                return VisualDetection(
+                    category=Category.GORE, start=50.0, end=54.0,
+                    description="confirmed now", confidence=0.8,
+                )
+            raise AssertionError("already-confirmed candidate was re-confirmed!")
+
+    monkeypatch.setattr(
+        "nuclearcutter.scan.scanner.VisualSweepDetector",
+        lambda client, prompts=None: FakeDetector(client),
+    )
+
+    from nuclearcutter.scan.scanner import scan
+    from nuclearcutter.utils.llm_client import LLMConfig
+
+    llm_config = LLMConfig(
+        base_url="http://localhost:9999/v1",
+        vlm_model="test-model",
+        text_model="test-model",
+    )
+
+    result = scan(mock_video, llm_config=llm_config, status_path=status_path)
+
+    # Sweep resumed from frame 8 with the two prior raw windows.
+    assert captured["resume_from"] == 8
+    assert len(captured["existing"]) == 2
+    # Both confirmed detections present (prior NUDITY + newly confirmed GORE).
+    assert len(result.visual_detections) == 2
+    cats = {d.category for d in result.visual_detections}
+    assert cats == {Category.NUDITY, Category.GORE}

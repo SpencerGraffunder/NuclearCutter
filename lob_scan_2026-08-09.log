@@ -1,24 +1,0 @@
-Starting model backend: mlx-vlm ...
-Scanning Monty.Pythons.Life.of.Brian.1979.1080p.BluRay.x265-RARBG.mp4...
-[fingerprinting]
-[fingerprinting] loaded cached fingerprint (6 samples, 5624s)
-[transcribing]
-Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 9709.04it/s]
-[sweep] 100 / 2812 frames
-[sweep] 200 / 2812 frames
-[sweep] 300 / 2812 frames
-[sweep] 400 / 2812 frames
-[sweep] 500 / 2812 frames
-[sweep] 600 / 2812 frames
-[sweep] 700 / 2812 frames
-[sweep] 800 / 2812 frames
-[sweep] 900 / 2812 frames
-[sweep] 1000 / 2812 frames
-[sweep] 1100 / 2812 frames
-[sweep] 1200 / 2812 frames
-[sweep] 1300 / 2812 frames
-[sweep] 1400 / 2812 frames
-[sweep] 1500 / 2812 frames
-[sweep] 1600 / 2812 frames
-/opt/homebrew/Cellar/python@3.12/3.12.13_4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-  warnings.warn('resource_tracker: There appear to be %d '

@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import datetime as _dt
+import getpass
 import re
 import shutil
 import subprocess
@@ -233,7 +234,8 @@ class SystemStats:
 
     def sample(self) -> dict:
         out = {"cpu": None, "mem_pct": None, "mem_used": None, "mem_total": None,
-               "proc_cpu": None, "proc_mem": None, "gpu": None, "temp": None}
+               "proc_cpu": None, "proc_mem": None, "proc_mem_total": None,
+               "gpu": None, "temp": None, "hw_ok": self._powermetrics_available()}
         if self._psutil:
             try:
                 out["cpu"] = self._psutil.cpu_percent(interval=None)
@@ -247,9 +249,18 @@ class SystemStats:
                 try:
                     out["proc_cpu"] = self._proc.cpu_percent(interval=None)
                     out["proc_mem"] = self._proc.memory_info().rss
+                    # Also include the mlx-vlm server child process (where the
+                    # heavy model memory actually lives), so "scan RSS" reflects
+                    # the real memory the scan is using.
+                    out["proc_mem_total"] = out["proc_mem"]
+                    for child in self._proc.children(recursive=True):
+                        try:
+                            out["proc_mem_total"] += child.memory_info().rss
+                        except Exception:
+                            pass
                 except Exception:
                     pass
-        if self._powermetrics_available():
+        if out["hw_ok"]:
             try:
                 r = subprocess.run(
                     ["sudo", "-n", "powermetrics", "--samplers", "smc,gpu_power",
@@ -304,47 +315,56 @@ def _fmt_dur(s: float | None) -> str:
     return _fmt_secs(s)
 
 
-def _timeline(v: View, width: int = 70) -> Text:
-    """A single-line timeline: markers + current-position cursor."""
-    duration = v.duration or 1.0
-    cells = ["·"] * width
+def _cat_marker(cat: str) -> str:
+    """Timeline marker letter for a category (lowercase = candidate/unconfirmed,
+    uppercase = confirmed detection)."""
+    return {"NUDITY": "n", "GORE": "g", "VIOLENCE": "v",
+            "FOUL_LANGUAGE": "l"}.get(cat, "?")
 
-    def place(start, end, ch):
+
+def _cat_color(cat: str) -> str:
+    return _CAT_COLORS.get(cat, "white")
+
+
+def _timeline(v: View, width: int = 40) -> Text:
+    """A single-line timeline: color-coded markers + current-position cursor.
+
+    Width matches the progress bar so the markers line up with position. Markers
+    are colored by category (see _CAT_COLORS); lowercase = raw sweep candidates,
+    uppercase = confirmed detections; 'l' = foul language.
+    """
+    duration = v.duration or 1.0
+    cells: list[tuple[str, str]] = [("·", "default")] * width  # (char, style)
+
+    def place(start, end, ch: str, style: str):
         if start is None or end is None or duration <= 0:
             return
         s = max(0, int(start / duration * width))
         e = min(width - 1, int(end / duration * width))
         for i in range(s, e + 1):
-            cells[i] = ch
+            cells[i] = (ch, style)
 
+    # Raw sweep candidates -> lowercase marker, dim category color.
     for c in v.candidates:
-        place(c.get("start"), c.get("end"), "v")
+        cat = _cat_key(c.get("category"))
+        place(c.get("start"), c.get("end"), _cat_marker(cat),
+              "dim " + _cat_color(cat))
+    # Confirmed visual detections -> uppercase marker, category color.
     for d in v.detections:
-        ch = {"NUDITY": "N", "GORE": "G", "VIOLENCE": "V"}.get(
-            _cat_key(d.get("category")), "N"
-        )
-        place(d.get("start"), d.get("end"), ch)
+        cat = _cat_key(d.get("category"))
+        place(d.get("start"), d.get("end"), _cat_marker(cat).upper(),
+              _cat_color(cat))
+    # Foul language.
     for d in v.lang_detections:
-        place(d.get("start"), d.get("end"), "L")
+        place(d.get("start"), d.get("end"), "l", "dim magenta")
 
     pos = v.position
     if pos is not None and duration > 0:
         idx = max(0, min(width - 1, int(pos / duration * width)))
-        cells[idx] = "█"
+        cells[idx] = ("█", "bold white on blue")
 
     t = Text()
-    for i, ch in enumerate(cells):
-        style = "default"
-        if ch == "v":
-            style = "dim yellow"
-        elif ch == "N":
-            style = _CAT_COLORS["NUDITY"]
-        elif ch == "G":
-            style = _CAT_COLORS["GORE"]
-        elif ch == "L":
-            style = "magenta"
-        elif ch == "█":
-            style = "bold white on blue"
+    for ch, style in cells:
         t.append(ch, style=style)
     return t
 
@@ -369,10 +389,11 @@ def _detection_rows(v: View) -> list[str]:
 
 
 def build_panel(v: View, stats: dict) -> Panel:
-    title = Text(" NuclearCutter — scan monitor ", style="bold cyan")
-    phase = Text(f" phase: {v.phase} ", style="bold white on dark_green")
+    title = Text(" NuclearCutter — scan ", style="bold cyan")
+    phase = Text(f" {v.phase} ", style="bold white on dark_green")
 
-    timeline = _timeline(v)
+    BAR_W = 40  # keep timeline + progress bar the same width so they line up
+    timeline = _timeline(v, width=BAR_W)
     pct = v.pct
     pos_str = _fmt_secs(v.position) if v.position is not None else "--:--"
     dur_str = _fmt_dur(v.duration)
@@ -383,17 +404,19 @@ def build_panel(v: View, stats: dict) -> Panel:
     prog.append("\n")
     prog.append(timeline)
     prog.append("\n")
-    bar_w = 40
-    filled = int(bar_w * pct / 100)
+    filled = int(BAR_W * pct / 100)
     prog.append(" " * filled, style="on bright_blue")
-    prog.append(" " * (bar_w - filled), style="on grey19")
+    prog.append(" " * (BAR_W - filled), style="on grey19")
     prog.append(f"  {pct:5.1f}%  pos {pos_str} / {dur_str}\n")
 
     meta = Text()
     meta.append(f"Frames: {v.frames_done}/{v.frames_total}   ", style="bold")
     if v.eta_seconds is not None:
         meta.append(f"ETA {_fmt_secs(v.eta_seconds)}   ", style="yellow")
-    meta.append(f"source: {v.source}\n", style="dim")
+    # Show the movie being scanned instead of the internal source label.
+    label = v.video if v.video else (v.source if v.source != "status" else "scan")
+    meta.append(label, style="dim")
+    meta.append("\n")
 
     # Detection summary + rows.
     det = Text()
@@ -414,8 +437,27 @@ def build_panel(v: View, stats: dict) -> Panel:
     sys_.append(f"RAM {mem if mem is not None else 'n/a'}%   ")
     sys_.append(f"GPU {stats.get('gpu') if stats.get('gpu') is not None else 'n/a'}   ")
     sys_.append(f"Temp {stats.get('temp') if stats.get('temp') is not None else 'n/a'}°C\n")
-    if stats.get("proc_mem"):
-        sys_.append(f"scan RSS {stats['proc_mem']/1e9:.1f} GB", style="dim")
+    rss = stats.get("proc_mem_total") or stats.get("proc_mem")
+    if rss:
+        # Adaptive units so small early-scan RSS isn't shown as "0.0 GB".
+        if rss >= 1e9:
+            sys_.append(f"scan RSS {rss/1e9:.2f} GB", style="dim")
+        else:
+            sys_.append(f"scan RSS {rss/1e6:.0f} MB", style="dim")
+    if not stats.get("hw_ok"):
+        user = getpass.getuser()
+        sys_.append("\n  GPU/temp n/a — needs passwordless sudo for powermetrics", style="dim")
+        sys_.append(
+            f"\n  enable: add `{user} ALL=(root) NOPASSWD: /usr/bin/powermetrics` to /etc/sudoers",
+            style="dim",
+        )
+
+    # Legend for the color-coded timeline markers.
+    legend = Text("Legend  ", style="bold")
+    for cat, letter in (("NUDITY", "n"), ("GORE", "g"), ("VIOLENCE", "v"), ("FOUL_LANGUAGE", "l")):
+        legend.append(f"{letter}=", style=_cat_color(cat))
+        legend.append(cat[:4].lower() + "  ", style=_cat_color(cat))
+    legend.append("█ pos", style="bold white on blue")
 
     table = Table.grid(padding=(0, 1))
     table.add_column(justify="left")
@@ -424,6 +466,7 @@ def build_panel(v: View, stats: dict) -> Panel:
     table.add_row(meta)
     table.add_row(det)
     table.add_row(sys_)
+    table.add_row(legend)
     return Panel(table, border_style="cyan")
 
 

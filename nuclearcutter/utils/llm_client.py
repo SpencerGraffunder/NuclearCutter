@@ -35,6 +35,12 @@ class LLMConfig:
     # indefinitely. Tokens are free locally, but time isn't.
     text_max_tokens: int = 6000
     vision_max_tokens: int = 9000
+    # Qwen3-family models are reasoning models that "think" before answering by
+    # default, emitting thousands of tokens (and taking minutes per request)
+    # even for simple yes/no classification. `enable_thinking=False` is sent in
+    # the request so servers that support it (LM Studio, mlx-vlm) skip the
+    # reasoning chain entirely — a huge latency win for our short JSON answers.
+    enable_thinking: bool = False
     # Vision requests send frames as JPEG; downscaling them is the single
     # biggest speed lever for local VLM inference (~6x faster on an M-series Mac
     # at ~480px with no measurable accuracy loss for scene classification).
@@ -162,6 +168,11 @@ class LLMClient:
             ],
             "temperature": 0.1,
             "max_tokens": self.config.vision_max_tokens,
+            "enable_thinking": self.config.enable_thinking,
+            # LM Studio honours `chat_template_kwargs` for Qwen3-family models;
+            # the top-level `enable_thinking` is ignored on some setups, so send
+            # both to actually skip the reasoning chain.
+            "chat_template_kwargs": {"enable_thinking": self.config.enable_thinking},
         }
         # Most local inference servers (LM Studio, Ollama, etc.) do NOT support
         # response_format/json_mode for multimodal (vision) requests, even when
@@ -181,6 +192,11 @@ class LLMClient:
             ],
             "temperature": 0.1,
             "max_tokens": self.config.text_max_tokens,
+            "enable_thinking": self.config.enable_thinking,
+            # LM Studio honours `chat_template_kwargs` for Qwen3-family models;
+            # the top-level `enable_thinking` is ignored on some setups, so send
+            # both to actually skip the reasoning chain.
+            "chat_template_kwargs": {"enable_thinking": self.config.enable_thinking},
         }
         if json_mode:
             # Some servers (OpenAI-compatible) accept json_object; LM Studio

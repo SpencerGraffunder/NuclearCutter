@@ -40,6 +40,14 @@ from nuclearcutter.utils.llm_client import LLMClient
 # How many frames to sample across a candidate range for the confirm/describe pass.
 FRAMES_PER_RANGE = 6
 
+# Output height for extracted frames. The sweep only does coarse flagging, so
+# 480p is plenty and cuts VLM vision tokens ~3.6x (1920x818 -> 480p). The
+# confirm grades severity and writes a viewer-facing description, so it gets
+# 720p to keep small details (cuts, on-screen text) legible. Width auto-scales
+# to preserve aspect ratio.
+SWEEP_SCALE_HEIGHT = 480
+CONFIRM_SCALE_HEIGHT = 720
+
 # How many times to retry a VLM query that fails/returns unparseable output.
 # Reasoning models intermittently emit empty responses; one retry usually
 # succeeds, a small cap keeps a dead server from stalling the whole scan.
@@ -207,8 +215,8 @@ def _category_definitions(prompts: dict | None) -> dict:
 
     Default = the built-in fixed level scale for that category (standardized
     and shareable). If the user supplies a custom prompt for a category, it
-    replaces the level scale entirely (best-effort; level still returned but
-    defaults to MED if unparseable).
+    replaces the level scale entirely (best-effort; the assigned level is then
+    derived from the four match booleans, defaulting to exhigh if unclear).
     """
     out = {
         cat: _level_scale_text(DEFAULT_LEVEL_SCALES[cat])
@@ -227,15 +235,16 @@ def build_sweep_prompt(category_defs: dict, n: int) -> str:
 
     One question per sampled batch: "does this batch contain ANY flagged
     content?" — where "flagged" is defined by each category's level scale.
-    The VLM also returns WHICH level the content fits into.
+    Severity is NOT graded here; the focused confirm pass is the sole source
+    of truth for the level.
     """
     bullets = "\n".join(f"- {cat.value}:\n{category_defs[cat]}" for cat in _VISUAL_CATEGORIES)
     return f"""You are reviewing {{n}} sampled frames from a movie, shown in \
 chronological order, to help a parental-content-filtering tool decide what is in this batch.
 
 Flag the batch if ANY of the following categories applies. For each category, \
-here is the severity scale (low = the WORST content, exhigh = the mildest \
-content that still counts) — this is the ONLY measure of what counts:
+here is the FULL definition of what counts as flagged content — this is the \
+ONLY measure of what counts:
 {bullets}
 
 Respond with a JSON object with these exact fields:
@@ -244,10 +253,6 @@ Respond with a JSON object with these exact fields:
 content matching any category above.
 - "category": "nudity", "gore", or "violence" if contains_flagged_content is \
 true, otherwise null. If multiple apply, pick the most severe one.
-- "level": which severity level the content fits — "low", "med", "high", or \
-"exhigh". Assign the LOWEST (most restrictive) level whose definition the \
-content matches: the worst content gets "low", and content that only barely \
-qualifies gets "exhigh". If contains_flagged_content is false, set this to null.
 - "confidence": a number from 0 to 1.
 - "description": a SHORT, clean, matter-of-fact summary of what the flagged \
 frame(s) show, suitable for display as text on a black screen in place of the \
@@ -258,12 +263,23 @@ Respond with ONLY the JSON object, no other text.""".replace("{{n}}", str(n))
 
 def build_confirm_prompt(category: Category, definition: str, dialogue_text: str) -> str:
     """Per-category confirm prompt: verify a swept range matches that category's
-    level scale and return the exact level + the on-screen summary."""
+    definitions and, for EACH level independently, whether the content matches.
+    The model answers four factual yes/no questions; picking the narrowest
+    (assigned) level is done in code, not by the model."""
     return f"""You are reviewing frames sampled from a short segment of a movie that \
 was flagged as possibly containing: {category.value}.
 
-Here is the severity scale for {category.value} (low = the WORST content, \
-exhigh = the mildest content that still counts) — the ONLY measure of what counts:
+Here is the FULL description of each level for {category.value}:
+
+Note: despite the name, "low" is the STRICTEST definition — it only matches the \
+single worst/most extreme content. "exhigh" is the LOOSEST definition — it \
+matches almost anything even slightly related. Going from low → med → high → \
+exhigh, each definition gets broader and easier to satisfy. It's expected and \
+correct for content to match multiple levels at once — evaluate each one \
+independently and mark it true if the content fits, regardless of what you \
+answered for the others.
+
+The level definitions (in order, low → exhigh):
 {definition}
 
 Dialogue spoken during this segment (may be empty if none):
@@ -274,20 +290,18 @@ Dialogue spoken during this segment (may be empty if none):
 Look at the attached frames (sampled in chronological order across the segment) and \
 respond with a JSON object with these exact fields:
 
-- "contains_flagged_content": true or false — true only if the segment matches \
-the scale above.
-- "category": "{category.value}" if contains_flagged_content is true, otherwise null.
-- "level": which severity level the segment fits — "low", "med", "high", or \
-"exhigh". Assign the LOWEST (most restrictive) level whose definition the \
-content matches: the worst content gets "low", and content that only barely \
-qualifies gets "exhigh". If contains_flagged_content is false, set this to null.
+- "matches_low": true or false — does the content match the "low" definition above?
+- "matches_med": true or false — does the content match the "med" definition above?
+- "matches_high": true or false — does the content match the "high" definition above?
+- "matches_exhigh": true or false — does the content match the "exhigh" definition above?
+- "category": "{category.value}" if the content matches any level above, otherwise null.
 - "confidence": a number from 0 to 1.
 - "description": a SHORT, clean, matter-of-fact summary of what happens in this segment, \
 suitable for display as text on a black screen in place of the actual footage. It should \
 describe what happens visually AND include any plot-relevant content from the dialogue, \
 so a viewer who reads this instead of watching does not miss story information. Do not \
 be graphic or explicit in the description itself — describe the situation plainly, the \
-way a content-rating summary would. If contains_flagged_content is false, set this to \
+way a content-rating summary would. If the content matches no level above, set this to \
 an empty string.
 
 Respond with ONLY the JSON object, no other text."""
@@ -306,7 +320,9 @@ class SweepRange:
     category: Category
     description: str
     confidence: float
-    level: SeverityLevel = SeverityLevel.MED
+    # The sweep never grades severity — LOW is a never-miss placeholder; the
+    # confirm pass is the sole source of truth for the real level.
+    level: SeverityLevel = SeverityLevel.LOW
 
 
 def _category_from_str(category_str: str | None) -> Category:
@@ -318,8 +334,20 @@ def _category_from_str(category_str: str | None) -> Category:
         return Category.NUDITY
 
 
-def _level_from_str(level_str: str | None) -> SeverityLevel:
-    return SeverityLevel.from_any(level_str)
+def _select_assigned_level(result: dict) -> SeverityLevel | None:
+    """Pick the assigned level from the confirm result's four independent
+    match booleans. First (narrowest/strictest) true match wins — the model
+    only answers factual yes/no questions per definition; the "pick the
+    minimum" math is done here, in code."""
+    for lv, key in [
+        (SeverityLevel.LOW, "matches_low"),
+        (SeverityLevel.MED, "matches_med"),
+        (SeverityLevel.HIGH, "matches_high"),
+        (SeverityLevel.EXHIGH, "matches_exhigh"),
+    ]:
+        if result.get(key):
+            return lv  # first (narrowest/strictest) match wins
+    return None
 
 
 class VisualSweepDetector:
@@ -336,6 +364,8 @@ class VisualSweepDetector:
         sample_interval: float = DEFAULT_SWEEP_INTERVAL_SECONDS,
         on_flagged_window=None,
         on_progress=None,
+        resume_from: int = 0,
+        existing_windows: list | None = None,
     ) -> list[SweepRange]:
         """Sample the whole film; return merged, padded candidate ranges that contain
         nudity, gore, or violence.
@@ -344,18 +374,25 @@ class VisualSweepDetector:
         raw flagged batch window as it's found (for live status/markers).
         `on_progress(done, total)` is called after each batch (for live progress).
         Both are optional.
+
+        Resume support: `resume_from` is the number of frames already swept in a
+        previous run (we skip straight past them — the dominant cost of a scan),
+        and `existing_windows` are the raw flagged windows found before the
+        interruption (so merging still sees the whole film). `on_progress` reports
+        ABSOLUTE frame counts so status stays consistent across resumes.
         """
         duration = probe_duration(video_path)
-        flagged_windows: list[tuple[float, float, Category, str, float, SeverityLevel]] = []
+        flagged_windows: list[tuple[float, float, Category, str, float, SeverityLevel]] = list(existing_windows or [])
         tmp_dir = Path(tempfile.mkdtemp(prefix="cleancut_sweep_"))
         try:
             timestamps = [t for t in _arange(0.0, duration - 0.5, sample_interval)]
-            for i in range(0, len(timestamps), SWEEP_FRAMES_PER_CALL):
+            start = min(max(resume_from, 0), len(timestamps))
+            for i in range(start, len(timestamps), SWEEP_FRAMES_PER_CALL):
                 batch_ts = timestamps[i:i + SWEEP_FRAMES_PER_CALL]
                 frame_paths = []
                 for ts in batch_ts:
                     try:
-                        frame_paths.append(extract_frame_at(video_path, ts))
+                        frame_paths.append(extract_frame_at(video_path, ts, scale_height=SWEEP_SCALE_HEIGHT))
                     except Exception as exc:
                         logging.warning("Sweep: frame extraction failed at %.1fs — %s", ts, exc)
 
@@ -371,7 +408,11 @@ class VisualSweepDetector:
                 if result and result.get("contains_flagged_content"):
                     category = _category_from_str(result.get("category"))
                     confidence = float(result.get("confidence", 0.5))
-                    level = _level_from_str(result.get("level"))
+                    # The sweep only needs "is there flagged content, roughly
+                    # what category" — severity is graded by the focused confirm
+                    # pass. LOW is the never-miss placeholder used only if
+                    # confirm later fails outright.
+                    level = SeverityLevel.LOW
                     flagged_windows.append((
                         batch_ts[0],
                         batch_ts[-1],
@@ -434,7 +475,10 @@ class VisualSweepDetector:
         tmp_dir = Path(tempfile.mkdtemp(prefix="cleancut_confirm_"))
         try:
             fps = FRAMES_PER_RANGE / max(candidate.end - candidate.start, 0.1)
-            frame_paths = extract_frames_in_range(video_path, candidate.start, candidate.end, fps, tmp_dir)
+            frame_paths = extract_frames_in_range(
+                video_path, candidate.start, candidate.end, fps, tmp_dir,
+                scale_height=CONFIRM_SCALE_HEIGHT,
+            )
             if not frame_paths:
                 return _sweep_as_detection(candidate)
             frame_paths = frame_paths[:FRAMES_PER_RANGE]
@@ -455,9 +499,12 @@ class VisualSweepDetector:
                     if attempt == MAX_VLM_RETRIES:
                         return _sweep_as_detection(candidate)
 
-            if not result.get("contains_flagged_content"):
-                # Confirm pass thinks the range is clean. Still keep the sweep's
-                # verdict — never miss a scene the sweep already caught.
+            level = _select_assigned_level(result)
+            if level is None:
+                # The model matched no level definition — either it thinks the
+                # range is clean, or it returned an inconsistent answer. Keep
+                # the sweep's verdict: never miss a scene the sweep already
+                # caught (its level stays LOW, the never-miss placeholder).
                 return _sweep_as_detection(candidate)
 
             return VisualDetection(
@@ -466,7 +513,7 @@ class VisualSweepDetector:
                 end=candidate.end,
                 description=result.get("description", "") or candidate.description,
                 confidence=float(result.get("confidence", candidate.confidence)),
-                level=_level_from_str(result.get("level")) or candidate.level,
+                level=level,
                 stage_a_score=None,
             )
         finally:

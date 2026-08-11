@@ -41,8 +41,17 @@ DEFAULT_FOUL_LANGUAGE_SCALE = (
 CONTEXT_CHECK_PROMPT = """You are helping a content-filtering tool review a line of movie \
 dialogue for foul language.
 
-Here is the severity scale for foul language (low = the WORST words, exhigh = anything \
-rude/mean/disrespectful) — the ONLY measure of what counts:
+Here is the FULL description of each level for foul language:
+
+Note: despite the name, "low" is the STRICTEST definition — it only matches the \
+single worst/most offensive words (severe slurs). "exhigh" is the LOOSEST \
+definition — it matches almost anything rude/mean/disrespectful. Going from \
+low → med → high → exhigh, each definition gets broader and easier to satisfy. \
+It's expected and correct for a word to match multiple levels at once — \
+evaluate each one independently and mark it true if the word fits, regardless \
+of what you answered for the others.
+
+The level definitions (in order, low → exhigh):
 {definition}
 
 Line: "{text}"
@@ -57,14 +66,17 @@ the wordlist missed.
 Respond with ONLY a JSON object with this exact structure:
 {{
   "confirmed_words": ["word1", "word2"],
-  "levels": {{"word1": "high", "word2": "med"}},
+  "matches": {{
+    "word1": {{"matches_low": false, "matches_med": true, "matches_high": true, "matches_exhigh": true}},
+    "word2": {{"matches_low": false, "matches_med": false, "matches_high": false, "matches_exhigh": true}}
+  }},
   "reasoning": "one short sentence explaining any false-positive rejections or additions"
 }}
 
 confirmed_words should be the exact word(s) as they appear in the line, lowercase, that \
-should be flagged as foul language. Empty list if none. levels maps each confirmed word \
-to its severity: "low", "med", "high", or "exhigh" (use the scale above; assign the \
-LOWEST level whose definition the word fits — the worst words get "low")."""
+should be flagged as foul language. Empty list if none. matches maps each confirmed word \
+to four independent booleans: does the word fit that level's definition above? Mark each \
+independently — a word can match multiple levels."""
 
 
 def load_wordlist(path: Path = DEFAULT_WORDLIST_PATH) -> set[str]:
@@ -106,17 +118,19 @@ def detect_foul_language(
             result = client.text_query_json(
                 CONTEXT_CHECK_PROMPT.format(definition=definition, text=utt.text, matches=matches)
             )
+            llm_failed = False
         except Exception:
             # If the LLM call fails, fall back to trusting the wordlist match
             # rather than silently dropping a possible detection.
             result = {"confirmed_words": matches, "reasoning": "llm_check_failed_fallback_to_wordlist"}
+            llm_failed = True
 
         confirmed = [w.lower() for w in result.get("confirmed_words", [])]
         if not confirmed:
             continue
 
-        # Per-word severity from the LLM; default to MED if missing/unparseable.
-        levels_map = result.get("levels") or {}
+        # Per-word severity from the LLM's four independent match booleans.
+        matches_map = result.get("matches") or {}
         source = _cross_check_source(utt, subtitle_utterances)
 
         for confirmed_word in confirmed:
@@ -129,6 +143,16 @@ def detect_foul_language(
                 # whole utterance span for this word's mute window.
                 start, end = utt.start, utt.end
 
+            if llm_failed:
+                # Confirm call failed entirely — grade worst (LOW) so the word
+                # is never missed regardless of the user's threshold.
+                level = SeverityLevel.LOW
+            else:
+                # First (narrowest/strictest) true match wins; if the word was
+                # confirmed but has no positive match data, default to exhigh
+                # (weakest defensible claim — only max-filtering users catch it).
+                level = _select_word_level(matches_map.get(confirmed_word))
+
             detections.append(LanguageDetection(
                 start=start,
                 end=end,
@@ -138,10 +162,27 @@ def detect_foul_language(
                 transcript_source=source,
                 llm_confirmed=True,
                 llm_reasoning=result.get("reasoning"),
-                level=SeverityLevel.from_any(levels_map.get(confirmed_word)),
+                level=level,
             ))
 
     return detections
+
+
+def _select_word_level(matches: dict | None) -> SeverityLevel:
+    """Pick a confirmed word's level from its four independent match booleans.
+    First (narrowest/strictest) true match wins. If the word was confirmed but
+    has no positive match data, fall back to exhigh (the weakest defensible
+    claim — only corrected by max-filtering users)."""
+    if matches:
+        for lv, key in [
+            (SeverityLevel.LOW, "matches_low"),
+            (SeverityLevel.MED, "matches_med"),
+            (SeverityLevel.HIGH, "matches_high"),
+            (SeverityLevel.EXHIGH, "matches_exhigh"),
+        ]:
+            if matches.get(key):
+                return lv
+    return SeverityLevel.EXHIGH
 
 
 def _find_word_timing(utt: Utterance, target_word: str) -> Word | None:

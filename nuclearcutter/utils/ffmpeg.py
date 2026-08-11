@@ -48,8 +48,13 @@ def probe_streams(video_path: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def extract_frame_at(video_path: Path, timestamp_seconds: float) -> Path:
+def extract_frame_at(video_path: Path, timestamp_seconds: float, scale_height: int | None = None) -> Path:
     """Extract a single frame at the given timestamp to a temp PNG file.
+
+    `scale_height`, if given, downscales the frame to that output height
+    (width auto to preserve aspect ratio). This dramatically cuts VLM vision
+    tokens — e.g. 1920x818 -> 480p is ~3.6x fewer tokens per frame — while
+    keeping enough detail for coarse flagging.
 
     Caller is responsible for deleting the returned path when done.
     """
@@ -62,18 +67,18 @@ def extract_frame_at(video_path: Path, timestamp_seconds: float) -> Path:
 
     def _run_ffmpeg(ts: float, path: Path) -> tuple[bool, str]:
         """Run ffmpeg extraction. Returns (success, stderr_text)."""
+        vf = f"scale=-2:{scale_height}" if scale_height else None
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(ts),
+            "-i", str(video_path),
+            "-frames:v", "1",
+        ]
+        if vf:
+            cmd += ["-vf", vf]
+        cmd += ["-q:v", "2", str(path)]
         try:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-ss", str(ts),
-                    "-i", str(video_path),
-                    "-frames:v", "1",
-                    "-q:v", "2",
-                    str(path),
-                ],
-                capture_output=True, text=True, check=True,
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             return True, result.stderr or ""
         except subprocess.CalledProcessError as e:
             return False, e.stderr or "(no stderr)"
@@ -126,18 +131,30 @@ def extract_audio_track(video_path: Path, out_path: Path, start: float = None, e
     return out_path
 
 
-def extract_frames_in_range(video_path: Path, start: float, end: float, fps: float, out_dir: Path) -> list[Path]:
-    """Extract frames from [start, end] at the given fps into out_dir. Returns sorted list of frame paths."""
+def extract_frames_in_range(
+    video_path: Path,
+    start: float,
+    end: float,
+    fps: float,
+    out_dir: Path,
+    scale_height: int | None = None,
+) -> list[Path]:
+    """Extract frames from [start, end] at the given fps into out_dir. Returns sorted list of frame paths.
+
+    `scale_height`, if given, downscales frames to that output height (width
+    auto, aspect preserved) to cut VLM vision tokens.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     pattern = out_dir / "frame_%06d.png"
     duration = end - start
+    vf = f"fps={fps}" + (f",scale=-2:{scale_height}" if scale_height else "")
     subprocess.run(
         [
             "ffmpeg", "-y",
             "-ss", str(start),
             "-i", str(video_path),
             "-t", str(duration),
-            "-vf", f"fps={fps}",
+            "-vf", vf,
             "-q:v", "2",
             str(pattern),
         ],

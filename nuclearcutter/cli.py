@@ -32,6 +32,47 @@ def _default_scan_path(video_path: Path) -> Path:
     return video_path.with_suffix(".nuclearcutter.json")
 
 
+def _save_result_with_fallback(result: ScanResult, out_path: Path) -> Path:
+    """Persist a completed scan result, never losing it to a failed write.
+
+    The movie's folder is the working dir — the recovery copy lives right next
+    to the intended output (no temp files). Strategy (in order of durability):
+      1. Write a recovery copy next to the movie FIRST.
+      2. If the movie folder itself is unwritable (e.g. the SMB share dropped
+         mid-scan), the recovery copy falls back to CWD — still no temp files.
+      3. Best-effort write to the intended destination (often the SMB share).
+         If that fails, fall back to CWD too.
+      4. Keep whichever copy succeeded as the answer.
+
+    Returns the path the result was actually saved to.
+    """
+    recovery_path = out_path.with_name(out_path.name + ".recovery.json")
+    try:
+        result.save(recovery_path)
+    except OSError:
+        # Movie folder dead — fall the recovery copy back to CWD.
+        recovery_path = Path.cwd() / recovery_path.name
+        try:
+            result.save(recovery_path)
+        except OSError as exc:
+            raise RuntimeError(f"could not save scan result locally: {exc}") from exc
+
+    saved_to = recovery_path
+    try:
+        result.save(out_path)
+        saved_to = out_path
+    except OSError as exc:
+        fallback = Path.cwd() / out_path.name
+        print(f"warning: could not write {out_path} ({exc}); falling back to {fallback}")
+        try:
+            result.save(fallback)
+            saved_to = fallback
+        except OSError as exc2:
+            print(f"warning: could not write fallback {fallback} ({exc2}); "
+                  f"recovery copy kept at {recovery_path}", file=sys.stderr)
+    return saved_to
+
+
 def _tui_enabled(args) -> bool:
     """Whether the inline TUI should run for this invocation.
 
@@ -155,7 +196,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     print(f"Scanning {video_path.name}...")
     status_path = Path(args.status_file) if args.status_file else None
-    log_path = Path(tempfile.gettempdir()) / f"nuclearcutter_scan_{video_path.stem}.log"
+    # The movie's folder is the working dir for everything related to this
+    # movie — log, live status, partial result, and final scan JSON all live
+    # next to the video (no temp files).
+    log_path = video_path.with_suffix(".nuclearcutter.log")
+    # The final scan JSON lives next to the movie; we also stream a partial
+    # result there throughout the scan so an interrupted run never leaves the
+    # movie-folder scan file empty.
+    out_path = Path(args.output) if args.output else _default_scan_path(video_path)
+    if status_path is None:
+        status_path = video_path.with_suffix(".nuclearcutter.status.json")
 
     def _do_scan():
         return scan_pass(
@@ -168,15 +218,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
             sweep_interval=cfg.sweep_interval,
             status_path=status_path,
             category_prompts=_category_prompts_from_config(cfg),
+            partial_result_path=out_path,
         )
 
     use_tui = _tui_enabled(args)
     # Always write a live status file (unless the user explicitly disabled it),
     # so `nuclearcutter tui --status ...` can attach to this scan even when it
     # runs with piped/redirected stdout (where the inline TUI is auto-disabled).
-    if status_path is None:
-        status_path = Path(tempfile.gettempdir()) / f"nuclearcutter_scan_{video_path.stem}.status.json"
-
+    # It lives next to the movie (the movie folder is the working dir).
     try:
         if use_tui:
             # Inline dashboard: run the scan in a worker thread while the TUI
@@ -191,22 +240,34 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
     print()
 
-    out_path = Path(args.output) if args.output else _default_scan_path(video_path)
     try:
-        result.save(out_path)
-    except PermissionError:
-        fallback = Path.cwd() / out_path.name
-        print(f"warning: no write permission at {out_path.parent}, falling back to {fallback}")
-        result.save(fallback)
-        out_path = fallback
-    print(f"Scan complete: {len(result.visual_detections)} visual detections, "
-          f"{len(result.language_detections)} language detections.")
-    print(f"Wrote {out_path}")
+        saved_to = _save_result_with_fallback(result, out_path)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    recovery_path = out_path.with_name(out_path.name + ".recovery.json")
+
+    # Guard the final prints: if the launching terminal/pipe was closed during a
+    # long scan, sys.stdout/sys.stderr may be gone — that must not crash the
+    # process now that the result is safely on disk.
+    def _safe_print(msg: str = "", *, err: bool = False) -> None:
+        try:
+            print(msg, file=sys.stderr if err else sys.stdout)
+        except (OSError, ValueError):
+            pass  # stdout/stderr closed — nothing sensible to print to.
+
+    _safe_print(f"Scan complete: {len(result.visual_detections)} visual detections, "
+                f"{len(result.language_detections)} language detections.")
+    _safe_print(f"Wrote {saved_to}")
+    if saved_to != recovery_path:
+        _safe_print(f"Recovery copy: {recovery_path}")
     if status_path:
-        print(f"Live status written to {status_path} (watch with `nuclearcutter tui --status {status_path}`)")
+        _safe_print(f"Live status written to {status_path} "
+                    f"(watch with `nuclearcutter tui --status {status_path}`)")
 
     if cfg.timestamps_dir:
-        print(f"\nTo share this scan, copy {out_path.name} into {cfg.timestamps_dir} and open a PR.")
+        _safe_print(f"\nTo share this scan, copy {saved_to.name} into "
+                    f"{cfg.timestamps_dir} and open a PR.")
 
     return 0
 
@@ -294,8 +355,10 @@ def cmd_render(args: argparse.Namespace) -> int:
             status_path=status_path,
         )
 
-    status_path = Path(tempfile.gettempdir()) / f"nuclearcutter_render_{video_path.stem}.status.json"
-    log_path = Path(tempfile.gettempdir()) / f"nuclearcutter_render_{video_path.stem}.log"
+    # The movie's folder is the working dir for render too — status/log live
+    # next to the video (no temp files).
+    status_path = video_path.with_suffix(".nuclearcutter.render.status.json")
+    log_path = video_path.with_suffix(".nuclearcutter.render.log")
     if _tui_enabled(args):
         from nuclearcutter.tui import run_with_tui
 

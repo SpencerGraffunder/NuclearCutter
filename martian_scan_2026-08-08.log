@@ -1,56 +1,0 @@
-Starting model backend: mlx-vlm ...
-Scanning The.Martian.2015.1080p.HMAX.WEB-DL.DDP5.1.H.264-BLOOM.mkv...
-[fingerprinting]
-[fingerprinting] loaded cached fingerprint (6 samples, 8496s)
-[transcribing]
-Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 3849.75it/s]
-[sweep] 100 / 4248 frames
-[sweep] 200 / 4248 frames
-[sweep] 300 / 4248 frames
-[sweep] 400 / 4248 frames
-[sweep] 500 / 4248 frames
-[sweep] 600 / 4248 frames
-[sweep] 700 / 4248 frames
-[sweep] 800 / 4248 frames
-[sweep] 900 / 4248 frames
-[sweep] 1000 / 4248 frames
-[sweep] 1100 / 4248 frames
-[sweep] 1200 / 4248 frames
-[sweep] 1300 / 4248 frames
-[sweep] 1400 / 4248 frames
-[sweep] 1500 / 4248 frames
-[sweep] 1600 / 4248 frames
-[sweep] 1700 / 4248 frames
-[sweep] 1800 / 4248 frames
-[sweep] 1900 / 4248 frames
-[sweep] 2000 / 4248 frames
-[sweep] 2100 / 4248 frames
-[sweep] 2200 / 4248 frames
-[sweep] 2300 / 4248 frames
-[sweep] 2400 / 4248 frames
-[sweep] 2500 / 4248 frames
-[sweep] 2600 / 4248 frames
-[sweep] 2700 / 4248 frames
-[sweep] 2800 / 4248 frames
-[sweep] 2900 / 4248 frames
-[sweep] 3000 / 4248 frames
-[sweep] 3100 / 4248 frames
-[sweep] 3200 / 4248 frames
-[sweep] 3300 / 4248 frames
-[sweep] 3400 / 4248 frames
-[sweep] 3500 / 4248 frames
-[sweep] 3600 / 4248 frames
-[sweep] 3700 / 4248 frames
-[sweep] 3800 / 4248 frames
-[sweep] 3900 / 4248 frames
-[sweep] 4000 / 4248 frames
-[sweep] 4100 / 4248 frames
-[sweep] 4200 / 4248 frames
-[sweep] 4248 / 4248 frames
-[visual_sweep] 8 candidate range(s) from VLM sweep
-[visual_sweep]
-[visual_confirm] 1 / 8 candidates[visual_confirm] 2 / 8 candidates[visual_confirm] 3 / 8 candidates[visual_confirm] 4 / 8 candidates[visual_confirm] 5 / 8 candidates[visual_confirm] 6 / 8 candidates[visual_confirm] 7 / 8 candidates[visual_confirm] 8 / 8 candidates[language_detection]
-[done]
-
-Scan complete: 8 visual detections, 0 language detections.
-Wrote /Users/spencer/Documents/NuclearCutter/The.Martian.2015.1080p.HMAX.WEB-DL.DDP5.1.H.264-BLOOM.nuclearcutter.json

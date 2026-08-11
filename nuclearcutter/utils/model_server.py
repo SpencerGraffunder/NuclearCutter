@@ -38,6 +38,11 @@ MLX_BASE_URL = f"http://{MLX_SERVER_HOST}:{MLX_SERVER_PORT}/v1"
 # Speed knobs for the mlx-vlm server (see mlx_vlm.server.cli).
 MLX_KV_BITS = 4  # KV-cache quantization (TurboQuant-ish); ~3% faster, low cost
 MLX_MAX_TOKENS = 2048  # per-request generation cap on the server side
+# Max KV cache (context) in tokens. The model's config advertises 256K, but our
+# largest call (confirm: ~10.1K input + 2048 max output) is ~12.2K. Capping here
+# keeps VRAM down — each KV token costs meaningful unified memory at 9B scale —
+# while leaving comfortable headroom. 16K safely covers the worst case.
+MLX_MAX_KV_SIZE = 16384
 
 
 @dataclass
@@ -120,6 +125,7 @@ def start_mlx_vlm_server(config: ModelServerConfig, log_path: Path | None = None
             "--model", config.model_path,
             "--kv-bits", str(MLX_KV_BITS),
             "--max-tokens", str(MLX_MAX_TOKENS),
+            "--max-kv-size", str(MLX_MAX_KV_SIZE),
         ],
         stdout=log_target,
         stderr=subprocess.STDOUT,
