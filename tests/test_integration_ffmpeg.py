@@ -87,6 +87,18 @@ def test_build_output_path_appends_cleaned_suffix():
     assert out.parent == p.parent
 
 
+def test_build_output_path_multi_suffix_places_cleaned_before_video_ext():
+    """For 'Movie.mkv.iso' the _cleaned goes BEFORE the real (.mkv) extension."""
+    from nuclearcutter.render.renderer import full_video_suffix
+
+    assert full_video_suffix(Path("Movie.mkv")) == ".mkv"
+    assert full_video_suffix(Path("Movie.mkv.iso")) == ".mkv.iso"
+    assert build_output_path(Path("Movie.mkv.iso")).name == "Movie_cleaned.mkv.iso"
+    long = Path("The.Martian.2015.1080p.HMAX.WEB-DL.DDP5.1.H.264-BLOOM.mkv.iso")
+    assert build_output_path(long).name == \
+        "The.Martian.2015.1080p.HMAX.WEB-DL.DDP5.1.H.264-BLOOM_cleaned.mkv.iso"
+
+
 @requires_ffmpeg
 def test_fingerprint_identical_file_matches_itself(synthetic_video):
     duration_a, samples_a = compute_fingerprint(synthetic_video)

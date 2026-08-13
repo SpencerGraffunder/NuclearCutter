@@ -80,3 +80,57 @@ class TestModelValidation:
         """If /v1/models returns an empty list, validation is skipped."""
         mock_get.return_value = _fake_models_response([])
         self._client().test_connection()  # no exception
+
+
+class TestThinkingDisabled:
+    """Qwen3-family models 'think' by default — every request (scan, confirm,
+    benchmark) must explicitly disable the reasoning chain, or a multi-hour
+    scan balloons into multi-hour thinking."""
+
+    @staticmethod
+    def _completion(content: str = "ok"):
+        resp = MagicMock(spec=requests.Response)
+        resp.ok = True
+        resp.status_code = 200
+        resp.json.return_value = {
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        return resp
+
+    @patch("nuclearcutter.utils.llm_client.requests.post")
+    def test_vision_query_disables_thinking(self, mock_post: MagicMock, tmp_path):
+        """The VLM sweep/confirm/benchmark path sends enable_thinking=False."""
+        from PIL import Image
+
+        png = tmp_path / "f.png"
+        Image.new("RGB", (4, 4), "red").save(png)
+        mock_post.return_value = self._completion()
+        client = LLMClient(LLMConfig(base_url="http://x/v1", vlm_model="m", text_model="m"))
+        client.vision_query("prompt", [png])
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["enable_thinking"] is False
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    @patch("nuclearcutter.utils.llm_client.requests.post")
+    def test_text_query_disables_thinking(self, mock_post: MagicMock):
+        """The foul-language context check path sends enable_thinking=False."""
+        mock_post.return_value = self._completion()
+        client = LLMClient(LLMConfig(base_url="http://x/v1", vlm_model="m", text_model="m"))
+        client.text_query("prompt")
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["enable_thinking"] is False
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    @patch("nuclearcutter.utils.llm_client.requests.post")
+    def test_request_log_callback_fires_with_payload(self, mock_post: MagicMock):
+        """The show-prompts hook receives every request's payload + response."""
+        mock_post.return_value = self._completion("some answer")
+        client = LLMClient(LLMConfig(base_url="http://x/v1", vlm_model="m", text_model="m"))
+        seen = []
+        client.request_log_callback = lambda payload, data: seen.append((payload, data))
+        client.text_query("hello")
+        assert len(seen) == 1
+        payload, data = seen[0]
+        assert payload["messages"][-1]["content"] == "hello"
+        assert data["choices"][0]["message"]["content"] == "some answer"

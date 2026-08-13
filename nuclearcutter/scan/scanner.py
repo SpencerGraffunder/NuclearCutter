@@ -16,6 +16,7 @@ import gc
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 from nuclearcutter.detection.profanity import detect_foul_language, load_wordlist
@@ -30,8 +31,13 @@ from nuclearcutter.utils.scan_status import ScanStatus
 
 
 def _load_resume_state(status_path: Path | str | None, video_name: str) -> ScanStatus | None:
-    """Load an in-progress status file for `video_name`, or None if none exists
-    (or the prior run already completed). Used to resume an interrupted scan."""
+    """Load an in-progress status file for `video_name`, or None if none exists.
+
+    Used to resume an interrupted scan. A COMPLETED scan's status file is also
+    resumable: each phase is skipped when its saved progress already shows it
+    done (transcribe cache present, sweep frames complete, every candidate
+    confirmed), so clearing just one section (e.g. transcription) re-runs only
+    that piece on the next start instead of the whole pipeline."""
     if not status_path:
         return None
     sp = Path(status_path)
@@ -46,8 +52,6 @@ def _load_resume_state(status_path: Path | str | None, video_name: str) -> ScanS
     # stem — never resume across films.)
     if st.video and st.video != video_name:
         return None
-    if st.phase == "done":
-        return None  # already finished — a fresh full scan is correct here
     return st
 
 
@@ -58,6 +62,11 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2))
     os.replace(tmp, path)
+
+
+class ScanStopped(RuntimeError):
+    """Raised when the user hits Stop — progress has been saved to the status
+    file and partial result, and can be resumed by starting the scan again."""
 
 
 def scan(
@@ -71,6 +80,8 @@ def scan(
     status_path: Path | str = None,
     category_prompts: dict = None,
     partial_result_path: Path | str = None,
+    scale: str = None,
+    stop_event: threading.Event = None,
 ) -> ScanResult:
     llm_config = llm_config or LLMConfig()
     client = LLMClient(llm_config)
@@ -120,7 +131,9 @@ def scan(
                 level=SeverityLevel.MED,
             ))
         print(
-            f"[resume] continuing from frame {resume_from}/{resume.frames_total or '?'} "
+            f"[resume] loaded saved scan for {Path(video_path).name} from "
+            f"{Path(status_path).name} — continuing from frame {resume_from}/"
+            f"{resume.frames_total or '?'} "
             f"({len(resume_visual)} visual confirmed, {len(resume_language)} language)…",
             file=sys.stderr,
         )
@@ -183,6 +196,8 @@ def scan(
     if progress_callback:
         progress_callback("fingerprinting", None)
     _phase("fingerprinting")
+    if stop_event is not None and stop_event.is_set():
+        raise ScanStopped("scan stopped before starting")
     cached = load_cached_fingerprint(video_path)
     if cached:
         duration, phash_samples = cached
@@ -208,7 +223,58 @@ def scan(
     if progress_callback:
         progress_callback("transcribing", None)
     _phase("transcribing")
-    utterances = transcribe(video_path, model=whisper_model)
+    if stop_event is not None and stop_event.is_set():
+        raise ScanStopped("scan stopped before transcription")
+
+    from nuclearcutter.detection.transcribe import (
+        TranscriptionStopped, read_transcript_cache, transcribe_killable,
+        write_transcript_cache,
+    )
+
+    # Resume-friendly transcription: if we already transcribed THIS exact file
+    # (same size + mtime), reuse it instead of running whisper again.
+    transcript_path = Path(video_path).with_suffix(".nuclearcutter.transcript.json")
+    utterances = read_transcript_cache(transcript_path, video_path)
+    if utterances is not None:
+        if progress_callback:
+            progress_callback("transcribing", 1.0)
+        print(
+            f"[transcribing] loaded saved transcript for {Path(video_path).name} "
+            f"from {transcript_path.name} ({len(utterances)} utterances) — skipping whisper",
+            file=sys.stderr,
+        )
+    else:
+        if transcript_path.exists():
+            print(
+                "[transcribing] saved transcript found but the video changed "
+                "(size/mtime) — re-transcribing",
+                file=sys.stderr,
+            )
+
+        def _whisper_progress(frac):
+            if progress_callback:
+                progress_callback("transcribing", frac)
+
+        try:
+            if stop_event is not None:
+                # Interactive (GUI) scans run whisper in a killable child
+                # process so Stop actually stops it mid-transcription.
+                utterances = transcribe_killable(
+                    video_path, model=whisper_model,
+                    progress_callback=_whisper_progress, stop_event=stop_event,
+                )
+            else:
+                utterances = transcribe(
+                    video_path, model=whisper_model, progress_callback=_whisper_progress
+                )
+        except TranscriptionStopped as exc:
+            raise ScanStopped(str(exc)) from exc
+        write_transcript_cache(transcript_path, video_path, utterances)
+        # whisper skips progress updates for silent windows, so its final
+        # reported fraction can be below 100% even though it finished — force
+        # the bar to 100% now that transcription is actually done.
+        if progress_callback:
+            progress_callback("transcribing", 1.0)
 
     subtitle_path = find_subtitle_file(video_path)
     subtitle_utterances = parse_subtitles(subtitle_path) if subtitle_path else []
@@ -217,23 +283,56 @@ def scan(
     gc.collect()
 
     # ------------------------------------------------------------------
+    # Foul-language detection (right after transcription, so language marks
+    # appear on the timeline early — it's independent of the visual sweep).
+    # ------------------------------------------------------------------
+    if progress_callback:
+        progress_callback("language_detection", None)
+    _phase("language_detection")
+    if stop_event is not None and stop_event.is_set():
+        _write_status()
+        _write_partial_result()
+        raise ScanStopped("scan stopped before language detection")
+    if resume_language:
+        # Already completed this pass in a prior run.
+        language_detections = list(resume_language)
+    else:
+        wordlist = load_wordlist()
+        foul_prompt = (category_prompts or {}).get("foul_language")
+        language_detections = detect_foul_language(utterances, client, wordlist, subtitle_utterances, foul_language_prompt=foul_prompt)
+        for d in language_detections:
+            if status is not None:
+                status.add_language_detection(d.word, d.start, d.end, d.utterance_start, d.utterance_end)
+    if progress_callback:
+        progress_callback("language_detections", [d.to_dict() for d in language_detections])
+    _write_status()
+    _write_partial_result()
+
+    # ------------------------------------------------------------------
     # Unified full-film VLM sweep (the only visual detector — no NudeNet).
     # One sweep pass catches nudity, gore, AND violence.
     # ------------------------------------------------------------------
     if progress_callback:
         progress_callback("visual_sweep", None)
     _phase("visual_sweep")
-    sweep_detector = VisualSweepDetector(client, prompts=category_prompts)
+    sweep_detector = VisualSweepDetector(client, prompts=category_prompts, scale=scale)
 
     def _on_flagged_window(start, end, category, confidence, level="low"):
         if status is not None:
             status.add_candidate(start, end, category, confidence, level)
             _write_status()
+        if progress_callback:
+            progress_callback("candidate", {
+                "start": start, "end": end,
+                "category": category, "confidence": confidence, "level": level,
+            })
 
     def _on_sweep_progress(done, total):
         if status is not None:
             status.set_sweep(done, total)
             _write_status()
+        if progress_callback:
+            progress_callback("visual_sweep", (done, total))
 
     sweep_ranges = sweep_detector.sweep(
         video_path,
@@ -242,6 +341,7 @@ def scan(
         on_progress=_on_sweep_progress,
         resume_from=resume_from,
         existing_windows=existing_windows,
+        stop_event=stop_event,
     )
     print(
         f"[visual_sweep] {len(sweep_ranges)} candidate range(s) from VLM sweep",
@@ -251,6 +351,10 @@ def scan(
     vlm_failures = 0
     _phase("visual_confirm")
     for i, candidate in enumerate(sweep_ranges):
+        if stop_event is not None and stop_event.is_set():
+            _write_status()
+            _write_partial_result()
+            raise ScanStopped("scan stopped during visual confirm")
         # Skip candidates already confirmed in a prior run.
         key = (candidate.category.value, round(candidate.start, 1), round(candidate.end, 1))
         if key in confirmed_keys:
@@ -268,6 +372,8 @@ def scan(
                     detection.level.value,
                 )
                 _write_status()
+            if progress_callback:
+                progress_callback("visual_detection", detection.to_dict())
             _write_partial_result()  # refresh the movie-folder scan file
         else:
             vlm_failures += 1
@@ -279,22 +385,6 @@ def scan(
             f"All {vlm_failures} VLM confirmation queries failed. Cannot produce a reliable scan.\n"
             f"Check that your inference server is running and accessible at {llm_config.base_url}"
         )
-
-    if progress_callback:
-        progress_callback("language_detection", None)
-    _phase("language_detection")
-    if resume_language:
-        # Already completed this pass in a prior run.
-        language_detections = list(resume_language)
-    else:
-        wordlist = load_wordlist()
-        foul_prompt = (category_prompts or {}).get("foul_language")
-        language_detections = detect_foul_language(utterances, client, wordlist, subtitle_utterances, foul_language_prompt=foul_prompt)
-        for d in language_detections:
-            if status is not None:
-                status.add_language_detection(d.word, d.start, d.end, d.utterance_start, d.utterance_end)
-    _write_status()
-    _write_partial_result()
 
     result = ScanResult(
         schema_version=1,

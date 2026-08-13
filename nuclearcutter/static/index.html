@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NuclearCutter</title>
+<style>
+  :root {
+    --bg: #131313;          /* very dark grey */
+    --bg2: #1b1b1b;
+    --panel: #181818;
+    --border: #2b3b2b;
+    --green: #00ff41;       /* nuclear green */
+    --green-dim: #00a82c;
+    --green-dark: #0d3b1a;
+    --text: #b8e6b8;
+    --text-dim: #6f9f74;
+    --red: #ff5f5f;
+    --orange: #ffb347;
+    --yellow: #ffee58;
+    --magenta: #ff77dd;
+    --mono: "Menlo", "Monaco", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: var(--mono); font-size: 13px; }
+  body { background-image: repeating-linear-gradient(0deg, rgba(0,255,65,0.015) 0 1px, transparent 1px 3px); }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 14px 20px;
+    border-bottom: 1px solid var(--border); background: #0e0e0e; }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: 4px; color: var(--green);
+    text-shadow: 0 0 8px rgba(0,255,65,.6); }
+  header .sub { color: var(--text-dim); font-size: 11px; }
+  header .backend-badge { margin-left: auto; color: var(--green); border: 1px solid var(--green-dim);
+    padding: 3px 10px; border-radius: 3px; font-size: 11px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px 20px; max-width: 1500px; margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  section.full { grid-column: 1 / -1; }
+  section h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: 2px; color: var(--green);
+    border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 7px 0; flex-wrap: wrap; }
+  label { color: var(--text-dim); min-width: 150px; }
+  input[type=text], input[type=number], select, textarea {
+    background: #0d0d0d; color: var(--green); border: 1px solid var(--border);
+    border-radius: 3px; padding: 6px 8px; font-family: var(--mono); font-size: 12px; flex: 1; min-width: 160px; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--green-dim); }
+  textarea { flex: 1 1 100%; min-height: 90px; resize: vertical; }
+  button { background: #0a2a12; color: var(--green); border: 1px solid var(--green-dim);
+    border-radius: 3px; padding: 7px 14px; font-family: var(--mono); font-size: 12px;
+    letter-spacing: 1px; cursor: pointer; }
+  button:hover { background: #0f3d1a; box-shadow: 0 0 8px rgba(0,255,65,.35); }
+  button:disabled { opacity: .35; cursor: not-allowed; box-shadow: none; }
+  button.danger { color: var(--red); border-color: #7a3030; background: #230c0c; }
+  button.danger:hover { background: #3a1414; }
+  .btn-group { display: flex; gap: 10px; margin: 10px 0 18px; flex-wrap: wrap; }
+  .radio-group { display: flex; gap: 14px; align-items: center; }
+  .radio-group label { min-width: 0; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+  #backend-options.blocked { pointer-events: none; opacity: .75; }
+  #backend-options.blocked label { cursor: default; }
+  .hint { color: var(--text-dim); font-size: 11px; }
+  .bar-wrap { background: #0d0d0d; border: 1px solid var(--border); height: 16px; border-radius: 3px; position: relative; overflow: hidden; flex: 1; }
+  .bar { height: 100%; background: var(--green); box-shadow: 0 0 10px rgba(0,255,65,.7); transition: width .5s; }
+  .bar.indet { width: 40% !important; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: 0; } 100% { margin-left: 60%; } }
+  .bar-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #062b10; font-size: 10px; font-weight: bold; letter-spacing: 1px; }
+  /* Per-section clear buttons: a small ✕ on each bar row. SCAN + VERIFY share
+     one tall button that spans both rows (they clear together). */
+  .clear-x { display: flex; align-items: center; justify-content: center; padding: 0 12px;
+    font-size: 13px; color: var(--red); border-color: #7a3030; background: #230c0c; }
+  .clear-x:hover { background: #3a1414; }
+  .clear-x.tall { align-self: stretch; }
+  .bar-group { display: flex; align-items: stretch; gap: 8px; margin: 7px 0; }
+  .bar-group .bars { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .bar-group .bars .row { margin: 0; }
+  #timeline { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  #tl-bar { position: relative; height: 34px; background: #0d0d0d; border: 1px solid var(--border);
+    border-radius: 3px; flex: 1; overflow: hidden; }
+  #tl-pos { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff;
+    box-shadow: 0 0 6px #fff; z-index: 3; }
+  .tl-mark { position: absolute; top: 0; bottom: 0; min-width: 3px; opacity: .85; z-index: 2; }
+  .tl-mark.nudity { background: var(--red); }
+  .tl-mark.gore { background: var(--orange); }
+  .tl-mark.violence { background: var(--yellow); }
+  .tl-mark.foul_language { background: var(--magenta); }
+  /* Generic/unconfirmed sweep candidate — not yet classified into a category
+     or severity level, so it can't be filtered by the render settings. */
+  .tl-mark.candidate { background: #7fbf7f; opacity: .55; }
+  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 6px; flex-wrap: wrap; }
+  .legend span i { display: inline-block; width: 10px; height: 10px; margin-right: 4px; }
+  #status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .stat { background: #0d0d0d; border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; }
+  .stat .k { color: var(--text-dim); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
+  .stat .v { color: var(--green); font-size: 15px; margin-top: 3px; }
+  #bench-results table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11px; }
+  #bench-results td, #bench-results th { border: 1px solid var(--border); padding: 4px 6px; text-align: left; }
+  #bench-results th { color: var(--green-dim); }
+  .ok { color: var(--green); } .miss { color: var(--red); }
+  .matrix td, .matrix th { border: 1px solid var(--border); padding: 3px 6px; }
+  .matrix select { min-width: 110px; }
+  .cat-cell { position: relative; cursor: help; white-space: nowrap; }
+  .cat-cell .cat-tip { display: none; position: absolute; left: 0; top: 100%; z-index: 60;
+    background: #0d0d0d; border: 1px solid var(--green-dim); color: var(--text);
+    padding: 12px; white-space: pre-wrap; min-width: 360px; max-width: 520px;
+    max-height: 70vh; overflow-y: auto; box-shadow: 0 0 16px rgba(0,255,65,.25);
+    font-size: 11px; line-height: 1.55; border-radius: 4px; }
+  .cat-cell:hover .cat-tip { display: block; }
+  /* ---- file picker modal ---- */
+  #picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 100;
+    display: flex; align-items: center; justify-content: center; }
+  #picker-overlay.hidden { display: none; }
+  #picker { background: var(--bg2); border: 1px solid var(--green-dim); border-radius: 6px;
+    box-shadow: 0 0 24px rgba(0,255,65,.25); width: min(640px, 92vw); max-height: 80vh;
+    display: flex; flex-direction: column; }
+  .picker-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .picker-title { color: var(--green); letter-spacing: 2px; font-size: 12px; }
+  .picker-pathrow { display: flex; flex: 1; gap: 6px; min-width: 200px; }
+  .picker-pathrow input { flex: 1; }
+  #picker-list { overflow-y: auto; padding: 6px 8px; min-height: 220px; flex: 1; }
+  .pick-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 3px;
+    cursor: pointer; }
+  .pick-row:hover { background: #0f3d1a; }
+  .pick-row.sel { background: #144a20; outline: 1px solid var(--green-dim); }
+  .pick-row.dir .ico { color: var(--yellow); }
+  .pick-row.file .ico { color: var(--green); }
+  .pick-row.file-muted .ico, .pick-row.file-muted .nm { color: var(--text-dim); }
+  .pick-row.file-muted { cursor: default; }
+  .pick-row.file-muted:hover { background: transparent; }
+  .pick-row .nm { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick-row .ico { font-size: 13px; }
+  .picker-foot { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+    border-top: 1px solid var(--border); }
+  #picker-selected { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* ---- terminal ---- */
+  #terminal { background: #050505; border: 1px solid var(--border); border-radius: 4px;
+    height: 260px; overflow-y: auto; padding: 8px 10px; font-family: var(--mono);
+    font-size: 11px; line-height: 1.55; color: var(--green); }
+  #terminal div { white-space: pre-wrap; word-break: break-word; }
+  .pct { color: var(--green); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NUCLEARCUTTER</h1>
+  <span class="sub">self-hosted content censoring — web console</span>
+  <span class="sub" id="settings-file"></span>
+  <span class="backend-badge" id="backend-badge">backend: …</span>
+</header>
+<main>
+  <!-- ================= SCAN ================= -->
+  <section>
+    <h2>▚ SCAN</h2>
+    <div class="row"><label>Source file location</label>
+      <input type="text" id="video_path" placeholder="/path/to/Movie.mkv">
+      <button id="btn-browse">📁 Browse</button></div>
+
+    <div class="row"><label>Model backend</label>
+      <div class="radio-group" id="backend-options">
+        <label><input type="radio" name="backend" value="mlx-vlm" checked> launch local mlx-vlm</label>
+        <label><input type="radio" name="backend" value="llama.cpp"> launch local llama.cpp</label>
+        <label><input type="radio" name="backend" value="standalone"> use existing model server</label>
+      </div>
+    </div>
+
+    <div id="opt-local" class="row"><label>Local model path</label>
+      <input type="text" id="model_path" placeholder="/Users/you/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit">
+      <button id="btn-browse-model">📁 Browse</button></div>
+    <div id="opt-llama" class="row hidden"><label>llama.cpp .gguf path</label>
+      <input type="text" id="llama_model_path" placeholder="/path/to/model-Q4_K_M.gguf">
+      <button id="btn-browse-llama">📁 Browse</button></div>
+    <div id="opt-llama-mmproj" class="row hidden"><label>Vision projector (--mmproj)</label>
+      <input type="text" id="mmproj_path" placeholder="/path/to/mmproj-*.gguf (optional)">
+      <button id="btn-browse-mmproj">📁 Browse</button></div>
+    <div id="opt-remote">
+      <div class="row"><label>Server IP / base URL</label>
+        <input type="text" id="base_url" value="http://localhost:1234/v1">
+        <button id="btn-scan-models">Scan for models</button></div>
+      <div class="row"><label>VLM model</label><select id="vlm_model"></select></div>
+      <div class="row"><label>Text model</label><select id="text_model"></select></div>
+    </div>
+
+    <div class="row"><label>Whisper model</label>
+      <input type="text" id="whisper_model" value="mlx-community/whisper-small-mlx"></div>
+    <div class="row"><label>Scale frames before VLM</label>
+      <select id="scale">
+        <option value="360p">360p</option>
+        <option value="480p" selected>480p</option>
+        <option value="720p">720p</option>
+        <option value="1080p">1080p</option>
+      </select></div>
+    <div class="row"><label>Scan interval (s)</label>
+      <input type="number" id="sweep_interval" value="2" min="0.5" step="0.5"></div>
+
+    <div class="btn-group">
+      <button id="btn-scan-start">▶ START SCAN</button>
+      <button id="btn-scan-stop" class="danger" title="Stop the running scan or benchmark. Stopping a scan saves progress — hit Start again to resume.">■ STOP</button>
+      <button id="btn-bench">⚡ TEST / BENCHMARK VLM</button>
+    </div>
+    <div id="bench-results"></div>
+  </section>
+
+  <!-- ================= RENDER ================= -->
+  <section>
+    <h2>▚ RENDER</h2>
+    <div class="hint">Per-category censorship level (what gets corrected) + corrections matrix. Hover a category for the full level definitions.</div>
+    <table class="matrix" id="matrix">
+      <tr><th>Category</th><th class="cat-cell">Level<span class="cat-tip">The level of censoring to be done in render — detections at or below this level get corrected (low = censor only the worst, exhigh = censor everything).</span></th><th>Video</th><th>Audio</th></tr>
+      <tr>
+        <td class="cat-cell" data-cat="nudity">Nudity<span class="cat-tip"></span></td>
+        <td><select data-cat="nudity" data-key="level">
+          <option value="low">low</option><option value="med" selected>med</option>
+          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
+        <td><select data-cat="nudity" data-key="visual">
+          <option value="none">none</option><option value="blur" selected>blur</option>
+          <option value="black">black</option></select></td>
+        <td><select data-cat="nudity" data-key="audio">
+          <option value="none" selected>none</option><option value="mute_scene">mute scene</option></select></td>
+      </tr>
+      <tr>
+        <td class="cat-cell" data-cat="gore">Gore<span class="cat-tip"></span></td>
+        <td><select data-cat="gore" data-key="level">
+          <option value="low">low</option><option value="med" selected>med</option>
+          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
+        <td><select data-cat="gore" data-key="visual">
+          <option value="none">none</option><option value="blur" selected>blur</option>
+          <option value="black">black</option></select></td>
+        <td><select data-cat="gore" data-key="audio">
+          <option value="none" selected>none</option><option value="mute_scene">mute scene</option></select></td>
+      </tr>
+      <tr>
+        <td class="cat-cell" data-cat="violence">Violence<span class="cat-tip"></span></td>
+        <td><select data-cat="violence" data-key="level">
+          <option value="low">low</option><option value="med" selected>med</option>
+          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
+        <td><select data-cat="violence" data-key="visual">
+          <option value="none">none</option><option value="blur" selected>blur</option>
+          <option value="black">black</option></select></td>
+        <td><select data-cat="violence" data-key="audio">
+          <option value="none" selected>none</option><option value="mute_scene">mute scene</option></select></td>
+      </tr>
+      <tr>
+        <td class="cat-cell" data-cat="foul_language">Foul language<span class="cat-tip"></span></td>
+        <td><select data-cat="foul_language" data-key="level">
+          <option value="low">low</option><option value="med" selected>med</option>
+          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
+        <td><select data-cat="foul_language" data-key="visual">
+          <option value="none" selected>none</option><option value="blur">blur</option>
+          <option value="black">black</option></select></td>
+        <td><select data-cat="foul_language" data-key="audio">
+          <option value="none">none</option>
+          <option value="mute_word">mute word</option>
+          <option value="mute_phrase" selected>mute phrase</option>
+          <option value="replace_word">replace word</option>
+          <option value="replace_phrase">replace phrase</option></select></td>
+      </tr>
+    </table>
+
+    <div class="row"><label>Output file name</label>
+      <input type="text" id="output_name" placeholder="(default: original_cleaned)"></div>
+    <div class="row"><label>Scan file (optional)</label>
+      <input type="text" id="scan_path" placeholder="(auto: video.nuclearcutter.json)"></div>
+    <div class="row"><label>Blur amount</label>
+      <input type="number" id="blur_strength" value="1" min="0.1" step="0.1"></div>
+    <div class="row"><label>Mute padding (s)</label>
+      <input type="number" id="mute_padding" value="0.5" min="0" step="0.1"></div>
+    <div class="row"><label>Blur padding (s)</label>
+      <input type="number" id="blur_padding" value="0" min="0" step="0.5"></div>
+    <div class="row"><label>Overlay font (.ttf)</label>
+      <input type="text" id="font_path" placeholder="(optional, uses system font)"></div>
+
+    <div class="btn-group">
+      <button id="btn-render-start">▶ START RENDER</button>
+      <button id="btn-render-stop" class="danger" title="A stopped render cannot be resumed — the half-done output is discarded.">■ STOP</button>
+    </div>
+  </section>
+
+  <!-- ================= STATUS ================= -->
+  <section class="full">
+    <h2>▚ STATUS</h2>
+    <div id="status-grid">
+      <div class="stat"><div class="k">RAM used by NuclearCutter</div><div class="v" id="st-ram">—</div></div>
+      <div class="stat"><div class="k">CPU (NuclearCutter)</div><div class="v" id="st-cpu">—</div></div>
+      <div class="stat"><div class="k">Model: pp speed</div><div class="v" id="st-pp">—</div></div>
+      <div class="stat"><div class="k">Model: gen speed</div><div class="v" id="st-gen">—</div></div>
+      <div class="stat"><div class="k">Tokens / prompt</div><div class="v" id="st-tok">—</div></div>
+      <div class="stat"><div class="k">ETA</div><div class="v" id="st-eta">—</div></div>
+    </div>
+
+    <div id="timeline">
+      <span class="hint" style="width:auto; white-space:nowrap;">TIMELINE</span>
+      <div id="tl-bar"><div id="tl-pos"></div></div>
+      <span class="hint" id="tl-info"></span>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--red)"></i>nudity</span>
+      <span><i style="background:var(--orange)"></i>gore</span>
+      <span><i style="background:var(--yellow)"></i>violence</span>
+      <span><i style="background:var(--magenta)"></i>foul language</span>
+      <span><i style="background:#7fbf7f"></i>unconfirmed candidate</span>
+      <span id="tl-count" style="color:var(--yellow)"></span>
+    </div>
+
+    <div style="margin-top:12px;">
+      <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">TRANSCRIBE</span>
+        <div class="bar-wrap"><div class="bar" id="bar-transcribe"></div></div>
+        <span class="pct" id="pct-transcribe">0%</span>
+        <button class="clear-x" id="btn-clear-transcribe" title="Clear transcription — the next scan re-runs whisper (scan + verify results are kept)">✕</button></div>
+      <div class="bar-group">
+        <div class="bars">
+          <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">SCAN</span>
+            <div class="bar-wrap"><div class="bar" id="bar-scan"></div></div>
+            <span class="pct" id="pct-scan">0%</span></div>
+          <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">VERIFY</span>
+            <div class="bar-wrap"><div class="bar" id="bar-verify"></div></div>
+            <span class="pct" id="pct-verify">0%</span></div>
+        </div>
+        <button class="clear-x tall" id="btn-clear-scan"
+          title="Clear scan + verify — the next scan re-runs the VLM sweep and confirm pass from scratch (the transcript is kept)">✕</button>
+      </div>
+      <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">RENDER</span>
+        <div class="bar-wrap"><div class="bar" id="bar-render"></div></div>
+        <span class="pct" id="pct-render">0%</span></div>
+    </div>
+  </section>
+
+  <!-- ================= TERMINAL ================= -->
+  <section class="full">
+    <h2>▚ TERMINAL <label style="min-width:0;font-size:11px;cursor:pointer;color:var(--text-dim)">
+      <input type="checkbox" id="show_prompts"> show prompts and responses</label></h2>
+    <div class="row">
+      <button id="term-clear" class="danger" title="Clear the terminal view">✕ Clear</button>
+    </div>
+    <div id="terminal"></div>
+  </section>
+
+</main>
+
+<!-- ================= FILE PICKER MODAL ================= -->
+<div id="picker-overlay" class="hidden">
+  <div id="picker">
+    <div class="picker-head">
+      <span class="picker-title">CHOOSE A MOVIE FILE</span>
+      <span class="picker-pathrow">
+        <input type="text" id="picker-path" placeholder="/path/to/folder">
+        <button id="picker-go">Go</button>
+      </span>
+      <button id="picker-close" class="danger" title="Close">✕</button>
+    </div>
+    <div id="picker-list"></div>
+    <div class="picker-foot">
+      <span id="picker-selected" class="hint">no selection</span>
+      <button id="picker-use" disabled>✔ Use this file</button>
+      <button id="picker-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const LEVEL_RANK = {low:0, med:1, high:2, exhigh:3};
+let state = null;
+let saveTimer = null;
+
+// ---------------------------------------------------------------- helpers
+async function post(path, body) {
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body || {})});
+  if (!r.ok) { const t = await r.text().catch(()=> ""); throw new Error(r.status + " " + t); }
+  return r.json();
+}
+function fmtSecs(s) {
+  if (s == null || isNaN(s)) return "--:--";
+  s = Math.max(0, Math.round(s)); const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+  return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}` : `${m}:${String(sec).padStart(2,"0")}`;
+}
+function fmtBytes(b) {
+  if (b == null) return "—";
+  if (b >= 1e9) return (b/1e9).toFixed(2) + " GB";
+  if (b >= 1e6) return (b/1e6).toFixed(0) + " MB";
+  return Math.round(b) + " B";
+}
+function setBar(el, pctEl, val) { // val: null=indeterminate, 0..1
+  const bar = $(el), pct = $(pctEl);
+  bar.classList.remove("indet");
+  if (val == null || isNaN(val)) { bar.classList.add("indet"); pct.textContent = "…"; return; }
+  const w = Math.max(0, Math.min(1, val)) * 100;
+  bar.style.width = w + "%";
+  pct.textContent = Math.round(w) + "%";
+}
+function setSelectValue(sel, val) {
+  if (!val) { sel.value = ""; return; }
+  if (![...sel.options].some(o => o.value === val)) {
+    const o = document.createElement("option"); o.value = val; o.textContent = val; sel.appendChild(o);
+  }
+  sel.value = val;
+}
+function fillModelDropdown(sel, models) {
+  sel.innerHTML = "";
+  models.forEach(mid => {
+    const o = document.createElement("option"); o.value = mid; o.textContent = mid; sel.appendChild(o);
+  });
+}
+function setDisabled(ids, disabled) {
+  ids.forEach(id => { const el = $(id); if (el) el.disabled = disabled; });
+}
+const SCAN_SETTING_IDS = ["video_path","model_path","llama_model_path","mmproj_path","base_url",
+  "vlm_model","text_model","whisper_model","scale","sweep_interval"];
+const RENDER_SETTING_IDS = ["output_name","scan_path","font_path","blur_strength","mute_padding","blur_padding"];
+function setScanSettingsDisabled(d) {
+  setDisabled(SCAN_SETTING_IDS, d);
+  // Block clicks on the backend radios without `disabled`, so the selected
+  // radio keeps its normal checked appearance while a scan is running.
+  $("backend-options").classList.toggle("blocked", d);
+}
+function setRenderSettingsDisabled(d) {
+  setDisabled(RENDER_SETTING_IDS, d);
+  document.querySelectorAll("#matrix select").forEach(s => s.disabled = d);
+}
+
+// ---------------------------------------------------------------- settings push
+let settingsReady = false;  // false until the first /api/state poll succeeds
+const readyWaiters = [];
+function whenSettingsReady() {
+  if (settingsReady) return Promise.resolve();
+  return new Promise(res => readyWaiters.push(res));
+}
+function settingsChanged() {
+  if (!settingsReady) return;  // form may still hold HTML defaults — never push them
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    post("/api/settings", {settings: collectSettings()}).then(d => {
+      state = state || {}; state.settings = d.settings; applySettingsToUI(d.settings, true);
+    }).catch(e => log(e.message));
+  }, 400);
+}
+function collectSettings() {
+  return {
+    video_path: $("video_path").value,
+    backend: document.querySelector("input[name=backend]:checked").value,
+    show_prompts: $("show_prompts").checked,
+    model_path: backendLocal() ? $("model_path").value : $("llama_model_path").value,
+    mmproj_path: $("mmproj_path").value,
+    base_url: $("base_url").value,
+    vlm_model: $("vlm_model").value,
+    text_model: $("text_model").value,
+    whisper_model: $("whisper_model").value,
+    scale: $("scale").value,
+    sweep_interval: parseFloat($("sweep_interval").value) || 2,
+    output_name: $("output_name").value,
+    scan_path: $("scan_path").value,
+    font_path: $("font_path").value,
+    blur_strength: parseFloat($("blur_strength").value) || 1,
+    mute_padding: parseFloat($("mute_padding").value) || 0,
+    blur_padding: parseFloat($("blur_padding").value) || 0,
+    levels: matrixValues("level"),
+    visual_actions: matrixValues("visual"),
+    audio_actions: matrixValues("audio"),
+  };
+}
+function backendLocal() { return document.querySelector("input[name=backend]:checked").value === "mlx-vlm"; }
+function matrixValues(key) {
+  const out = {};
+  document.querySelectorAll(`select[data-key="${key}"]`).forEach(s => out[s.dataset.cat] = s.value);
+  return out;
+}
+function applySettingsToUI(s, skipSave) {
+  $("video_path").value = s.video_path || "";
+  document.querySelectorAll("input[name=backend]").forEach(r => { r.checked = (r.value === s.backend); });
+  $("show_prompts").checked = !!s.show_prompts;
+  $("model_path").value = s.model_path || "";
+  $("llama_model_path").value = s.model_path || "";
+  $("mmproj_path").value = s.mmproj_path || "";
+  $("base_url").value = s.base_url || "http://localhost:1234/v1";
+  setSelectValue($("vlm_model"), s.vlm_model);
+  setSelectValue($("text_model"), s.text_model);
+  $("whisper_model").value = s.whisper_model || "";
+  $("scale").value = s.scale || "480p";
+  $("sweep_interval").value = s.sweep_interval || 2;
+  $("output_name").value = s.output_name || "";
+  $("scan_path").value = s.scan_path || "";
+  $("font_path").value = s.font_path || "";
+  $("blur_strength").value = s.blur_strength ?? 1;
+  $("mute_padding").value = s.mute_padding ?? 0.5;
+  $("blur_padding").value = s.blur_padding ?? 0;
+  const maps = {
+    level: s.levels || {},
+    visual: s.visual_actions || {},
+    audio: s.audio_actions || {},
+  };
+  ["level", "visual", "audio"].forEach(key => {
+    document.querySelectorAll(`select[data-key="${key}"]`).forEach(sel => {
+      const val = maps[key][sel.dataset.cat];
+      if (val != null && [...sel.options].some(o => o.value === val)) sel.value = val;
+    });
+  });
+  updateBackendVisibility();
+  if (!skipSave) renderTimeline(); // levels changed -> refresh timeline marks
+}
+function updateBackendVisibility() {
+  const b = document.querySelector("input[name=backend]:checked").value;
+  $("opt-local").classList.toggle("hidden", b !== "mlx-vlm");
+  $("opt-llama").classList.toggle("hidden", b !== "llama.cpp");
+  $("opt-llama-mmproj").classList.toggle("hidden", b !== "llama.cpp");
+  $("opt-remote").classList.toggle("hidden", b !== "standalone");
+  const badge = {"mlx-vlm":"local mlx-vlm", "llama.cpp":"local llama.cpp", standalone:"existing server"};
+  $("backend-badge").textContent = "backend: " + (badge[b] || b);
+}
+
+// ---------------------------------------------------------------- timeline
+function detectionCaught(d) {
+  const s = state.settings;
+  const cat = d.category;
+  if (cat === "foul_language") {
+    const lvl = s.levels["foul_language"], va = s.visual_actions["foul_language"], aa = s.audio_actions["foul_language"];
+    if (va === "none" && aa === "none") return false;
+    if (d.llm_confirmed === false) return false;
+    return LEVEL_RANK[d.level] <= LEVEL_RANK[lvl];
+  }
+  const lvl = s.levels[cat], va = s.visual_actions[cat], aa = s.audio_actions[cat];
+  if (va === "none" && aa === "none") return false;
+  return LEVEL_RANK[d.level] <= LEVEL_RANK[lvl];
+}
+function renderTimeline() {
+  const tl = $("tl-bar");
+  tl.querySelectorAll(".tl-mark").forEach(e => e.remove());
+  const pos = $("tl-pos");
+  const tlInfo = state && state.timeline;
+  const jobs = state ? state.jobs : null;
+  const busy = jobs && ["scan", "render", "benchmark"].some(k =>
+    jobs[k] && (jobs[k].status === "running" || jobs[k].status === "stopping"));
+  if (!tlInfo || !tlInfo.duration) {
+    $("tl-count").textContent = busy ? "scan in progress…" : "";
+    $("tl-info").textContent = "";
+    pos.style.display = "none";
+    return;
+  }
+  const dur = tlInfo.duration;
+  const marks = [];
+  // Unconfirmed sweep candidates: generic marks, always shown (they have no
+  // category/level yet, so render settings can't filter them).
+  (tlInfo.visual_candidates || []).forEach(c => marks.push([c.start, c.end, "candidate"]));
+  // Confirmed detections: filtered by the currently selected render settings.
+  tlInfo.visual_detections.forEach(d => { if (detectionCaught(d)) marks.push([d.start, d.end, d.category]); });
+  tlInfo.language_detections.forEach(d => { if (detectionCaught(d)) marks.push([d.utterance_start, d.utterance_end, "foul_language"]); });
+  marks.forEach(m => {
+    const el = document.createElement("div");
+    el.className = "tl-mark " + m[2];
+    const x0 = Math.max(0, m[0] / dur * 100), x1 = Math.min(100, m[1] / dur * 100);
+    el.style.left = x0 + "%"; el.style.width = Math.max(0.4, x1 - x0) + "%";
+    tl.appendChild(el);
+  });
+  const caught = marks.filter(m => m[2] !== "candidate").length;
+  $("tl-count").textContent =
+    (marks.length ? `${marks.length} mark(s)` : "") +
+    (caught ? ` · ${caught} caught by current render settings` : "");
+  $("tl-info").textContent = fmtSecs(dur) + " film";
+  pos.style.display = "block";
+  // position marker from the active job
+  const active = [jobs.scan, jobs.render].find(j => j.status === "running" || j.status === "stopping");
+  if (active && active.position) {
+    pos.style.left = Math.min(99, active.position / dur * 100) + "%";
+    pos.style.display = "block";
+  } else if (active) {
+    pos.style.display = "none";
+  }
+}
+
+// ---------------------------------------------------------------- state render
+function renderState() {
+  const jobs = state.jobs;
+  // system stats
+  const sys = state.system || {};
+  if (state.server && state.server.settings_file) {
+    $("settings-file").textContent = "settings saved to " + state.server.settings_file;
+  }
+  $("st-ram").textContent = fmtBytes(sys.proc_mem_total != null ? sys.proc_mem_total : sys.proc_mem);
+  $("st-cpu").textContent = sys.proc_cpu != null ? sys.proc_cpu.toFixed(1) + "%" : (sys.cpu != null ? sys.cpu.toFixed(0) + "% (sys)" : "—");
+  // model stats
+  const m = state.model || {};
+  $("st-pp").textContent = m.last_pp_tok_s != null ? m.last_pp_tok_s + " t/s" : "—";
+  $("st-gen").textContent = m.last_gen_tok_s != null ? m.last_gen_tok_s + " t/s" : "—";
+  $("st-tok").textContent = m.last_tokens_per_prompt != null ? m.last_tokens_per_prompt + " tok" : "—";
+  const scanJob = jobs.scan;
+  // ETA follows whichever job is running (render when rendering, else scan).
+  const renderBusy2 = jobs.render.status === "running" || jobs.render.status === "stopping";
+  const etaJob = renderBusy2 ? jobs.render : scanJob;
+  $("st-eta").textContent = etaJob.eta != null ? fmtSecs(etaJob.eta) : "—";
+
+  // step bars: transcribe/scan/verify from scan job, render from render job
+  setBar("bar-transcribe", "pct-transcribe", scanJob.steps.transcribe);
+  setBar("bar-scan", "pct-scan", scanJob.steps.scan);
+  setBar("bar-verify", "pct-verify", scanJob.steps.verify);
+  setBar("bar-render", "pct-render", jobs.render.steps.render);
+
+  // status lines + button states + grey-out settings while running
+  const scanBusy = scanJob.status === "running" || scanJob.status === "stopping";
+  const renderBusy = jobs.render.status === "running" || jobs.render.status === "stopping";
+  const benchBusy = jobs.benchmark.status === "running" || jobs.benchmark.status === "stopping";
+  setScanSettingsDisabled(scanBusy);
+  setRenderSettingsDisabled(renderBusy);
+  $("btn-scan-start").disabled = scanBusy || benchBusy;
+  $("btn-scan-stop").disabled = !scanBusy && !benchBusy;
+  // Per-section clear buttons: disabled while anything is running (clearing
+  // mid-run would corrupt resume state — the server refuses it anyway).
+  $("btn-clear-transcribe").disabled = scanBusy;
+  $("btn-clear-scan").disabled = scanBusy;
+  $("btn-render-start").disabled = renderBusy;
+  $("btn-render-stop").disabled = !renderBusy;
+  $("btn-bench").disabled = benchBusy || scanBusy || renderBusy;
+  $("btn-scan-models").disabled = scanBusy || benchBusy || renderBusy;
+  if (jobs.benchmark.status === "done" && jobs.benchmark.results.length) {
+    renderBenchResults(jobs.benchmark);
+  }
+  renderTimeline();
+  renderTerminal();
+}
+// ---------------------------------------------------------------- terminal
+const TERM_JOB_COLOR = {scan: "var(--green)", render: "var(--yellow)", benchmark: "var(--magenta)", ui: "var(--text-dim)"};
+let termRenderedCount = 0;
+
+function renderTerminal() {
+  if (!state || !state.all_logs) return;
+  const logs = state.all_logs;
+  const term = $("terminal");
+  if (logs.length > termRenderedCount) {
+    const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 60;
+    for (let i = termRenderedCount; i < logs.length; i++) {
+      const e = logs[i];
+      const row = document.createElement("div");
+      const time = document.createElement("span");
+      time.style.color = "var(--text-dim)";
+      time.textContent = `${e.t || ""}  `;
+      const job = document.createElement("span");
+      job.style.color = TERM_JOB_COLOR[e.job] || "var(--text-dim)";
+      job.textContent = `[${e.job}] `;
+      const line = document.createElement("span");
+      line.textContent = e.line;
+      row.appendChild(time);
+      row.appendChild(job);
+      row.appendChild(line);
+      // Inline image thumbnails (vision calls) — scaled to text height.
+      (e.imgs || []).forEach(src => {
+        const img = document.createElement("img");
+        img.src = src;
+        img.style.height = "14px";
+        img.style.verticalAlign = "middle";
+        img.style.marginLeft = "4px";
+        img.style.border = "1px solid var(--border)";
+        row.appendChild(img);
+      });
+      term.appendChild(row);
+    }
+    termRenderedCount = logs.length;
+    if (atBottom || termRenderedCount <= 50) term.scrollTop = term.scrollHeight;
+  }
+}
+
+function renderBenchResults(job) {
+  if (!job.results || job.results.length < 3) return;
+  const [summary, batches, confirms] = job.results;
+  let html = `<div class="hint">Benchmark: ${summary.frames} frames · accuracy ${summary.accuracy} · mean sweep ${summary.mean_sweep_s}s · confirm ${summary.confirm_count}</div>`;
+  html += "<table><tr><th>batch</th><th>s</th><th>ptok</th><th>ctok</th><th>pp t/s</th><th>gen t/s</th><th>result</th></tr>";
+  (batches || []).forEach(b => {
+    const res = b.expected != null ? (b.correct ? `<span class="ok">OK</span>` : `<span class="miss">MISS</span>`) : (b.flagged ? "flagged" : "clean");
+    html += `<tr><td>${b.batch}</td><td>${b.elapsed}</td><td>${b.prompt_tokens ?? "—"}</td><td>${b.completion_tokens ?? "—"}</td>
+      <td>${b.pp_tok_s ?? "—"}</td><td>${b.gen_tok_s ?? "—"}</td><td>${res}</td></tr>`;
+  });
+  html += "</table>";
+  (confirms || []).forEach(c => {
+    html += `<div class="hint">confirm ${c.category} [${fmtSecs(c.window[0])}–${fmtSecs(c.window[1])}]: ${c.flagged ? "flagged" : "clean"} levels=[${(c.levels||[]).join(",")}] ${c.elapsed}s</div>`;
+  });
+  $("bench-results").innerHTML = html;
+}
+
+// ---------------------------------------------------------------- polling
+async function poll() {
+  try {
+    const r = await fetch("/api/state");
+    const d = await r.json();
+    let autoScan = false;
+    if (!settingsReady) {
+      settingsReady = true;
+      readyWaiters.forEach(fn => fn());
+      readyWaiters.length = 0;
+      attachInputListeners();  // now safe: form is populated with real settings
+      autoScan = d.settings.backend === "standalone";
+    }
+    if (!state || !state.settings || JSON.stringify(state.settings) !== JSON.stringify(d.settings)) {
+      applySettingsToUI(d.settings, true);
+    }
+    state = d;
+    renderState();
+    if (autoScan) guard(scanForModels)();  // "use existing server": fill model dropdowns
+  } catch (e) {
+    log("state poll error: " + e.message);
+  }
+}
+function log(msg) {
+  // All status/error messages live in the terminal. Fire-and-forget POST.
+  if (!msg) return;
+  fetch("/api/log", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({line: msg})}).catch(() => {});
+}
+
+// ---------------------------------------------------------------- file picker
+let pickerDir = "";
+let pickerFile = "";
+let pickerTarget = "video_path";
+let pickerMode = "file";   // "file" | "dir"
+let pickerExts = "";       // "" = media exts, "all" = everything, or ".gguf,.bin"
+
+function openPicker(opts) {
+  opts = opts || {};
+  pickerTarget = opts.target || "video_path";
+  pickerMode = opts.mode || "file";
+  pickerExts = opts.exts || "";
+  const cur = $(pickerTarget).value;
+  pickerDir = cur ? cur : "";
+  pickerFile = "";
+  $("picker-selected").textContent = pickerMode === "dir" ? "pick a folder" : "no file selected";
+  $("picker-use").disabled = pickerMode !== "dir";
+  $("picker-use").textContent = pickerMode === "dir" ? "✔ Use this folder" : "✔ Use this file";
+  $("picker-overlay").classList.remove("hidden");
+  loadPickerDir(pickerDir);
+}
+function closePicker() { $("picker-overlay").classList.add("hidden"); }
+async function loadPickerDir(dir) {
+  try {
+    const q = "?path=" + encodeURIComponent(dir || "") + "&exts=" + encodeURIComponent(pickerExts);
+    const r = await fetch("/api/browse" + q);
+    const d = await r.json();
+    pickerDir = d.path;
+    pickerFile = "";
+    $("picker-path").value = d.path;
+    $("picker-selected").textContent = pickerMode === "dir" ? d.path : "no file selected";
+    $("picker-use").disabled = pickerMode !== "dir";
+    const list = $("picker-list");
+    list.innerHTML = "";
+    if (d.parent) addPickRow("..", "dir", () => loadPickerDir(d.parent));
+    d.dirs.forEach(name => addPickRow(name + "/", "dir", () => loadPickerDir(d.path + "/" + name)));
+    if (pickerMode === "dir") {
+      d.files.forEach(name => addPickRow(name, "file-muted", () => {}));
+    } else {
+      d.files.forEach(name => addPickRow(name, "file", () => selectPickerFile(d.path + "/" + name)));
+    }
+  } catch (e) { log("browse failed: " + e.message); }
+}
+function addPickRow(name, kind, onClick) {
+  const row = document.createElement("div");
+  row.className = "pick-row " + kind;
+  row.innerHTML = `<span class="ico">${kind.startsWith("dir") ? "📁" : kind === "file" ? "🎬" : "📄"}</span><span class="nm"></span>`;
+  row.querySelector(".nm").textContent = name;
+  row.addEventListener("click", onClick);
+  $("picker-list").appendChild(row);
+}
+function selectPickerFile(path) {
+  pickerFile = path;
+  $("picker-selected").textContent = path;
+  $("picker-use").disabled = false;
+  // highlight the matching row
+  [...$("picker-list").children].forEach(r => r.classList.toggle("sel", r.querySelector(".nm").textContent === path.split("/").pop()));
+}
+function usePickerFile() {
+  const val = pickerMode === "dir" ? pickerDir : pickerFile;
+  if (!val) return;
+  $(pickerTarget).value = val;
+  settingsChanged();
+  closePicker();
+}
+
+// ---------------------------------------------------------------- events
+function guard(fn) {
+  return async () => { try { await fn(); } catch (e) { log(e.message || String(e)); } };
+}
+function wire() {
+  $("btn-browse").addEventListener("click", openPicker);
+  $("btn-browse-model").addEventListener("click", () => openPicker({target: "model_path", mode: "dir"}));
+  $("btn-browse-llama").addEventListener("click", () => openPicker({target: "llama_model_path", mode: "file", exts: ".gguf"}));
+  $("btn-browse-mmproj").addEventListener("click", () => openPicker({target: "mmproj_path", mode: "file", exts: "all"}));
+  $("picker-close").addEventListener("click", closePicker);
+  $("picker-cancel").addEventListener("click", closePicker);
+  $("picker-go").addEventListener("click", () => loadPickerDir($("picker-path").value));
+  $("picker-path").addEventListener("keydown", e => { if (e.key === "Enter") loadPickerDir($("picker-path").value); });
+  $("picker-use").addEventListener("click", usePickerFile);
+  $("term-clear").addEventListener("click", () => {
+    $("terminal").innerHTML = "";
+    termRenderedCount = state && state.all_logs ? state.all_logs.length : 0;
+  });
+  $("btn-scan-start").addEventListener("click", guard(async () => {
+    await whenSettingsReady();
+    await post("/api/settings", {settings: collectSettings()});
+    await post("/api/scan/start"); poll();
+  }));
+  $("btn-scan-stop").addEventListener("click", guard(async () => {
+    // One stop button: stop whichever job (scan or benchmark) is running.
+    const bj = state && state.jobs ? state.jobs.benchmark : null;
+    const benchBusy = bj && (bj.status === "running" || bj.status === "stopping");
+    if (benchBusy) { await post("/api/benchmark/stop"); log("stopping benchmark…"); }
+    else { await post("/api/scan/stop"); log("stopping scan… progress will be saved"); }
+    poll();
+  }));
+  $("btn-clear-transcribe").addEventListener("click", guard(async () => {
+    const d = await post("/api/scan/clear", {section: "transcribe"});
+    log("cleared " + d.removed.length + " transcript file(s)"); poll();
+  }));
+  $("btn-clear-scan").addEventListener("click", guard(async () => {
+    const d = await post("/api/scan/clear", {section: "scan_verify"});
+    log("cleared " + d.removed.length + " scan file(s)"); poll();
+  }));
+  $("btn-render-start").addEventListener("click", guard(async () => {
+    await whenSettingsReady();
+    await post("/api/settings", {settings: collectSettings()});
+    await post("/api/render/start"); poll();
+  }));
+  $("btn-render-stop").addEventListener("click", guard(async () => { await post("/api/render/stop"); log("stopping render…"); poll(); }));
+  $("btn-bench").addEventListener("click", guard(async () => {
+    await whenSettingsReady();
+    await post("/api/settings", {settings: collectSettings()});
+    $("bench-results").innerHTML = "";
+    await post("/api/benchmark/start"); log("benchmark started"); poll();
+  }));
+async function scanForModels() {
+  const base_url = $("base_url").value;
+  const r = await fetch("/api/models?base_url=" + encodeURIComponent(base_url));
+  const d = await r.json();
+  if (!d.models.length) {
+    fillModelDropdown($("vlm_model"), []);
+    fillModelDropdown($("text_model"), []);
+    log("no models found at " + base_url);
+    return;
+  }
+  fillModelDropdown($("vlm_model"), d.models);
+  fillModelDropdown($("text_model"), d.models);
+  // Keep any saved model selection even if it's not in the fresh list.
+  if (state && state.settings) {
+    setSelectValue($("vlm_model"), state.settings.vlm_model);
+    setSelectValue($("text_model"), state.settings.text_model);
+  }
+  if (!$("vlm_model").value) $("vlm_model").value = d.models[0];
+  if (!$("text_model").value) $("text_model").value = d.models[0];
+  log(d.models.length + " model(s) found at " + base_url);
+}
+  $("btn-scan-models").addEventListener("click", guard(scanForModels));
+  $("vlm_model").addEventListener("change", () => {
+    // Keep the text model in sync by default (user can pick another).
+    if (!$("text_model").value) $("text_model").value = $("vlm_model").value;
+  });
+}
+function attachInputListeners() {
+  ["video_path","model_path","llama_model_path","mmproj_path","base_url","text_model","whisper_model",
+   "scale","sweep_interval","output_name","scan_path","font_path","blur_strength","mute_padding","blur_padding"
+  ].forEach(id => $(id).addEventListener("input", settingsChanged));
+  $("show_prompts").addEventListener("change", settingsChanged);
+  document.querySelectorAll("input[name=backend]").forEach(r => r.addEventListener("change", () => {
+    settingsChanged();
+    if (document.querySelector("input[name=backend]:checked").value === "standalone") {
+      guard(scanForModels)();  // auto-populate the model dropdowns
+    }
+  }));
+  document.querySelectorAll("#matrix select").forEach(s => s.addEventListener("change", () => { settingsChanged(); renderTimeline(); }));
+}
+async function loadDefinitions() {
+  try {
+    const r = await fetch("/api/definitions"); const d = await r.json();
+    document.querySelectorAll(".cat-cell").forEach(cell => {
+      const def = d[cell.dataset.cat];
+      if (!def) return;
+      let text;
+      if (typeof def === "string") {
+        text = def; // foul language: already a full 4-level scale text
+      } else {
+        text = Object.entries(def)
+          .map(([lv, desc]) => lv + ":\n" + desc)
+          .join("\n\n");
+      }
+      cell.querySelector(".cat-tip").textContent = text;
+    });
+  } catch (e) { log("load definitions failed: " + e.message); }
+}
+
+wire(); loadDefinitions(); poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

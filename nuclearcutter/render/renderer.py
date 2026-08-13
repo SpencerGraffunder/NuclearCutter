@@ -51,8 +51,39 @@ class TimelineSegment:
         return self.end - self.start
 
 
+# Video container extensions — used to place "_cleaned" BEFORE the real video
+# extension, even when the file has a second suffix (e.g. "Movie.mkv.iso").
+VIDEO_EXTS = {
+    ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".webm", ".ts", ".m2ts",
+    ".mpg", ".mpeg", ".vob", ".flv", ".ogv",
+}
+
+
+def full_video_suffix(path: Path) -> str:
+    """The complete extension chain of a video file.
+
+    "Movie.mkv" -> ".mkv"; "Movie.mkv.iso" -> ".mkv.iso". Python's Path only
+    treats the LAST suffix as the extension, so for multi-suffix files we
+    re-attach the inner video extension to keep the real format in the name.
+    """
+    stem = path.stem
+    inner = Path(stem).suffix
+    if inner and inner.lower() in VIDEO_EXTS:
+        return inner + path.suffix
+    return path.suffix
+
+
 def build_output_path(input_path: Path) -> Path:
-    return input_path.with_name(f"{input_path.stem}_cleaned{input_path.suffix}")
+    """Movie.mkv -> Movie_cleaned.mkv; Movie.mkv.iso -> Movie_cleaned.mkv.iso.
+
+    "_cleaned" always goes BEFORE the real video extension (the inner one, for
+    multi-suffix files like an mkv named with an .iso extension), never after.
+    """
+    ext = full_video_suffix(input_path)
+    stem = input_path.stem
+    if ext.startswith(".") and Path(stem).suffix and Path(stem).suffix.lower() in VIDEO_EXTS:
+        stem = Path(stem).stem  # strip the inner video ext; it's part of `ext`
+    return input_path.with_name(f"{stem}_cleaned{ext}")
 
 
 def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list[TimelineSegment]:
@@ -75,11 +106,15 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
     """
     events: list[tuple[float, float, Category, VisualAction, AudioAction, str]] = []
 
+    # Extra seconds blurred/blacked on each side of a visual segment.
+    blur_pad = max(0.0, float(getattr(prefs, "blur_padding", 0.0)))
+
     for d in scan.visual_detections:
         va = prefs.visual_for(d.category)
         if va != VisualAction.NONE and d.level.is_corrected_by(prefs.level_for(d.category)):
             events.append((
-                d.start, d.end, d.category, va,
+                max(0.0, d.start - blur_pad),
+                min(duration, d.end + blur_pad), d.category, va,
                 prefs.audio_for(d.category), d.description,
             ))
 
@@ -90,7 +125,8 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
             if not d.llm_confirmed or not d.level.is_corrected_by(lang_threshold):
                 continue
             events.append((
-                d.utterance_start, d.utterance_end, Category.FOUL_LANGUAGE,
+                max(0.0, d.utterance_start - blur_pad),
+                min(duration, d.utterance_end + blur_pad), Category.FOUL_LANGUAGE,
                 lang_va, prefs.audio_for(Category.FOUL_LANGUAGE),
                 f'Speaker says "{d.word}".',
             ))
@@ -122,6 +158,11 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
     return segments
 
 
+class RenderStopped(RuntimeError):
+    """Raised when the user hits Stop during a render. No resume is supported
+    for a half-done render; the partial output is discarded by the caller."""
+
+
 def render(
     input_path: Path,
     scan: ScanResult,
@@ -129,6 +170,10 @@ def render(
     output_path: Path = None,
     font_path: str = None,
     status_path: Path | str = None,
+    progress_callback=None,
+    stop_event=None,
+    workers: int | None = None,
+    encode_threads: int | None = None,
 ) -> Path:
     output_path = output_path or build_output_path(input_path)
     stream_info = probe_streams(input_path)
@@ -137,6 +182,11 @@ def render(
     fps = _parse_fps(video_stream.get("r_frame_rate", "24/1"))
     duration = float(stream_info["format"]["duration"])
     codec_name = video_stream.get("codec_name", "h264")
+    # The source's CONTAINER format. Some files have unusual extensions (e.g.
+    # "Movie.mkv.iso" holding matroska content) — ffmpeg can't guess a muxer
+    # from the output extension, so the final mux must name the format
+    # explicitly or it fails with "Unable to choose an output format".
+    mux_format = str(stream_info.get("format", {}).get("format_name", "")).split(",")[0].strip()
 
     # Preserve the source codec family instead of forcing libx264. This keeps
     # x265/HEVC sources at x265-sized files instead of ballooning them into
@@ -145,7 +195,7 @@ def render(
 
     timeline = plan_timeline(scan, prefs, duration)
 
-    # Optional live status for `nuclearcutter`'s inline TUI (see tui.py).
+    # Optional live status for the web GUI (see utils/scan_status.py).
     status = None
     if status_path:
         from nuclearcutter.utils.scan_status import ScanStatus, _now_iso
@@ -174,29 +224,56 @@ def render(
             except Exception as exc:
                 print(f"warning: status write failed: {exc}", file=sys.stderr)
 
+    def _progress(phase: str, detail=None):
+        if progress_callback:
+            try:
+                progress_callback(phase, detail)
+            except Exception:
+                pass  # never let a UI callback crash the render
+
+    def _on_segment(i, total, seg_start):
+        if status is not None:
+            status.set_phase("render")
+            status.frames_done = i
+            status.position_seconds = seg_start
+            _write_status()
+        _progress("render", (i, total, seg_start))
+
+    # Parallel segment encoding: run several ffmpeg processes at once, each
+    # limited to a share of the cores (instead of one encode hogging all of
+    # them while the rest of the film waits).
+    cpus = os.cpu_count() or 4
+    if workers is None:
+        workers = max(1, min(cpus // 2, 4))
+    if workers > 1 and encode_threads is None:
+        encode_threads = max(1, cpus // workers)
+    elif workers <= 1:
+        encode_threads = None
+
     with tempfile.TemporaryDirectory(prefix="cleancut_render_") as tmp:
         tmp_dir = Path(tmp)
 
         video_files, audio_files = _render_track_segments(
             input_path, timeline, scan, prefs, width, height, fps, tmp_dir, font_path, video_encoder,
-            on_segment=(lambda i, total, seg_start: (
-                status and (status.set_phase("render"),
-                            setattr(status, "frames_done", i),
-                            setattr(status, "position_seconds", seg_start),
-                            _write_status())
-            )),
+            on_segment=_on_segment,
+            stop_event=stop_event,
+            workers=workers,
+            encode_threads=encode_threads,
         )
         if status is not None:
             status.set_phase("concat"); _write_status()
+        _progress("concat", None)
         final_video = _concat_track(video_files, tmp_dir, "video_concat.mp4")
         final_audio = _concat_track(audio_files, tmp_dir, "audio_concat.m4a")
         if status is not None:
             status.set_phase("mux"); _write_status()
-        _mux_final_output(final_video, final_audio, output_path)
+        _progress("mux", None)
+        _mux_final_output(final_video, final_audio, output_path, mux_format=mux_format or None)
         if status is not None:
             status.set_phase("done")
             status.frames_done = len(timeline)
             _write_status()
+        _progress("done", (len(timeline), len(timeline), duration))
 
     return output_path
 
@@ -248,7 +325,8 @@ def _ffmpeg_has_filter(filter_name: str) -> bool:
     return filter_name in _FFMPEG_FILTERS
 
 
-def _build_blur_filter(text: str, font_path: str | None, strength: float = 1.0) -> str:
+def _build_blur_filter(text: str, font_path: str | None, strength: float = 1.0,
+                       width: int = 1920, height: int = 1080) -> str:
     """Return the -vf filter chain for a blur segment.
 
     We always apply the intense boxblur. The summary-text overlay is NOT drawn
@@ -259,13 +337,14 @@ def _build_blur_filter(text: str, font_path: str | None, strength: float = 1.0) 
     `strength` scales the blur intensity: boxblur's luma_radius (how far each
     pass spreads) and luma_power (how many passes) are both multiplied. 1.0 =
     the standard radius 30 / 3 passes; 2.0 = twice as extreme (radius 60 /
-    6 passes). The radius is clamped so it never exceeds the frame plane size.
+    6 passes). The radius is clamped so it never exceeds the frame plane size
+    (boxblur's hard limit is min(luma_w/2, luma_h/2) — exceeding it makes
+    ffmpeg fail outright).
     """
     strength = max(0.1, float(strength))
     radius = int(round(30 * strength))
     power = max(1, int(round(3 * strength)))
-    # boxblur radius max is min(luma_w/2, luma_h/2); clamp to a safe cap.
-    radius = min(radius, 200)
+    radius = min(radius, max(1, min(width, height) // 2))
     filters = [
         f"boxblur=luma_radius={radius}:luma_power={power}:"
         f"chroma_radius={radius}:chroma_power={power}"
@@ -344,33 +423,54 @@ def _render_track_segments(
     font_path: str,
     video_encoder: str,
     on_segment=None,
+    stop_event=None,
+    workers: int = 2,
+    encode_threads: int | None = None,
 ) -> tuple[list[Path], list[Path]]:
-    video_files: list[Path] = []
-    audio_files: list[Path] = []
+    """Render every segment's video + audio, running up to `workers` segment
+    encodes in PARALLEL (each ffmpeg process pinned to `encode_threads`).
 
-    for i, seg in enumerate(timeline):
-        if on_segment:
-            on_segment(i, len(timeline), seg.start)
+    On multi-core machines this is the biggest render speedup: instead of one
+    encode using all cores while the others wait, several short segments encode
+    at once. `on_segment(done, total, seg_start)` fires as each segment
+    COMPLETES (done is monotonic). Results are reassembled in timeline order.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    total = len(timeline)
+    results: dict[int, tuple[Path, Path]] = {}
+    starts = [seg.start for seg in timeline]
+    done = 0
+    lock = threading.Lock()
+
+    def _work(i: int, seg: TimelineSegment):
         v_out = tmp_dir / f"v_{i:04d}.mp4"
         a_out = tmp_dir / f"a_{i:04d}.m4a"
-
         output_duration = seg.source_duration
 
         if seg.visual == VisualAction.NONE:
-            _extract_video_segment(input_path, seg.start, output_duration, v_out, video_encoder, video_filter=None, fps=fps)
+            _extract_video_segment(input_path, seg.start, output_duration, v_out,
+                                   video_encoder, video_filter=None, fps=fps,
+                                   threads=encode_threads)
         elif seg.visual in (VisualAction.BLUR, VisualAction.BLACK):
             overlay_path: Path | None = None
             if seg.description.strip() and _ffmpeg_has_filter("overlay"):
                 overlay_path = tmp_dir / f"overlay_{i:04d}.png"
                 _make_overlay_png(seg.description, width, height, font_path, overlay_path)
             if seg.visual == VisualAction.BLUR:
-                video_filter = _build_blur_filter(seg.description, font_path, strength=getattr(prefs, "blur_strength", 1.0))
+                video_filter = _build_blur_filter(seg.description, font_path,
+                                                  strength=getattr(prefs, "blur_strength", 1.0),
+                                                  width=width, height=height)
                 _extract_video_segment(
                     input_path, seg.start, output_duration, v_out, video_encoder,
                     video_filter=video_filter, fps=fps, overlay_path=overlay_path,
+                    threads=encode_threads,
                 )
             else:  # BLACK: solid black frames + text overlay
-                _extract_black_segment(output_duration, width, height, fps, v_out, video_encoder, overlay_path)
+                _extract_black_segment(output_duration, width, height, fps, v_out,
+                                       video_encoder, overlay_path,
+                                       threads=encode_threads)
 
         # ---- Audio correction ----
         # Visual categories (nudity/gore/violence): the only muting option is
@@ -388,9 +488,24 @@ def _render_track_segments(
             else:
                 _extract_audio_segment(input_path, seg.start, output_duration, a_out, mute_ranges=None)
 
-        video_files.append(v_out)
-        audio_files.append(a_out)
+        return i, v_out, a_out
 
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        futures = {}
+        for i, seg in enumerate(timeline):
+            if stop_event is not None and stop_event.is_set():
+                raise RenderStopped("render stopped by user")
+            futures[pool.submit(_work, i, seg)] = i
+        for fut in as_completed(futures):
+            i, v_out, a_out = fut.result()
+            with lock:
+                done += 1
+            results[i] = (v_out, a_out)
+            if on_segment:
+                on_segment(done, total, starts[i])
+
+    video_files = [results[i][0] for i in range(total)]
+    audio_files = [results[i][1] for i in range(total)]
     return video_files, audio_files
 
 
@@ -453,7 +568,7 @@ def _wrap_for_display(text: str, max_chars_per_line: int = 40) -> str:
 def _extract_video_segment(
     input_path: Path, start: float, duration: float, out_path: Path,
     video_encoder: str, video_filter: str | None, fps: float,
-    overlay_path: Path | None = None,
+    overlay_path: Path | None = None, threads: int | None = None,
 ) -> None:
     cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-ss", str(start), "-i", str(input_path)]
     if overlay_path is not None:
@@ -480,8 +595,12 @@ def _extract_video_segment(
         "-t", str(duration), "-an",
         "-r", f"{fps:.6f}", "-vsync", "cfr",
         "-video_track_timescale", "15360",
-        "-c:v", video_encoder, "-crf", "17", "-preset", "medium",
     ]
+    if threads is not None:
+        # When several segments encode in parallel, each gets a share of the
+        # cores instead of all of them fighting for every core.
+        cmd += ["-threads", str(threads)]
+    cmd += ["-c:v", video_encoder, "-crf", "17", "-preset", "medium"]
     if video_encoder == "libx265":
         cmd += ["-tag:v", "hvc1"]
     cmd += ["-movflags", "+faststart", str(out_path)]
@@ -491,6 +610,7 @@ def _extract_video_segment(
 def _extract_black_segment(
     duration: float, width: int, height: int, fps: float, out_path: Path,
     video_encoder: str, overlay_path: Path | None = None,
+    threads: int | None = None,
 ) -> None:
     """Encode a segment of solid BLACK video (optionally with a text overlay).
 
@@ -512,8 +632,10 @@ def _extract_black_segment(
         "-t", str(duration), "-an",
         "-r", f"{fps:.6f}", "-vsync", "cfr",
         "-video_track_timescale", "15360",
-        "-c:v", video_encoder, "-crf", "17", "-preset", "medium",
     ]
+    if threads is not None:
+        cmd += ["-threads", str(threads)]
+    cmd += ["-c:v", video_encoder, "-crf", "17", "-preset", "medium"]
     if video_encoder == "libx265":
         cmd += ["-tag:v", "hvc1"]
     cmd += ["-movflags", "+faststart", str(out_path)]
@@ -559,22 +681,26 @@ def _concat_track(files: list[Path], tmp_dir: Path, out_name: str) -> Path:
     return out_path
 
 
-def _mux_final_output(video_path: Path, audio_path: Path, output_path: Path) -> None:
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-fflags", "+genpts",
-            "-i", str(video_path), "-i", str(audio_path),
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy", "-c:a", "copy",
-            # Normalize timestamps so there are no gaps/jumps across the concat
-            # boundaries. `-avoid_negative_ts make_zero` shifts the earliest
-            # timestamp to zero, and `+faststart` moves the moov atom to the
-            # front so players open immediately. Together these stop VLC from
-            # re-detecting the stream (title + black flash) at each blur cut.
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            str(output_path),
-        ],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
-    )
+def _mux_final_output(video_path: Path, audio_path: Path, output_path: Path,
+                      mux_format: str | None = None) -> None:
+    cmd = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts",
+        "-i", str(video_path), "-i", str(audio_path),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy", "-c:a", "copy",
+        # Normalize timestamps so there are no gaps/jumps across the concat
+        # boundaries. `-avoid_negative_ts make_zero` shifts the earliest
+        # timestamp to zero, and `+faststart` moves the moov atom to the
+        # front so players open immediately. Together these stop VLC from
+        # re-detecting the stream (title + black flash) at each blur cut.
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
+    ]
+    if mux_format:
+        # Explicit muxer: the output extension may not reveal the container
+        # (e.g. an .iso-named file holding matroska content), and extension
+        # guessing fails with "Unable to choose an output format".
+        cmd += ["-f", mux_format]
+    cmd += [str(output_path)]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)

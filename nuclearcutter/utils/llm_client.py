@@ -14,11 +14,14 @@ from __future__ import annotations
 import base64
 import io
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import requests
 from PIL import Image
+
+from nuclearcutter.prompts import get_prompt
 
 
 @dataclass
@@ -49,18 +52,25 @@ class LLMConfig:
     # Reasoning models spend most of their budget "thinking" before answering.
     # Instructing them to answer directly cuts latency dramatically and
     # prevents empty responses when the thinking chain hits the token cap.
-    system_prompt: str = (
-        "Answer directly and concisely. Do not provide lengthy reasoning or "
-        "chain-of-thought; output only the requested result."
-    )
+    # None = use the system_prompt from prompts.json (the shared prompt file).
+    system_prompt: str | None = None
 
 
 class LLMClient:
     def __init__(self, config: LLMConfig):
         self.config = config
+        # Optional hook: called after every successful request with
+        # (response_json, elapsed_seconds). The web GUI uses it to track
+        # tokens-per-prompt, generation speed, and pp speed.
+        self.usage_callback = None
+        # Optional hook: called with (payload, response_json) for every
+        # request. The web GUI uses it to stream prompts/responses to the
+        # terminal when "show prompts and responses" is enabled.
+        self.request_log_callback = None
 
     def _post(self, payload: dict, timeout: int = None) -> dict:
         timeout = timeout if timeout is not None else self.config.timeout
+        t0 = time.monotonic()
         resp = requests.post(
             f"{self.config.base_url}/chat/completions",
             headers=self._headers(),
@@ -74,13 +84,52 @@ class LLMClient:
                 f"Response body: {body}",
                 response=resp,
             )
-        return resp.json()
+        data = resp.json()
+        if self.usage_callback is not None:
+            try:
+                self.usage_callback(data, time.monotonic() - t0)
+            except Exception:
+                pass  # never let stats tracking break a request
+        if self.request_log_callback is not None:
+            try:
+                self.request_log_callback(payload, data)
+            except Exception:
+                pass  # never let prompt logging break a request
+        return data
 
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _system_prompt(self) -> str:
+        """The system prompt for model requests.
+
+        Resolved from prompts.json (the shared prompt file — the single source
+        of truth for what the models are asked), unless the caller overrode it
+        on the LLMConfig.
+        """
+        return self.config.system_prompt or get_prompt("system_prompt")
+
+    def list_models(self) -> list[str]:
+        """Return the model ids advertised by the configured server's /v1/models.
+
+        Used by the web GUI's "use existing model server" flow: after the user
+        types an IP/base URL, the GUI calls this (via the server endpoint) to
+        populate the model dropdown. Returns [] when unreachable.
+        """
+        try:
+            resp = requests.get(
+                f"{self.config.base_url}/models",
+                headers=self._headers(),
+                timeout=min(self.config.timeout, 10),
+            )
+            resp.raise_for_status()
+        except requests.RequestException:
+            return []
+        data = resp.json().get("data", [])
+        return [m["id"] for m in data if "id" in m]
 
     def test_connection(self) -> None:
         """Verify the local server is reachable and the configured models exist.
@@ -163,7 +212,7 @@ class LLMClient:
         payload = {
             "model": self.config.vlm_model,
             "messages": [
-                {"role": "system", "content": self.config.system_prompt},
+                {"role": "system", "content": self._system_prompt()},
                 {"role": "user", "content": content},
             ],
             "temperature": 0.1,
@@ -187,7 +236,7 @@ class LLMClient:
         payload = {
             "model": self.config.text_model,
             "messages": [
-                {"role": "system", "content": self.config.system_prompt},
+                {"role": "system", "content": self._system_prompt()},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,

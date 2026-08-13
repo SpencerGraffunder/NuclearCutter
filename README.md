@@ -11,7 +11,7 @@ playback time. NuclearCutter edits the file itself, once, and you keep the resul
 **Status:** early / actively developed. See `docs/SPEC.md` for the full design
 rationale behind every decision below — read that first if you're contributing.
 
-## Quick start
+## Quick start — launch the web GUI
 
 Requirements: macOS on Apple Silicon (recommended), Python 3.10+, and
 `ffmpeg`/`ffprobe` on your PATH. Everything else is handled for you — the
@@ -22,43 +22,56 @@ automatically (no `pip install`, no `source activate`).
 git clone https://github.com/SpencerGraffunder/NuclearCutter.git
 cd NuclearCutter
 
-# Scan a movie (slow — hours, run it and walk away)
-python3 nuclearcutter.py scan "/path/to/Movie.mkv"
-
-# Once the scan finishes, produce the cleaned copy (fast)
-python3 nuclearcutter.py render "/path/to/Movie.mkv"
+python3 nuclearcutter.py            # starts the web GUI server
 ```
 
-That's it. `python3 nuclearcutter.py` creates `.venv/` and installs everything
-on first run, then runs the real CLI inside it. You can also run
-`./nuclearcutter.py` (it's executable) or, if you prefer, activate the venv
-manually: `source .venv/bin/activate && nuclearcutter scan ...`.
+Then open a browser:
+
+- **On this machine:** http://localhost:8000
+- **From any other device on your network:** `http://<this-machine-ip>:8000`
+  (find the IP with `ipconfig getifaddr en0` — it's printed in the server
+  banner too)
+
+The server binds `0.0.0.0` and has **no login** — anyone on your network who
+can reach the port can use it. Everything is controlled from the browser: pick
+your movie, choose a model backend, start the scan, watch it progress, then
+render the cleaned copy. That's the whole workflow.
+
+`python3 nuclearcutter.py` creates `.venv/` and installs dependencies on first
+run, then starts the server. You can also run `./nuclearcutter.py` (it's
+executable). To stop the server, press Ctrl-C in that terminal.
+
+Headless `scan`/`render` commands still exist for scripting — see
+[Usage](#usage) below.
 
 ## What it does
 
 Two passes:
 
-1. **`nuclearcutter scan MOVIE.mkv`** — analyzes the whole file (video + audio),
-   writes a JSON file recording every detected instance of nudity, intimate
-   scenes, and foul language, with timestamps and (for visual detections) an
-   AI-written description of the scene. This pass takes no action on the file
-   itself — it's a neutral record of what's in the movie. This is the slow
-   part; realistically hours, and can run for a day or more on a long film
-   depending on your hardware. That's expected and fine.
+1. **Scan** — analyzes the whole file (video + audio), writes a JSON file
+   recording every detected instance of nudity, gore, violence, and foul
+   language, with timestamps and (for visual detections) an AI-written
+   description of the scene. This pass takes no action on the file itself —
+   it's a neutral record of what's in the movie. This is the slow part;
+   realistically hours, and can run for a day or more on a long film depending
+   on your hardware. That's expected and fine.
 
-2. **`nuclearcutter render MOVIE.mkv`** — reads the scan JSON plus your personal
-   preferences (what to do about each category) and produces
-   `MOVIE_cleaned.mkv` in the same folder. This is much faster than the scan.
+2. **Render** — reads the scan JSON plus your preferences (what to do about
+   each category) and produces `<movie>_cleaned.<ext>` in the same folder.
+   This is much faster than the scan.
 
 You can re-render the same scan with different preferences without rescanning
 — scan data and your censorship choices are stored separately on purpose (see
-`docs/SPEC.md` §2, §6).
+`docs/SPEC.md` §2, §6). In the web GUI, the **Status** section shows a
+timeline of every detection that the *currently selected* render settings
+would catch, so you can tune the levels and immediately see what would be
+missed or over-corrected before you hit Render.
 
 ## Actions available per category
 
 Every category has **two independent corrections**: a *visual* action (what to
-do to the video) and an *audio* action (what to do to the audio). They default
-per category and can be overridden per-run with CLI flags or in `config.toml`.
+do to the video) and an *audio* action (what to do to the audio). They are set
+per category in the web GUI's **Render** section (the corrections matrix).
 
 **Visual actions:**
 
@@ -110,30 +123,31 @@ The level is the amount of **censorship**:
 - `high` = high
 - `exhigh` = **max censorship** — basically everything gets corrected
 
-Your per-category `*_level` setting is that threshold: content at or above it
-gets corrected, below is left alone. E.g. `nudity_level = "low"` blurs only the
-most extreme nudity, while `nudity_level = "exhigh"` blurs essentially anything
-that isn't fully modest (it makes the film play like a documentary — which is
-fine, since every blur/black segment shows a clean text summary of the scene).
+Your per-category **level** setting in the Render section is that threshold:
+detections at or below it get corrected; milder ones are left alone. E.g.
+`nudity_level = "low"` blurs only the most extreme nudity, while
+`nudity_level = "exhigh"` blurs essentially anything that isn't fully modest
+(it makes the film play like a documentary — which is fine, since every
+blur/black segment shows a clean text summary of the scene).
 
 The level *scale itself* is standardized (built in, not per-user), so the same
-scan JSON produces consistent results for everyone. The **DETECTION LEVELS**
-section of `config.toml` shows the **full prompt** used for each level of each
-category, so you can see exactly what will be caught at each setting. If you
-really want a fully custom definition for a category, set its `*_prompt` in
-`config.toml` — that replaces the built-in scale entirely.
+scan JSON produces consistent results for everyone. The **full definitions of
+each level** (i.e. exactly what gets caught at each setting) are part of the
+sweep/confirm prompts in `nuclearcutter/prompts.json`, which the web GUI's
+**VLM Prompts** panel lets you view and edit.
 
-**`blur`** keeps the scene intact and less disruptive than replacing the footage
-entirely, while still obscuring the flagged content. **`black`** shows nothing
-but the clean summary text. Audio can be set independently per category, so
-e.g. nudity can be `visual=blur` + `audio=none`, or violence can be
-`visual=black` + `audio=mute_scene`.
+**`blur`** keeps the scene intact and less disruptive than replacing the
+footage entirely, while still obscuring the flagged content. **`black`** shows
+nothing but the clean summary text. Audio can be set independently per
+category, so e.g. nudity can be `visual=blur` + `audio=none`, or violence can
+be `visual=black` + `audio=mute_scene`.
 
-Blur intensity is tunable with `--blur-strength N` (or `blur_strength` in
-`config.toml`): `1.0` is the standard intense blur, `2.0` is twice as extreme
-(bigger radius + more passes), `0.5` is lighter.
-
-Foul-language muting pads each flagged word by `--mute-padding` seconds (default 0.5) on both sides, so the word's onset/offset audio doesn't leak through — whisper's word timestamps can be tight.
+Blur intensity is tunable with the **Blur amount** field in the GUI:
+`1.0` is the standard intense blur, `2.0` is twice as extreme (bigger radius +
+more passes), `0.5` is lighter. **Mute padding** (default 0.5s) pads each
+flagged word on both sides so word onset/offset audio doesn't leak through —
+whisper's word timestamps can be tight. **Blur padding** (default 0s) extends
+each blur/black segment by extra seconds on both sides.
 
 ## Setup
 
@@ -144,12 +158,12 @@ Foul-language muting pads each flagged word by `--mute-padding` seconds (default
   plain Python/ffmpeg and should run elsewhere, but isn't the primary target.
 - Python 3.10+
 - `ffmpeg` and `ffprobe` on your PATH
-- An inference backend. The default backend is **mlx-vlm**, which NuclearCutter
-  starts for you automatically (a local MLX vision model served over an
-  OpenAI-compatible `/v1` API on port 1234). You can also point it at any
-  OpenAI-compatible local server you run yourself (`standalone` backend — LM
-  Studio, Ollama, or a manually started mlx-vlm server) — see "Configuration"
-  below.
+- An inference backend. The default is **mlx-vlm**, which NuclearCutter starts
+  for you automatically (a local MLX vision model served over an
+  OpenAI-compatible `/v1` API on port 1234). You can also launch a local
+  **llama.cpp** `llama-server`, or point at any **already-running**
+  OpenAI-compatible server (LM Studio, Ollama, a manually started mlx-vlm
+  server) — see below.
 
 ### Install
 
@@ -158,99 +172,70 @@ environment (`.venv/`) and installs the package + dependencies automatically
 on first run. After that, every invocation is just:
 
 ```bash
-python3 nuclearcutter.py scan "/path/to/Movie.mkv"
-python3 nuclearcutter.py render "/path/to/Movie.mkv"
+python3 nuclearcutter.py            # web GUI
+python3 nuclearcutter.py scan MOVIE.mkv      # headless scan
+python3 nuclearcutter.py render MOVIE.mkv    # headless render
 ```
 
 (Equivalently: `./nuclearcutter.py ...`, or activate the venv once and use
-`nuclearcutter ...` — `source .venv/bin/activate` then `nuclearcutter scan ...`.)
+`nuclearcutter ...` — `source .venv/bin/activate`.)
 
-### Configuration (config.toml)
+### Configuration
 
-Settings live in a single `config.toml` file in the project root
-(`Documents/NuclearCutter/config.toml` on this machine) — plain text, editable
-in any editor (TextEdit / Notepad / VS Code). A fully commented template is
-created for you; every key is optional and has a sane default. After you set it
-once, the only thing you pass on the command line is the movie path:
+Settings are saved automatically on the server to `settings.json` (next to
+the repo) whenever you change them, and reloaded when the server starts — so
+your movie location, model, and render preferences survive restarts. The path
+is shown in the GUI header and in the server banner. The Scan section covers:
 
-```bash
-nuclearcutter scan  "/path/to/Movie.mkv"
-nuclearcutter render "/path/to/Movie.mkv"
-```
-
-The default config file looks like this (all commented-out = defaults):
-
-```toml
-# ---- Inference backend -------------------------------------------------
-# model_backend = "mlx-vlm"   # "mlx-vlm" (auto-start its own server) | "standalone"
-# model_path = "/Users/<you>/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit"
-# base_url = "http://localhost:1234/v1"
-
-# ---- Models ------------------------------------------------------------
-# vlm_model = "Qwen3.5-9B-MLX-4bit"
-# text_model = "Qwen3.5-9B-MLX-4bit"
-# whisper_model = "mlx-community/whisper-small-mlx"
-
-# ---- Scan tuning -------------------------------------------------------
-# sweep_interval = 5.0
-# vision_timeout = 8000
-# timestamps_dir = ""
-
-# ---- Per-category severity threshold (correct at/above this) ------------
-# nudity_level = "med"      # "low" | "med" | "high" | "exhigh"
-# gore_level = "med"
-# violence_level = "med"
-# foul_language_level = "med"
-# (The level SCALE itself is fixed/standardized so scans are shareable — see
-#  the DETECTION LEVELS section of config.toml. Only these thresholds vary.)
-
-# ---- Optional custom prompts (empty = built-in fixed level scale) -------
-# nudity_prompt = ""
-# gore_prompt = ""
-# violence_prompt = ""
-# foul_language_prompt = ""
-
-# ---- Render corrections (per category: visual + audio) -----------------
-# nudity_visual = "blur"            # "none" | "blur" | "black"
-# nudity_audio = "none"             # "none" | "mute_scene"
-# gore_visual = "blur"
-# gore_audio = "none"
-# violence_visual = "blur"
-# violence_audio = "none"
-# foul_language_visual = "none"
-# foul_language_audio = "mute_phrase"
-# blur_strength = 1.0
-# mute_padding = 0.5
-# font = ""
-```
-
-Use a different config file with `nuclearcutter --config /path/to/config.toml ...`.
-Every setting can still be overridden per-run with a CLI flag — see `--help`.
+- **Source file location** — the movie to analyze.
+- **Model backend** — one of:
+  - *launch local mlx-vlm* — NuclearCutter spawns `mlx_vlm.server` on port 1234
+    with the **local model path** you give it (default: the LM Studio MLX
+    folder, e.g. `~/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit`).
+  - *launch local llama.cpp* — spawns `llama-server` (from Homebrew's
+    `llama.cpp`) with a `.gguf` file, optionally a `--mmproj` vision
+    projector for image input.
+  - *use existing model server* — type the server's IP / base URL and hit
+    **Scan for models**; the available model ids are fetched from its
+    `/v1/models` and shown in the VLM model dropdown.
+- **Whisper model** — for transcription (default
+  `mlx-community/whisper-small-mlx`).
+- **Scale frames before VLM** — `360p`/`480p`/`720p`/`1080p`; frames are
+  downscaled before being sent to the vision model. Lower is much faster, and
+  480p is the recommended default for scene-level detection.
+- **Scan interval** — seconds between sampled frames (default 2).
+- **Start / Stop / Clear progress** — stopping saves progress to a status file
+  next to the movie, so hitting Start again resumes from where it stopped.
+  Clear progress wipes the saved state to force a fresh scan.
+- **Test / benchmark VLM** — runs the real sweep + confirm prompts against the
+  selected model on 12 frames from the movie and reports speed and accuracy
+  (a **CANCEL BENCH** button stops it mid-run).
 
 ### The mlx-vlm backend (default)
 
-The default backend is **mlx-vlm**, a fast MLX vision-language model server that
-runs entirely on your Mac's GPU. It's installed automatically into the venv by
-`nuclearcutter.py` on first run (there's no Homebrew formula for mlx-vlm, so
-it's pip-installed). At scan time NuclearCutter:
+The default backend is **mlx-vlm**, a fast MLX vision-language model server
+that runs entirely on your Mac's GPU. It's installed automatically into the
+venv by `nuclearcutter.py` on first run (there's no Homebrew formula for
+mlx-vlm, so it's pip-installed). When you start a scan or benchmark,
+NuclearCutter:
 
 1. checks it's installed,
 2. starts its own server (`python -m mlx_vlm.server --port 1234 --model <path>`,
-   with 4-bit KV-cache quantization) pointed at your `model_path`,
-3. waits for it to come up, runs the scan against it, and shuts it down when
-   the scan finishes.
+   with 4-bit KV-cache quantization) pointed at your model path,
+3. waits for it to come up, runs the scan against it, and keeps it running
+   until you stop the NuclearCutter server.
 
-The default `model_path` is the same Qwen MLX 4-bit model that the project was
+The default model path is the same Qwen MLX 4-bit model that the project was
 previously using through LM Studio:
 `/Users/<you>/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit`. If
-your model lives elsewhere, set `model_path` in `config.toml`. Images sent to
-the model are downscaled (~480px) before upload, which is the single biggest
-speed lever in the whole pipeline.
+your model lives elsewhere, change the **local model path** in the GUI. Images
+sent to the model are downscaled to the selected scale before upload, which is
+the single biggest speed lever in the whole pipeline.
 
 If you'd rather run your own server (LM Studio, Ollama, or a manual
-`python -m mlx_vlm.server ...`), set `model_backend = "standalone"` in
-`config.toml` and point `base_url` at it. NuclearCutter will use it without
-starting or stopping anything.
+`python -m mlx_vlm.server ...`), select **use existing model server** and point
+it at your base URL — NuclearCutter will use it without starting or stopping
+anything.
 
 ### Full-film VLM sweep (the only visual detector)
 
@@ -268,19 +253,12 @@ dropped. Each range is then confirmed, described, **and classified into a
 severity level** (low/med/high/exhigh) using the fixed, standardized scale.
 The level is stored in the scan JSON, which is what makes scans shareable.
 
-`--sweep-interval` controls sampling density (seconds between samples;
+The **scan interval** controls sampling density (seconds between samples;
 default 2). Smaller catches shorter scenes but makes more VLM calls; larger
-is faster but can miss brief flashes:
-
-```bash
-nuclearcutter scan ... --sweep-interval 2   # default — densest, most thorough
-nuclearcutter scan ... --sweep-interval 10  # faster, still catches ~10s+ scenes
-```
-
-Because this is one VLM sweep covering all three visual categories, it
-replaces what used to be NudeNet + a VLM confirm pass + two separate opt-in
-sweeps — and it never depends on a fast-but-blind classifier deciding what's
-worth looking at.
+is faster but can miss brief flashes. Because this is one VLM sweep covering
+all three visual categories, it replaces what used to be NudeNet + a VLM
+confirm pass + two separate opt-in sweeps — and it never depends on a
+fast-but-blind classifier deciding what's worth looking at.
 
 ### Rendering preserves the source codec
 
@@ -292,33 +270,64 @@ point is the *codec* is preserved, not that output is bit-identical.)
 
 ## Usage
 
-The two commands, at a glance (settings come from `config.toml` — see above):
+### Web GUI (recommended)
+
+```bash
+python3 nuclearcutter.py
+# open http://localhost:8000 (or http://<this-machine-ip>:8000 from any device)
+```
+
+Workflow in the browser:
+
+1. **Scan section** — set the source file, backend + model, scale, interval,
+   then **Start scan**. The Status section below shows the timeline, progress
+   bars for each step (transcribe / scan / verify / render), ETA, frame
+   counter, and model speed stats. Stop saves progress; Start resumes.
+2. **Render section** — once the scan is done, pick the per-category levels
+   and corrections, the output file name (default `<movie>_cleaned`), blur
+   amount, mute/blur padding, then **Start render**. The timeline marks update
+   live as you change levels so you can see exactly what will be corrected.
+   (A stopped render can't be resumed — the half-done output is discarded.)
+3. The cleaned file appears next to the original.
+
+### Headless CLI
+
+The same operations are available from the terminal for scripting:
 
 ```bash
 # Scan a movie (slow — hours to a day+ depending on length/hardware)
-python3 nuclearcutter.py scan "/path/to/Movie.mkv"
+python3 nuclearcutter.py scan "/path/to/Movie.mkv" [--scale 480p] [--sweep-interval 2]
 
 # Render with your preferred actions per category
-python3 nuclearcutter.py render "/path/to/Movie.mkv"
+python3 nuclearcutter.py render "/path/to/Movie.mkv" [--nudity-level high] [--blur-strength 1.5]
 ```
 
-This produces `/path/to/Movie_cleaned.mkv`. (If you've activated the venv with
-`source .venv/bin/activate`, you can drop the `python3 nuclearcutter.py` and just
-run `nuclearcutter scan ...`.)
+This produces `/path/to/Movie_cleaned.mkv`. The default backend is mlx-vlm
+with the default model path; for a standalone server pass
+`--backend standalone --base-url ... --vlm-model ... --text-model ...`. See
+`python3 nuclearcutter.py scan --help` / `render --help` for every flag.
 
-## Live dashboard (integrated into scan/render)
+### Status section (the dashboard)
 
-Both `scan` and `render` show a **live TUI dashboard** while they run — no
-separate command needed. It displays a color-coded film timeline with markers
-for detected visual/language cut locations (a legend shows what each letter
-means), a current-position cursor, a time estimate, and live CPU/RAM + scan
-memory. GPU usage and temperature are shown when passwordless `sudo
-powermetrics` is available; otherwise the dashboard says n/a and tells you the
-one-line sudoers rule to enable it. The dashboard appears automatically when
-you run the command in a terminal; pass `--no-tui` to get plain text output
-instead (also auto-disabled when stdout is piped/redirected).
+The web GUI's **Status** section is the live dashboard, replacing the old
+terminal TUI:
 
-### Why a scan takes hours
+- **System stats** — RAM and CPU used by NuclearCutter itself (not system
+  totals), GPU active residency, and CPU temperature. GPU/temps are shown when
+  passwordless `sudo powermetrics` is available; otherwise they read n/a and
+  the hint tells you the one-line sudoers rule to enable them.
+- **Timeline** — a bar for the whole movie with a color-coded mark per
+  detection *that the currently selected render levels/actions would catch*.
+  Changing the Render section levels re-filters the marks immediately, so you
+  can see whether a looser setting would miss things or a stricter one would
+  correct too much.
+- **Step progress bars** — one each for transcription, scan, verify, and
+  render.
+- **Model status** — pp speed (t/s), generation speed (t/s), tokens per
+  prompt, and speed per frame, measured from the live requests.
+- **ETA and frames counter**.
+
+## Why a scan takes hours
 
 A scan samples a frame every 2 seconds across the whole film and sends each
 batch of 4 frames to the vision model for review. That's a lot of model calls —
@@ -326,172 +335,66 @@ a ~2-hour film is roughly **900 model calls** (3600 sampled frames ÷ 4), and
 each one takes several seconds on a MacBook's GPU. Whisper transcription and
 the per-scene confirm pass add more on top. So hours are normal (roughly
 proportional to film length × your GPU speed). To trade thoroughness for speed,
-raise the sweep interval: `python3 nuclearcutter.py scan MOVIE.mkv
---sweep-interval 5` halves the model calls (but can miss scenes shorter than
-~5s); `10` is faster still. Lower intervals (the 2s default) catch short
-flashes at the cost of more calls.
-
-The dashboard also streams a live status JSON to a temp file (phase, position,
-and every detection as it's found). You can watch a scan started elsewhere with:
-
-```bash
-nuclearcutter tui --status /path/to/Movie.nuclearcutter.status.json
-# or attach to an older scan's log (no status file):
-nuclearcutter tui --log /path/to/scan.log
-```
-
-With no `--status`/`--log`, `nuclearcutter tui` auto-detects the most recent
-status file or scan log.
+raise the scan interval in the GUI: `5` halves the model calls (but can miss
+scenes shorter than ~5s); `10` is faster still. Lower intervals (the 2s
+default) catch short flashes at the cost of more calls.
 
 ## Examples
 
-All examples below are complete, runnable commands — with `config.toml` set up
-once, none of them need model flags. CLI flags shown override the config for
-that single run.
+### Example 1 — Full scan + render in the GUI
 
-### Example 1 — Full scan + render (mlx-vlm backend, defaults)
-
-The most common case: a local movie, config.toml set, default mlx-vlm backend
-auto-starting on port 1234.
-
-```bash
-# 1. Scan (slow — run it and walk away)
-nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
-
-# 2. Render the censored copy (fast)
-nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
-```
-
-Result: `/Volumes/Media/Movies/The.Martian.2015.1080p_cleaned.mkv` (original
-left untouched).
+Open the GUI, set the source file to your movie, leave the default backend
+(mlx-vlm, auto-started) and scale (480p), hit **Start scan**. When the scan
+finishes, set your render preferences (or keep defaults: blur nudity/gore/
+violence, mute foul-language phrases) and hit **Start render**. Result:
+`Movie_cleaned.mkv` next to the original, which is left untouched.
 
 ### Example 2 — Standalone backend (LM Studio / Ollama)
 
-Run your own server instead of letting NuclearCutter start one. Set
-`model_backend = "standalone"` in `config.toml` (and `base_url` to your
-server), then start it:
+Start your own server first:
 
 ```bash
-# LM Studio serving on port 1234 (default) — just open LM Studio and load the model
+# LM Studio serving on port 1234 (default) — open LM Studio and load the model
 # OR Ollama (different port + model names):
 ollama pull qwen3.5:7b
 ollama serve
 ```
 
+In the GUI: select **use existing model server**, type the base URL
+(e.g. `http://localhost:11434/v1`), hit **Scan for models**, and pick the VLM
+model from the dropdown. Headless equivalent:
+
 ```bash
-nuclearcutter scan "/Users/you/Movies/The.Martian.2015.1080p.mkv" \
+python3 nuclearcutter.py scan "/Users/you/Movies/Movie.mkv" \
+  --backend standalone \
   --base-url http://localhost:11434/v1 \
   --vlm-model qwen3.5:7b \
   --text-model qwen3.5:7b \
   --whisper-model mlx-community/whisper-large-v3-turbo
 ```
 
-(Here the flags override `config.toml` just for this run — with
-`model_backend = "standalone"` set in the config, the `--base-url`/model flags
-are the only ones needed each time.)
-
 ### Example 3 — Re-render an old scan with different preferences (no rescan)
 
 You already scanned once; now you want a different censorship policy without
-re-analyzing the film. Just render again from the same JSON.
+re-analyzing the film. In the GUI, the render reads the same scan JSON
+(`Movie.nuclearcutter.json`) — just change the levels/corrections and render
+again. Headless equivalent:
 
 ```bash
-# This time: don't mute audio during blur, and mute whole utterances, not just words
-nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
-  --output "/Volumes/Media/Movies/The.Martian.2015.1080p_lite_cut.mkv" \
-  --nudity blur \
-  --intimate-scenes blur \
-  --foul-language mute \
-  --mute-scope utterance
+python3 nuclearcutter.py render "/path/to/Movie.mkv" \
+  --scan "/path/to/Movie.nuclearcutter.json" \
+  --output "/path/to/Movie_lite_cut.mkv" \
+  --nudity-level low \
+  --foul-language-audio mute_word
 ```
 
-### Example 4 — Render from a saved preferences file
+### Example 4 — Benchmark the model before committing to a scan
 
-Define your policy once in JSON, reuse it for every movie.
-
-```bash
-nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
-  --prefs ~/.config/nuclearcutter/prefs.json
-```
-
-To create that prefs file, see "Saving preferences" below.
-
-### Example 5 — Skip the scan using a shared timestamp file
-
-If someone has already scanned the same film, reuse their work instead of
-re-analyzing for hours. NuclearCutter fingerprints your file and, if it
-matches a scan in `timestamps/`, spot-checks a few frames with the VLM and
-reuses the result.
-
-```bash
-nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --timestamps-dir ~/Code/nuclearcutter/timestamps
-```
-
-(Or set `timestamps_dir` in `config.toml` and just pass the movie path.)
-
-### Example 6 — Write the scan JSON to a specific location
-
-By default the scan lands next to your movie as `Movie.nuclearcutter.json`.
-On a read-only or shared drive you can send it somewhere writable instead.
-
-```bash
-nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --output "$HOME/scans/The.Martian.2015.1080p.json"
-```
-
-### Using the shared timestamps repo
-
-If someone has already scanned the same film (even a different rip/encode —
-see fingerprinting below), you can skip the expensive scan entirely:
-
-```bash
-nuclearcutter scan "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --timestamps-dir ./timestamps
-```
-
-This checks `./timestamps/*.json` for a fingerprint match against your local
-file, spot-checks a few flagged scenes with the VLM to make sure it's really
-the same content (not just a similar-length file), and if confirmed, copies
-that data over instead of doing a full rescan.
-
-Scans you produce are meant to be shared back — copy your `.nuclearcutter.json`
-output into `timestamps/` and open a PR. **Scan files never contain your
-personal action preferences** (blur vs mute) — only what's in the
-film and when. That's what makes one scan file useful to everyone regardless
-of what they each want censored.
-
-### Saving preferences
-
-Instead of passing visual/audio flags every time, you can save a preferences
-file and reuse it:
-
-```python
-from pathlib import Path
-from nuclearcutter.schema import AudioAction, Preferences, VisualAction
-prefs = Preferences(
-    nudity_visual=VisualAction.BLUR,
-    nudity_audio=AudioAction.NONE,
-    gore_visual=VisualAction.BLUR,
-    gore_audio=AudioAction.NONE,
-    violence_visual=VisualAction.BLUR,
-    violence_audio=AudioAction.NONE,
-    foul_language_visual=VisualAction.NONE,
-    foul_language_audio=AudioAction.MUTE_PHRASE,
-)
-prefs.save(Path("my_prefs.json"))
-```
-
-```bash
-nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv" \
-  --scan "/Volumes/Media/Movies/The.Martian.2015.1080p.nuclearcutter.json" \
-  --prefs ~/.config/nuclearcutter/prefs.json
-```
-
-Render needs no models — it just applies the actions from your scan JSON and
-preferences via ffmpeg.
+In the GUI, click **Test / benchmark VLM** (optionally after setting the
+backend and scale). It builds a 12-frame collection from the movie — including
+frames from known flagged windows if a scan already exists — and runs the real
+sweep + confirm prompts, reporting per-batch time, tokens, pp/gen speed, and
+whether each batch was flagged correctly.
 
 ## How fingerprinting works
 
@@ -502,7 +405,7 @@ of frames sampled at fixed **percentages** of total runtime (not fixed
 timestamps), plus overall duration. This is resilient to different
 containers, bitrates, and frame rates, as long as it's fundamentally the same
 cut of the film. See `docs/SPEC.md` §5 for the full matching/verification
-flow, including the VLM spot-check step that runs before a match is trusted.
+flow.
 
 ## Known limitations
 
@@ -519,9 +422,12 @@ flow, including the VLM spot-check step that runs before a match is trusted.
 - Multi-audio-track / multi-subtitle-track files: current implementation
   operates on the first audio track and looks for a single sidecar subtitle.
   Multi-track handling is a good area for contribution.
-- No review/edit UI yet for inspecting flagged scenes before rendering — CLI
-  only for now, per `docs/SPEC.md` §7. You can hand-edit the scan JSON
-  directly if you want to correct or remove a detection before rendering.
+- No review/edit UI yet for inspecting flagged scenes before rendering — the
+  web GUI is the interface; you can hand-edit the scan JSON directly if you
+  want to correct or remove a detection before rendering.
+- The GUI binds 0.0.0.0 with no login. On a trusted home network that's the
+  point (any device can open it); if you'd rather restrict it, run
+  `python3 nuclearcutter.py serve --host 127.0.0.1` to limit it to this machine.
 
 ## Contributing
 

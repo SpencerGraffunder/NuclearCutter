@@ -11,7 +11,8 @@ dependencies = [
     "ImageHash>=4.3",
     "mlx-whisper>=0.4",
     "mlx-vlm>=0.6.10",
-    "rich>=13.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
     "psutil>=5.9",
     "pysrt>=1.1",
 ]

@@ -33,6 +33,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from nuclearcutter.prompts import get_prompt
 from nuclearcutter.schema import Category, SeverityLevel, VisualDetection
 from nuclearcutter.utils.ffmpeg import extract_frame_at, extract_frames_in_range, probe_duration
 from nuclearcutter.utils.llm_client import LLMClient
@@ -40,11 +41,31 @@ from nuclearcutter.utils.llm_client import LLMClient
 # How many frames to sample across a candidate range for the confirm/describe pass.
 FRAMES_PER_RANGE = 6
 
+# Frame scale-down presets selectable in the web GUI ("scale down frames
+# before vlm"). The chosen height is used for BOTH the sweep and the confirm
+# pass, and also sets the VLM request's vision_max_pixels bound so images are
+# never sent larger than the chosen resolution.
+SCALE_HEIGHTS = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080}
+DEFAULT_SCALE = "480p"
+
+
+def scale_height_for(scale: str | None) -> int:
+    """Map a GUI scale preset ('360p'..'1080p') to its frame height. 480p default."""
+    return SCALE_HEIGHTS.get((scale or DEFAULT_SCALE).strip().lower(), SCALE_HEIGHTS[DEFAULT_SCALE])
+
+
+def vision_max_pixels_for_scale(scale: str | None) -> int:
+    """Max pixels per VLM image for a scale preset (16:9 bound at that height)."""
+    h = scale_height_for(scale)
+    return int(h * (h * 16 / 9))
+
 # Output height for extracted frames. The sweep only does coarse flagging, so
 # 480p is plenty and cuts VLM vision tokens ~3.6x (1920x818 -> 480p). The
 # confirm grades severity and writes a viewer-facing description, so it gets
 # 720p to keep small details (cuts, on-screen text) legible. Width auto-scales
 # to preserve aspect ratio.
+# NOTE: these constants are the historical defaults; the active resolution is
+# set per-run from the GUI's scale option (see VisualSweepDetector.scale_height).
 SWEEP_SCALE_HEIGHT = 480
 CONFIRM_SCALE_HEIGHT = 720
 
@@ -233,78 +254,27 @@ def _category_definitions(prompts: dict | None) -> dict:
 def build_sweep_prompt(category_defs: dict, n: int) -> str:
     """Compose the unified sweep prompt from the per-category definitions.
 
-    One question per sampled batch: "does this batch contain ANY flagged
-    content?" — where "flagged" is defined by each category's level scale.
-    Severity is NOT graded here; the focused confirm pass is the sole source
-    of truth for the level.
+    The template lives in prompts.json (shared with the web GUI's benchmark);
+    the per-category level-scale definitions are injected as {definitions}.
     """
     bullets = "\n".join(f"- {cat.value}:\n{category_defs[cat]}" for cat in _VISUAL_CATEGORIES)
-    return f"""You are reviewing {{n}} sampled frames from a movie, shown in \
-chronological order, to help a parental-content-filtering tool decide what is in this batch.
-
-Flag the batch if ANY of the following categories applies. For each category, \
-here is the FULL definition of what counts as flagged content — this is the \
-ONLY measure of what counts:
-{bullets}
-
-Respond with a JSON object with these exact fields:
-
-- "contains_flagged_content": true or false — true if ANY of the frames shows \
-content matching any category above.
-- "category": "nudity", "gore", or "violence" if contains_flagged_content is \
-true, otherwise null. If multiple apply, pick the most severe one.
-- "confidence": a number from 0 to 1.
-- "description": a SHORT, clean, matter-of-fact summary of what the flagged \
-frame(s) show, suitable for display as text on a black screen in place of the \
-actual footage. If contains_flagged_content is false, set this to an empty string.
-
-Respond with ONLY the JSON object, no other text.""".replace("{{n}}", str(n))
+    return get_prompt("sweep_prompt", n=n, definitions=bullets)
 
 
 def build_confirm_prompt(category: Category, definition: str, dialogue_text: str) -> str:
     """Per-category confirm prompt: verify a swept range matches that category's
     definitions and, for EACH level independently, whether the content matches.
     The model answers four factual yes/no questions; picking the narrowest
-    (assigned) level is done in code, not by the model."""
-    return f"""You are reviewing frames sampled from a short segment of a movie that \
-was flagged as possibly containing: {category.value}.
+    (assigned) level is done in code, not by the model.
 
-Here is the FULL description of each level for {category.value}:
-
-Note: despite the name, "low" is the STRICTEST definition — it only matches the \
-single worst/most extreme content. "exhigh" is the LOOSEST definition — it \
-matches almost anything even slightly related. Going from low → med → high → \
-exhigh, each definition gets broader and easier to satisfy. It's expected and \
-correct for content to match multiple levels at once — evaluate each one \
-independently and mark it true if the content fits, regardless of what you \
-answered for the others.
-
-The level definitions (in order, low → exhigh):
-{definition}
-
-Dialogue spoken during this segment (may be empty if none):
----
-{dialogue_text}
----
-
-Look at the attached frames (sampled in chronological order across the segment) and \
-respond with a JSON object with these exact fields:
-
-- "matches_low": true or false — does the content match the "low" definition above?
-- "matches_med": true or false — does the content match the "med" definition above?
-- "matches_high": true or false — does the content match the "high" definition above?
-- "matches_exhigh": true or false — does the content match the "exhigh" definition above?
-- "category": "{category.value}" if the content matches any level above, otherwise null.
-- "confidence": a number from 0 to 1.
-- "description": a SHORT, clean, matter-of-fact summary of what happens in this segment, \
-suitable for display as text on a black screen in place of the actual footage. It should \
-describe what happens visually AND include any plot-relevant content from the dialogue, \
-so a viewer who reads this instead of watching does not miss story information. Do not \
-be graphic or explicit in the description itself — describe the situation plainly, the \
-way a content-rating summary would. If the content matches no level above, set this to \
-an empty string.
-
-Respond with ONLY the JSON object, no other text."""
+    Template lives in prompts.json (shared with the web GUI's benchmark).
+    """
+    return get_prompt(
+        "confirm_prompt",
+        category=category.value,
+        definition=definition,
+        dialogue=dialogue_text,
+    )
 
 
 @dataclass
@@ -353,10 +323,12 @@ def _select_assigned_level(result: dict) -> SeverityLevel | None:
 class VisualSweepDetector:
     """Unified full-film VLM sweep + confirm. Replaces NudeNet and both old sweeps."""
 
-    def __init__(self, client: LLMClient, prompts: dict | None = None):
+    def __init__(self, client: LLMClient, prompts: dict | None = None,
+                 scale: str | None = None):
         self.client = client
         # Per-category definitions (user overrides merged over defaults).
         self.category_defs = _category_definitions(prompts)
+        self.scale_height = scale_height_for(scale)
 
     def sweep(
         self,
@@ -366,6 +338,7 @@ class VisualSweepDetector:
         on_progress=None,
         resume_from: int = 0,
         existing_windows: list | None = None,
+        stop_event=None,
     ) -> list[SweepRange]:
         """Sample the whole film; return merged, padded candidate ranges that contain
         nudity, gore, or violence.
@@ -380,66 +353,81 @@ class VisualSweepDetector:
         and `existing_windows` are the raw flagged windows found before the
         interruption (so merging still sees the whole film). `on_progress` reports
         ABSOLUTE frame counts so status stays consistent across resumes.
+
+        `stop_event` (threading.Event): when set, the sweep breaks out cleanly
+        between batches. Set by the web GUI's Stop button — progress so far is
+        preserved via the status file and can be resumed.
         """
         duration = probe_duration(video_path)
         flagged_windows: list[tuple[float, float, Category, str, float, SeverityLevel]] = list(existing_windows or [])
         tmp_dir = Path(tempfile.mkdtemp(prefix="cleancut_sweep_"))
+        stopped = False
         try:
             timestamps = [t for t in _arange(0.0, duration - 0.5, sample_interval)]
             start = min(max(resume_from, 0), len(timestamps))
             for i in range(start, len(timestamps), SWEEP_FRAMES_PER_CALL):
+                if stop_event is not None and stop_event.is_set():
+                    stopped = True
+                    break
                 batch_ts = timestamps[i:i + SWEEP_FRAMES_PER_CALL]
                 frame_paths = []
                 for ts in batch_ts:
                     try:
-                        frame_paths.append(extract_frame_at(video_path, ts, scale_height=SWEEP_SCALE_HEIGHT))
+                        frame_paths.append(extract_frame_at(video_path, ts, scale_height=self.scale_height))
                     except Exception as exc:
                         logging.warning("Sweep: frame extraction failed at %.1fs — %s", ts, exc)
 
-                if not frame_paths:
-                    continue
+                if frame_paths:
+                    try:
+                        result = self._query_sweep_batch(frame_paths)
+                    finally:
+                        for p in frame_paths:
+                            p.unlink(missing_ok=True)
 
-                try:
-                    result = self._query_sweep_batch(frame_paths)
-                finally:
-                    for p in frame_paths:
-                        p.unlink(missing_ok=True)
+                    if result and result.get("contains_flagged_content"):
+                        category = _category_from_str(result.get("category"))
+                        confidence = float(result.get("confidence", 0.5))
+                        # The sweep only needs "is there flagged content, roughly
+                        # what category" — severity is graded by the focused confirm
+                        # pass. LOW is the never-miss placeholder used only if
+                        # confirm later fails outright.
+                        level = SeverityLevel.LOW
+                        flagged_windows.append((
+                            batch_ts[0],
+                            batch_ts[-1],
+                            category,
+                            result.get("description", ""),
+                            confidence,
+                            level,
+                        ))
+                        if on_flagged_window:
+                            on_flagged_window(
+                                start=batch_ts[0],
+                                end=batch_ts[-1],
+                                category=category.value,
+                                confidence=confidence,
+                                level=level.value,
+                            )
 
-                if result and result.get("contains_flagged_content"):
-                    category = _category_from_str(result.get("category"))
-                    confidence = float(result.get("confidence", 0.5))
-                    # The sweep only needs "is there flagged content, roughly
-                    # what category" — severity is graded by the focused confirm
-                    # pass. LOW is the never-miss placeholder used only if
-                    # confirm later fails outright.
-                    level = SeverityLevel.LOW
-                    flagged_windows.append((
-                        batch_ts[0],
-                        batch_ts[-1],
-                        category,
-                        result.get("description", ""),
-                        confidence,
-                        level,
-                    ))
-                    if on_flagged_window:
-                        on_flagged_window(
-                            start=batch_ts[0],
-                            end=batch_ts[-1],
-                            category=category.value,
-                            confidence=confidence,
-                            level=level.value,
-                        )
-
-                if done := i + len(batch_ts):
-                    if on_progress:
-                        on_progress(done, len(timestamps))
-                    if done % 100 == 0 or done >= len(timestamps):
-                        print(
-                            f"[sweep] {done} / {len(timestamps)} frames",
-                            file=sys.stderr,
-                        )
+                # Progress is reported for EVERY batch, even when frame
+                # extraction failed (the tail of a file is the usual culprit)
+                # or nothing remained to sweep after a resume — otherwise the
+                # scan bar would stall short of 100% while the run continues.
+                done = i + len(batch_ts)
+                if on_progress:
+                    on_progress(done, len(timestamps))
+                if done % 100 == 0 or done >= len(timestamps):
+                    print(
+                        f"[sweep] {done} / {len(timestamps)} frames",
+                        file=sys.stderr,
+                    )
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # Guarantee a completed (not stopped) sweep reports 100%, covering the
+        # resume-with-nothing-left-to-sweep case where the loop body never ran.
+        if on_progress and not stopped:
+            on_progress(len(timestamps), len(timestamps))
 
         padding = _padding_for_interval(sample_interval)
         merge_gap = _merge_gap_for_interval(sample_interval)
@@ -477,7 +465,7 @@ class VisualSweepDetector:
             fps = FRAMES_PER_RANGE / max(candidate.end - candidate.start, 0.1)
             frame_paths = extract_frames_in_range(
                 video_path, candidate.start, candidate.end, fps, tmp_dir,
-                scale_height=CONFIRM_SCALE_HEIGHT,
+                scale_height=self.scale_height,
             )
             if not frame_paths:
                 return _sweep_as_detection(candidate)
