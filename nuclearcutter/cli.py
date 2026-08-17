@@ -128,6 +128,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         elif stage == "visual_confirm" and detail:
             i, total = detail
             print(f"\r[{stage}] {i} / {total} candidates", end="", flush=True)
+        elif stage == "summary":
+            if detail:
+                i, total = detail
+                print(f"\r[{stage}] {i} / {total} descriptions", end="", flush=True)
+            else:
+                print(f"\r[{stage}] rewriting descriptions with the summary model", end="", flush=True)
 
     print(f"Scanning {video_path.name}...")
     status_path = video_path.with_suffix(".nuclearcutter.status.json")
@@ -147,6 +153,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         status_path=status_path,
         partial_result_path=out_path,
         scale=args.scale or DEFAULT_SCALE,
+        summary_model=args.summary_model or None,
+        summary_frames=args.summary_frames,
+        summary_max_context=args.summary_max_context,
     )
     print()
 
@@ -209,6 +218,42 @@ def cmd_render(args: argparse.Namespace) -> int:
     output_path = Path(args.output) if args.output else build_output_path(video_path)
     print(f"Rendering {video_path.name} -> {output_path.name}...")
 
+    # Optional summary pass: a separate, larger model writes the on-screen text
+    # for blurred/blacked segments + captions for muted audio. Any failure
+    # degrades gracefully (render proceeds with scan-time descriptions).
+    summarizer = None
+    if args.summary_model:
+        try:
+            from nuclearcutter.render.summarize import SegmentSummarizer, SummaryConfig
+            from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
+
+            base_url = args.base_url or "http://localhost:1234/v1"
+            cfg = LLMConfig(
+                base_url=base_url,
+                vlm_model=args.summary_model,
+                text_model=args.summary_model,
+                summary_model=args.summary_model,
+                summary_frames=args.summary_frames,
+                summary_max_context=args.summary_max_context,
+            )
+            client = LLMClient(cfg)
+            transcript_path = video_path.with_suffix(".nuclearcutter.transcript.json")
+            summarizer = SegmentSummarizer(SummaryConfig(
+                client=client,
+                video_path=video_path,
+                transcript_path=transcript_path if transcript_path.exists() else None,
+                frames=args.summary_frames,
+                max_context=args.summary_max_context,
+            ))
+            warn = summarizer.preflight_context_warning()
+            if warn:
+                print(f"[summary] WARNING: {warn}", file=sys.stderr)
+            print(f"[summary] summary model {args.summary_model!r} enabled "
+                  f"({args.summary_frames} frame(s)/segment)", file=sys.stderr)
+        except Exception as exc:
+            print(f"[summary] summary pass disabled: {exc}", file=sys.stderr)
+            summarizer = None
+
     def progress(stage: str, detail):
         if detail and stage == "render":
             i, total, _seg = detail
@@ -219,8 +264,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     render_pass(
         video_path, scan_result, prefs,
         output_path=output_path,
-        font_path=args.font or None,
         progress_callback=progress,
+        summarizer=summarizer,
     )
     print(f"\nDone: {output_path}")
     return 0
@@ -263,6 +308,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"Scale frames before VLM (default: {DEFAULT_SCALE})")
     p_scan.add_argument("--sweep-interval", type=float, default=2.0,
                         help="Seconds between sampled frames in the VLM sweep (default: 2.0)")
+    p_scan.add_argument("--summary-model", default=None,
+                        help="Model id for the summary pass — rewrites every visual detection's description "
+                             "(frames + transcript) right after the scan. Empty = disabled.")
+    p_scan.add_argument("--summary-frames", type=int, default=12,
+                        help="Frames sampled per detection for the summary pass (default: 12, 0 = text-only)")
+    p_scan.add_argument("--summary-max-context", type=int, default=30000,
+                        help="Assumed loaded context window (tokens) for the summary model when the server "
+                             "reports none (default: 30000)")
     p_scan.set_defaults(func=cmd_scan)
 
     p_render = sub.add_parser("render", help="Render a cleaned copy of a movie file (headless).")
@@ -289,7 +342,16 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Extra seconds muted before/after each flagged word (default: 0.5)")
     p_render.add_argument("--blur-padding", type=float, default=0.0,
                           help="Extra seconds blurred/blacked before/after each flagged segment (default: 0.0)")
-    p_render.add_argument("--font", default=None, help="Path to a .ttf font file for blur overlay text")
+    p_render.add_argument("--summary-model", default=None,
+                          help="Model id for the render-time summary pass (improves blur/black descriptions + adds "
+                               "muted-audio captions). Uses the server at --base-url. Empty = disabled.")
+    p_render.add_argument("--summary-frames", type=int, default=12,
+                          help="Frames sampled per segment for the summary pass (default: 12, 0 = text-only)")
+    p_render.add_argument("--summary-max-context", type=int, default=30000,
+                          help="Assumed loaded context window (tokens) for the summary model when the server "
+                               "reports none (default: 30000)")
+    p_render.add_argument("--base-url", default="http://localhost:1234/v1",
+                          help="OpenAI-compatible API base URL for the summary model (default: http://localhost:1234/v1)")
     p_render.set_defaults(func=cmd_render)
 
     return parser

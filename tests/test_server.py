@@ -57,6 +57,36 @@ def test_settings_apply_and_validate():
     assert bad3.status_code == 400  # visual categories can't mute per-word
 
 
+def test_summary_settings_apply_and_validate():
+    """The separate summary-model settings round-trip and validate."""
+    _, c = make_client()
+    ok = c.post("/api/settings", json={"settings": {
+        "summary_model": "big-summary",
+        "summary_frames": 12,
+        "summary_max_context": 24000,
+    }})
+    assert ok.status_code == 200
+    s = ok.json()["settings"]
+    assert s["summary_model"] == "big-summary"
+    assert s["summary_frames"] == 12
+    assert s["summary_max_context"] == 24000
+
+    # Empty summary model disables the render-time summary pass.
+    ok2 = c.post("/api/settings", json={"settings": {"summary_model": ""}})
+    assert ok2.status_code == 200
+    assert ok2.json()["settings"]["summary_model"] == ""
+
+    # Out-of-range frames are rejected (0..24).
+    assert c.post("/api/settings", json={"settings": {"summary_frames": 25}}).status_code == 400
+    assert c.post("/api/settings", json={"settings": {"summary_frames": -1}}).status_code == 400
+    assert c.post("/api/settings", json={"settings": {"summary_max_context": 0}}).status_code == 400
+
+    # A rejected value must NOT leak into the stored settings (validate-then-assign).
+    st = c.get("/api/state").json()["settings"]
+    assert st["summary_frames"] == 12
+    assert st["summary_max_context"] == 24000
+
+
 def test_scan_start_requires_video():
     _, c = make_client()
     r = c.post("/api/scan/start")
@@ -131,7 +161,7 @@ def test_clear_scan_verify_keeps_transcript(tmp_path):
     assert st.scan_result is None
     assert st.scan_result_path == ""
     assert st.scan.status == "idle"
-    assert st.scan.steps == {"transcribe": 1.0, "scan": 0.0, "verify": 0.0, "render": 0.0}
+    assert st.scan.steps == {"transcribe": 1.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0}
 
 
 def test_clear_transcription_keeps_scan(tmp_path):
@@ -140,7 +170,7 @@ def test_clear_transcription_keeps_scan(tmp_path):
     movie = _write_full_scan(tmp_path)
     st = AppState()
     st.update_settings({"video_path": str(movie)})
-    assert st.scan.steps == {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0}
+    assert st.scan.steps == {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0}
 
     d = st.clear_transcription_progress()
     assert any(p.endswith(".nuclearcutter.transcript.json") for p in d["removed"])
@@ -164,7 +194,7 @@ def test_loaded_scan_reflects_missing_transcript(tmp_path):
     st = AppState()
     st.update_settings({"video_path": str(movie)})
     assert st.scan_result is not None
-    assert st.scan.steps == {"transcribe": 0.0, "scan": 1.0, "verify": 1.0, "render": 0.0}
+    assert st.scan.steps == {"transcribe": 0.0, "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0}
     assert "transcription pending" in st.scan.message
 
 
@@ -395,7 +425,7 @@ def test_loaded_scan_is_auto_loaded_for_saved_movie(tmp_path):
     assert len(st.scan_result.visual_detections) == 1
     # Progress bars reflect the completed work.
     assert st.scan.status == "done"
-    assert st.scan.steps == {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0}
+    assert st.scan.steps == {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0}
     assert st.scan.duration == 100.0
     # Timeline now comes from the loaded scan (no generic candidates).
     tl = st.timeline_dict()

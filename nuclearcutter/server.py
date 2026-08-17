@@ -118,10 +118,10 @@ class JobInfo:
     frames_done: int = 0
     frames_total: int = 0
     eta: float | None = None
-    # Per-step progress: transcribe / scan / verify / render. None = in
-    # progress (indeterminate), a float 0..1 = determinate.
+    # Per-step progress: transcribe / scan / verify / summary / render. None =
+    # in progress (indeterminate), a float 0..1 = determinate.
     steps: dict = field(default_factory=lambda: {
-        "transcribe": 0.0, "scan": 0.0, "verify": 0.0, "render": 0.0,
+        "transcribe": 0.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0,
     })
     results: list = field(default_factory=list)  # benchmark rows
     logs: list = field(default_factory=list)  # ring buffer of terminal output
@@ -212,10 +212,16 @@ class AppState:
         # --- Render settings ----------------------------------------------
         self.output_name = ""  # empty -> <stem>_cleaned
         self.scan_path = ""  # scan file for render; empty -> auto-detect
-        self.font_path = ""
         self.blur_strength = 1.0
         self.mute_padding = 0.5
         self.blur_padding = 0.0
+        # --- Summary model (render-time on-screen text) ---------------------
+        # A SEPARATE, usually larger model used once per blurred/blacked/muted
+        # segment at render time (NOT the every-frame VLM). Empty = disabled
+        # (render falls back to the scan-time descriptions + no captions).
+        self.summary_model = ""
+        self.summary_frames = 12  # frames sampled per segment for the summary pass
+        self.summary_max_context = 30000  # assumed loaded context when server reports none
         self.levels = {c: "med" for c in CATEGORY_KEYS}
         self.visual_actions = {
             "nudity": "blur", "gore": "blur", "violence": "blur",
@@ -318,10 +324,12 @@ class AppState:
             "sweep_interval": self.sweep_interval,
             "output_name": self.output_name,
             "scan_path": self.scan_path,
-            "font_path": self.font_path,
             "blur_strength": self.blur_strength,
             "mute_padding": self.mute_padding,
             "blur_padding": self.blur_padding,
+            "summary_model": self.summary_model,
+            "summary_frames": self.summary_frames,
+            "summary_max_context": self.summary_max_context,
             "levels": dict(self.levels),
             "visual_actions": dict(self.visual_actions),
             "audio_actions": dict(self.audio_actions),
@@ -364,11 +372,21 @@ class AppState:
             self.output_name = str(payload["output_name"] or "").strip()
         if "scan_path" in payload:
             self.scan_path = str(payload["scan_path"] or "").strip()
-        if "font_path" in payload:
-            self.font_path = str(payload["font_path"] or "").strip()
         for f in ("blur_strength", "mute_padding", "blur_padding"):
             if f in payload:
                 setattr(self, f, max(0.0, float(payload[f])))
+        if "summary_model" in payload:
+            self.summary_model = str(payload["summary_model"] or "").strip()
+        if "summary_frames" in payload:
+            val = int(payload["summary_frames"])
+            if not 0 <= val <= 24:
+                raise ValueError("summary_frames must be between 0 and 24")
+            self.summary_frames = val
+        if "summary_max_context" in payload:
+            val = int(payload["summary_max_context"])
+            if val <= 0:
+                raise ValueError("summary_max_context must be > 0")
+            self.summary_max_context = val
         if "levels" in payload and isinstance(payload["levels"], dict):
             for cat, lvl in payload["levels"].items():
                 if cat not in CATEGORY_KEYS:
@@ -506,7 +524,7 @@ class AppState:
         job.eta = None
         job.frames_done = 0
         job.frames_total = 0
-        job.steps = {"transcribe": 0.0, "scan": 0.0, "verify": 0.0, "render": 0.0}
+        job.steps = {"transcribe": 0.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0}
         job.stop_event = threading.Event()
         job.results = []
         job.logs = []
@@ -623,7 +641,7 @@ class AppState:
             # own via the GUI's per-section clear button).
             self.scan.steps = {
                 "transcribe": 1.0 if has_transcript else 0.0,
-                "scan": 1.0, "verify": 1.0, "render": 0.0,
+                "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0,
             }
             pending = "" if has_transcript else " — transcription pending (re-transcribe on next scan)"
             self.scan.message = (
@@ -680,11 +698,16 @@ class AppState:
             proc, llm_config = self._ensure_backend(job)
             self.server_proc = proc
 
-            client = self._new_client(llm_config)
-            client.test_connection()
-            client.request_log_callback = (
-                lambda payload, data: self._log_request("scan", payload, data)
-            )
+            def _client_factory(cfg):
+                # Attach the GUI's usage + show-prompts hooks to EVERY client
+                # the scan builds (sweep, confirm, foul-language, summary), so
+                # VLM prompts/responses actually reach the terminal and the
+                # token stats update.
+                c = self._new_client(cfg)
+                c.request_log_callback = (
+                    lambda payload, data: self._log_request("scan", payload, data)
+                )
+                return c
 
             # Seed the live timeline from any prior run's status file, so a
             # resumed scan shows its existing candidates/detections immediately.
@@ -760,8 +783,17 @@ class AppState:
                 elif stage == "language_detection":
                     job.phase = "language_detection"
                     self._log(job, "[language_detection]")
+                elif stage == "summary":
+                    job.phase = "summary"
+                    if isinstance(detail, tuple) and detail:
+                        i, total = detail
+                        job.steps["summary"] = (i / total) if total else 1.0
+                        self._log(job, f"[summary] {i}/{total}")
+                    else:
+                        job.steps["summary"] = 0.0
+                        self._log(job, "[summary] rewriting descriptions with the summary model")
                 elif stage == "done":
-                    job.steps = {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0}
+                    job.steps = {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0, "summary": 1.0}
                     job.position = job.duration
                     self._log(job, "[done]")
 
@@ -777,7 +809,20 @@ class AppState:
                 partial_result_path=partial_path,
                 scale=self.scale,
                 stop_event=job.stop_event,
+                summary_model=self.summary_model or None,
+                summary_frames=self.summary_frames,
+                summary_max_context=self.summary_max_context,
+                client_factory=_client_factory,
             )
+
+            # The scan's summary pass enriched the descriptions — keep the GUI's
+            # live timeline in sync so the mark tooltips show the new text.
+            self.live_timeline["visual_detections"] = [
+                {"category": d.category.value, "start": d.start, "end": d.end,
+                 "level": d.level.value, "confidence": d.confidence,
+                 "description": d.description}
+                for d in result.visual_detections
+            ]
 
             from nuclearcutter.cli import _save_result_with_fallback
 
@@ -787,7 +832,7 @@ class AppState:
             job.duration = result.identity.duration_seconds
             job.position = job.duration
             job.progress = 1.0
-            job.steps = {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0}
+            job.steps = {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0, "summary": 1.0}
             job.phase = "done"
             job.status = "done"
             job.message = (f"Scan complete: {len(result.visual_detections)} visual, "
@@ -908,6 +953,58 @@ class AppState:
             return auto
         raise HTTPException(400, "no scan file found — scan the movie first, or set a scan file path")
 
+    def _build_summarizer(self, job: JobInfo, video: Path):
+        """Build the RENDER-time summarizer for muted-audio captions, or None.
+
+        The blur/black descriptions are written by the summary model at SCAN
+        time and baked into the scan file. At render time the summary model is
+        only needed for the small captions on audio-only mute segments (video
+        stays visible). Enabled when the user has set a `summary_model`.
+        Starts/verifies the model backend, checks the summary model's LOADED
+        context window (warns if the scan-time prompt may have exceeded it),
+        and degrades to None on any failure — the render proceeds without
+        captions.
+        """
+        if not self.summary_model:
+            return None
+        try:
+            from nuclearcutter.render.summarize import SegmentSummarizer, SummaryConfig
+
+            proc, llm_config = self._ensure_backend(job)
+            self.server_proc = proc
+            llm_config.summary_model = self.summary_model
+            llm_config.summary_frames = self.summary_frames
+            llm_config.summary_max_context = self.summary_max_context
+            # The summary model is served by the same backend. If the user only
+            # filled in the summary field (e.g. standalone), point the base
+            # vlm/text fields at it too so connection validation passes.
+            if not llm_config.vlm_model:
+                llm_config.vlm_model = self.summary_model
+            if not llm_config.text_model:
+                llm_config.text_model = self.summary_model
+            client = self._new_client(llm_config)
+            client.test_connection()
+            client.request_log_callback = (
+                lambda payload, data: self._log_request("render", payload, data)
+            )
+            transcript_path = video.with_suffix(".nuclearcutter.transcript.json")
+            summarizer = SegmentSummarizer(SummaryConfig(
+                client=client,
+                video_path=video,
+                transcript_path=transcript_path if transcript_path.exists() else None,
+                frames=self.summary_frames,
+                max_context=self.summary_max_context,
+            ))
+            warn = summarizer.preflight_context_warning()
+            if warn:
+                self._log(job, f"[summary] WARNING: {warn}")
+            self._log(job, f"[summary] summary model {self.summary_model!r} enabled "
+                           f"for muted-audio captions (descriptions were written at scan time)")
+            return summarizer
+        except Exception as exc:
+            self._log(job, f"[summary] summary pass disabled: {exc}")
+            return None
+
     def _run_render(self, video: Path, scan_path: Path) -> None:
         job = self.render
         try:
@@ -915,6 +1012,10 @@ class AppState:
             job.duration = scan_result.identity.duration_seconds
             prefs = self.prefs()
             output_path = self._render_output_path(video)
+            # Optional summary pass (separate model for on-screen text). Logs
+            # its own warnings; returns None (and degrades gracefully) on any
+            # failure so the render never blocks on the LLM.
+            summarizer = self._build_summarizer(job, video)
 
             def _progress(stage, detail):
                 if stage == "render" and detail:
@@ -945,9 +1046,9 @@ class AppState:
             render_pass(
                 video, scan_result, prefs,
                 output_path=output_path,
-                font_path=self.font_path or None,
                 progress_callback=_progress,
                 stop_event=job.stop_event,
+                summarizer=summarizer,
             )
             job.status = "done"
             job.phase = "done"

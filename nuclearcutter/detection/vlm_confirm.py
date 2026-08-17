@@ -101,6 +101,13 @@ def _padding_for_interval(interval: float) -> float:
 
 def _merge_gap_for_interval(interval: float) -> float:
     return interval
+
+
+def _frame_padding_for_interval(interval: float) -> float:
+    """Padding for FRAME-LEVEL flagged windows (half an interval each side), so
+    a single flagged sample blurs ~one interval instead of the whole 4-frame
+    batch. Batch-level fallback keeps `_padding_for_interval` (full interval)."""
+    return interval * 0.5
 # ---------------------------------------------------------------------------
 # Per-category LEVEL SCALES (the fixed, standardized definitions)
 # ---------------------------------------------------------------------------
@@ -174,10 +181,12 @@ DEFAULT_LEVEL_SCALES: dict = {
             "NOT flag ordinary blood, small wounds, or medical procedures."
         ),
         SeverityLevel.MED: (
-            "Flag as gore: visible blood, open wounds, injuries to flesh, "
-            "surgery or medical procedures showing blood/incisions, dead bodies "
-            "with wounds, or mutilation. Do NOT flag blood-free violence "
-            "(that's the \"violence\" category)."
+            "Flag as gore: a MODERATE or LARGE amount of visible blood, open "
+            "wounds, injuries to flesh, surgery or medical procedures showing "
+            "blood/incisions, dead bodies with wounds, or mutilation. Do NOT "
+            "flag only a SMALL amount of blood — a minor cut, scrape, or "
+            "trickle is the \"high\" level, not \"med\". Do NOT flag blood-free "
+            "violence (that's the \"violence\" category)."
         ),
         SeverityLevel.HIGH: (
             "Flag as gore: ANY visible blood or wound, however small — a cut, "
@@ -362,6 +371,9 @@ class VisualSweepDetector:
         flagged_windows: list[tuple[float, float, Category, str, float, SeverityLevel]] = list(existing_windows or [])
         tmp_dir = Path(tempfile.mkdtemp(prefix="cleancut_sweep_"))
         stopped = False
+        # True once any flagged batch localizes to specific frames; drives the
+        # tighter per-frame padding (see _frame_padding_for_interval).
+        frame_granularity = False
         try:
             timestamps = [t for t in _arange(0.0, duration - 0.5, sample_interval)]
             start = min(max(resume_from, 0), len(timestamps))
@@ -392,22 +404,36 @@ class VisualSweepDetector:
                         # pass. LOW is the never-miss placeholder used only if
                         # confirm later fails outright.
                         level = SeverityLevel.LOW
-                        flagged_windows.append((
-                            batch_ts[0],
-                            batch_ts[-1],
-                            category,
-                            result.get("description", ""),
-                            confidence,
-                            level,
-                        ))
-                        if on_flagged_window:
-                            on_flagged_window(
-                                start=batch_ts[0],
-                                end=batch_ts[-1],
-                                category=category.value,
-                                confidence=confidence,
-                                level=level.value,
-                            )
+                        desc = result.get("description", "")
+                        # Frame-level localization: the VLM tells us WHICH frame(s)
+                        # in this batch are flagged, so we blur only around those
+                        # frames instead of the whole batch (a single flagged frame
+                        # in a 4-frame batch shouldn't blur all four sample
+                        # intervals).
+                        flagged_ts = _flagged_timestamps(batch_ts, result.get("flagged_frames"))
+                        if flagged_ts:
+                            frame_granularity = True
+                            for ts in flagged_ts:
+                                flagged_windows.append((ts, ts, category, desc, confidence, level))
+                                if on_flagged_window:
+                                    on_flagged_window(
+                                        start=ts, end=ts,
+                                        category=category.value,
+                                        confidence=confidence,
+                                        level=level.value,
+                                    )
+                        else:
+                            # Model didn't localize — keep the whole batch window so
+                            # nothing is missed (never LESS coverage than before).
+                            flagged_windows.append((batch_ts[0], batch_ts[-1], category, desc, confidence, level))
+                            if on_flagged_window:
+                                on_flagged_window(
+                                    start=batch_ts[0],
+                                    end=batch_ts[-1],
+                                    category=category.value,
+                                    confidence=confidence,
+                                    level=level.value,
+                                )
 
                 # Progress is reported for EVERY batch, even when frame
                 # extraction failed (the tail of a file is the usual culprit)
@@ -429,8 +455,12 @@ class VisualSweepDetector:
         if on_progress and not stopped:
             on_progress(len(timestamps), len(timestamps))
 
-        padding = _padding_for_interval(sample_interval)
         merge_gap = _merge_gap_for_interval(sample_interval)
+        # Frame-level flags are tight (one sample point per flagged frame), so a
+        # smaller pad keeps an isolated flagged frame to ~1 interval of blur;
+        # batch-level fallback keeps the full-interval padding.
+        padding = (_frame_padding_for_interval(sample_interval) if frame_granularity
+                   else _padding_for_interval(sample_interval))
         return _merge_flagged_windows(flagged_windows, duration, padding=padding, merge_gap=merge_gap)
 
     def _query_sweep_batch(self, frame_paths: list[Path]) -> dict | None:
@@ -527,6 +557,30 @@ def _arange(start: float, stop: float, step: float) -> list[float]:
     while t < stop:
         out.append(t)
         t += step
+    return out
+
+
+def _flagged_timestamps(batch_ts: list[float], flagged_frames) -> list[float]:
+    """Map the VLM's flagged frame indices to their sample timestamps.
+
+    Returns [] when the model didn't localize (the caller falls back to the
+    whole batch window). Non-integer / out-of-range / repeated indices are
+    dropped, so a malformed answer never produces bogus windows.
+    """
+    if not isinstance(flagged_frames, (list, tuple)):
+        return []
+    out: list[float] = []
+    seen: set[float] = set()
+    for idx in flagged_frames:
+        if isinstance(idx, bool) or not isinstance(idx, (int, float)):
+            continue
+        i = int(idx)
+        if i != idx or not (0 <= i < len(batch_ts)):
+            continue
+        ts = batch_ts[i]
+        if ts not in seen:
+            seen.add(ts)
+            out.append(ts)
     return out
 
 

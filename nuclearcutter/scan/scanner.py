@@ -82,9 +82,13 @@ def scan(
     partial_result_path: Path | str = None,
     scale: str = None,
     stop_event: threading.Event = None,
+    summary_model: str = None,
+    summary_frames: int = 12,
+    summary_max_context: int = 30000,
+    client_factory=None,
 ) -> ScanResult:
     llm_config = llm_config or LLMConfig()
-    client = LLMClient(llm_config)
+    client = client_factory(llm_config) if client_factory is not None else LLMClient(llm_config)
     client.test_connection()
 
     # Optional live status file for `nuclearcutter tui` (see utils/scan_status.py).
@@ -396,6 +400,35 @@ def scan(
             "text_model": llm_config.text_model,
         },
     )
+
+    # Optional summary pass: a separate, larger model rewrites every visual
+    # detection's description (frames + transcript + the confirm description as
+    # a seed) right after the scan, so the timeline and the render both carry
+    # the improved on-screen text without re-running at render time. Degrades
+    # gracefully — a failure keeps the confirm-pass description.
+    if summary_model:
+        from nuclearcutter.render.summarize import run_summary_pass
+
+        if progress_callback:
+            progress_callback("summary", None)
+        if status is not None:
+            status.set_phase("summary")
+
+        def _summary_progress(i: int, total: int):
+            if progress_callback:
+                progress_callback("summary", (i, total))
+
+        warnings = run_summary_pass(
+            llm_config, video_path, result.visual_detections,
+            summary_model=summary_model,
+            summary_frames=summary_frames,
+            summary_max_context=summary_max_context,
+            on_progress=_summary_progress,
+            client_factory=client_factory,
+        )
+        for w in warnings:
+            print(f"[summary] WARNING: {w}", file=sys.stderr)
+        _write_partial_result()  # persist the enriched descriptions now
 
     if status is not None:
         status.set_phase("done")

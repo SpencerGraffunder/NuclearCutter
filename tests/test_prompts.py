@@ -11,8 +11,27 @@ from nuclearcutter import prompts as P
 def test_load_has_all_required_keys():
     t = P.load_prompts()
     for key in ("system_prompt", "sweep_prompt", "confirm_prompt",
-                "foul_language_context_prompt"):
+                "foul_language_context_prompt", "summary_prompt",
+                "muted_caption_prompt"):
         assert t.get(key), f"missing prompt template: {key}"
+
+
+def test_summary_prompt_substitutes_placeholders():
+    p = P.get_prompt("summary_prompt", action="blurred", context_before=3,
+                     description_frames=4, context_after=3,
+                     start="10.0", end="22.0", description="seed",
+                     dialogue="Danger ahead.")
+    for key in ("action", "context_before", "description_frames", "context_after",
+                "start", "end", "description", "dialogue"):
+        assert "{" + key + "}" not in p, f"unsubstituted placeholder: {key}"
+    assert "blurred" in p and "10.0" in p and "22.0" in p
+    assert "Danger ahead." in p and "seed" in p
+
+
+def test_muted_caption_prompt_substitutes_placeholders():
+    p = P.get_prompt("muted_caption_prompt", dialogue="You fool.", words="fool")
+    assert "{dialogue}" not in p and "{words}" not in p
+    assert "You fool." in p and "fool" in p
 
 
 def test_get_prompt_substitutes_placeholders():

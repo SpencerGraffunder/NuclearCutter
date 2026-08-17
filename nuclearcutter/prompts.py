@@ -25,6 +25,8 @@ REQUIRED_KEYS = (
     "sweep_prompt",
     "confirm_prompt",
     "foul_language_context_prompt",
+    "summary_prompt",
+    "muted_caption_prompt",
 )
 
 _DEFAULT_TEMPLATES = None  # lazy-loaded from prompts.json (its own source of truth)

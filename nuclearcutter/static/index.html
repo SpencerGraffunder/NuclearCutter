@@ -85,6 +85,15 @@
   /* Generic/unconfirmed sweep candidate — not yet classified into a category
      or severity level, so it can't be filtered by the render settings. */
   .tl-mark.candidate { background: #7fbf7f; opacity: .55; }
+  /* Marks the current render settings WOULD catch are full opacity; the rest
+     stay visible (flagged on the timeline) but dimmed. */
+  .tl-mark.not-caught { opacity: .4; }
+  /* Floating hover tooltip for timeline marks (shows the summary text). Fixed
+     position so it isn't clipped by #tl-bar's overflow:hidden. */
+  #tl-tooltip { display: none; position: fixed; z-index: 80; background: #0d0d0d;
+    border: 1px solid var(--green-dim); color: var(--text); padding: 10px 12px;
+    white-space: pre-wrap; max-width: 420px; box-shadow: 0 0 16px rgba(0,255,65,.25);
+    font-size: 11px; line-height: 1.5; border-radius: 4px; pointer-events: none; }
   .legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 6px; flex-wrap: wrap; }
   .legend span i { display: inline-block; width: 10px; height: 10px; margin-right: 4px; }
   #status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
@@ -136,7 +145,12 @@
     height: 260px; overflow-y: auto; padding: 8px 10px; font-family: var(--mono);
     font-size: 11px; line-height: 1.55; color: var(--green); }
   #terminal div { white-space: pre-wrap; word-break: break-word; }
-  .pct { color: var(--green); }
+  /* Fixed-width percentage labels keep every STATUS progress bar the same
+     length regardless of the displayed value ("0%" vs "100%" — without this,
+     a shorter label leaves more flex space for the bar and it drifts). All the
+     bars must stay aligned: keep this min-width AND keep each row's right-side
+     spacer matching the SCAN/VERIFY clear button width. */
+  .pct { color: var(--green); min-width: 44px; text-align: right; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -191,6 +205,17 @@
       </select></div>
     <div class="row"><label>Scan interval (s)</label>
       <input type="number" id="sweep_interval" value="2" min="0.5" step="0.5"></div>
+
+    <div class="row"><label>Summary model (rewrite descriptions)</label>
+      <select id="summary_model">
+        <option value="">(none — use scan descriptions)</option>
+      </select>
+      <span class="hint" style="width:auto;">Separate, larger model that rewrites every visual detection's on-screen text (frames + transcript) right after the scan, and flags them all on the timeline. Served by the same backend — pick it from the list via “Scan for models”.</span></div>
+    <div class="row"><label>Summary frames / detection</label>
+      <input type="number" id="summary_frames" value="12" min="0" max="24" step="1"></div>
+    <div class="row"><label>Summary context (tokens)</label>
+      <input type="number" id="summary_max_context" value="30000" min="1000" step="1000">
+      <span class="hint" style="width:auto;">Assumed loaded context if the server doesn't report one. A warning shows when the prompt may exceed it.</span></div>
 
     <div class="btn-group">
       <button id="btn-scan-start">▶ START SCAN</button>
@@ -257,17 +282,15 @@
     </table>
 
     <div class="row"><label>Output file name</label>
-      <input type="text" id="output_name" placeholder="(default: original_cleaned)"></div>
+      <input type="text" id="output_name" placeholder="(default: &lt;source&gt;_cleaned.&lt;ext&gt;)"></div>
     <div class="row"><label>Scan file (optional)</label>
-      <input type="text" id="scan_path" placeholder="(auto: video.nuclearcutter.json)"></div>
+      <input type="text" id="scan_path" placeholder="(default: &lt;source&gt;.nuclearcutter.json)"></div>
     <div class="row"><label>Blur amount</label>
       <input type="number" id="blur_strength" value="1" min="0.1" step="0.1"></div>
     <div class="row"><label>Mute padding (s)</label>
       <input type="number" id="mute_padding" value="0.5" min="0" step="0.1"></div>
     <div class="row"><label>Blur padding (s)</label>
       <input type="number" id="blur_padding" value="0" min="0" step="0.5"></div>
-    <div class="row"><label>Overlay font (.ttf)</label>
-      <input type="text" id="font_path" placeholder="(optional, uses system font)"></div>
 
     <div class="btn-group">
       <button id="btn-render-start">▶ START RENDER</button>
@@ -301,6 +324,11 @@
       <span id="tl-count" style="color:var(--yellow)"></span>
     </div>
 
+    <!-- Progress bars: keep ALL of them the same width. Every row reserves the
+         same right-side space (the SCAN/VERIFY clear button, or an invisible
+         matching spacer for SUMMARIZE/RENDER) and the .pct labels have a fixed
+         min-width — if you add/change a row, keep both of those equal or the
+         bars will misalign. -->
     <div style="margin-top:12px;">
       <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">TRANSCRIBE</span>
         <div class="bar-wrap"><div class="bar" id="bar-transcribe"></div></div>
@@ -318,9 +346,25 @@
         <button class="clear-x tall" id="btn-clear-scan"
           title="Clear scan + verify — the next scan re-runs the VLM sweep and confirm pass from scratch (the transcript is kept)">✕</button>
       </div>
-      <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">RENDER</span>
-        <div class="bar-wrap"><div class="bar" id="bar-render"></div></div>
-        <span class="pct" id="pct-render">0%</span></div>
+      <div class="bar-group" id="row-summary">
+        <div class="bars">
+          <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">SUMMARIZE</span>
+            <div class="bar-wrap"><div class="bar" id="bar-summary"></div></div>
+            <span class="pct" id="pct-summary">0%</span></div>
+        </div>
+        <button class="clear-x tall" tabindex="-1" aria-hidden="true" style="visibility:hidden">✕</button>
+      </div>
+      <div class="bar-group">
+        <div class="bars">
+          <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">RENDER</span>
+            <div class="bar-wrap"><div class="bar" id="bar-render"></div></div>
+            <span class="pct" id="pct-render">0%</span></div>
+        </div>
+        <!-- Invisible spacer matching the SCAN/VERIFY clear button (a real
+             <button> so its border width is identical) so the render bar ends
+             at exactly the same x position as the others. -->
+        <button class="clear-x tall" tabindex="-1" aria-hidden="true" style="visibility:hidden">✕</button>
+      </div>
     </div>
   </section>
 
@@ -402,12 +446,20 @@ function fillModelDropdown(sel, models) {
     const o = document.createElement("option"); o.value = mid; o.textContent = mid; sel.appendChild(o);
   });
 }
+function fillModelDropdownWithNone(sel, models) {
+  fillModelDropdown(sel, models);
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "(none — use scan descriptions)";
+  sel.insertBefore(none, sel.firstChild);
+}
 function setDisabled(ids, disabled) {
   ids.forEach(id => { const el = $(id); if (el) el.disabled = disabled; });
 }
 const SCAN_SETTING_IDS = ["video_path","model_path","llama_model_path","mmproj_path","base_url",
-  "vlm_model","text_model","whisper_model","scale","sweep_interval"];
-const RENDER_SETTING_IDS = ["output_name","scan_path","font_path","blur_strength","mute_padding","blur_padding"];
+  "vlm_model","text_model","whisper_model","scale","sweep_interval",
+  "summary_model","summary_frames","summary_max_context"];
+const RENDER_SETTING_IDS = ["output_name","scan_path","blur_strength","mute_padding","blur_padding"];
 function setScanSettingsDisabled(d) {
   setDisabled(SCAN_SETTING_IDS, d);
   // Block clicks on the backend radios without `disabled`, so the selected
@@ -450,10 +502,12 @@ function collectSettings() {
     sweep_interval: parseFloat($("sweep_interval").value) || 2,
     output_name: $("output_name").value,
     scan_path: $("scan_path").value,
-    font_path: $("font_path").value,
     blur_strength: parseFloat($("blur_strength").value) || 1,
     mute_padding: parseFloat($("mute_padding").value) || 0,
     blur_padding: parseFloat($("blur_padding").value) || 0,
+    summary_model: $("summary_model").value.trim(),
+    summary_frames: parseInt($("summary_frames").value, 10) || 12,
+    summary_max_context: parseInt($("summary_max_context").value, 10) || 30000,
     levels: matrixValues("level"),
     visual_actions: matrixValues("visual"),
     audio_actions: matrixValues("audio"),
@@ -480,10 +534,12 @@ function applySettingsToUI(s, skipSave) {
   $("sweep_interval").value = s.sweep_interval || 2;
   $("output_name").value = s.output_name || "";
   $("scan_path").value = s.scan_path || "";
-  $("font_path").value = s.font_path || "";
   $("blur_strength").value = s.blur_strength ?? 1;
   $("mute_padding").value = s.mute_padding ?? 0.5;
   $("blur_padding").value = s.blur_padding ?? 0;
+  setSelectValue($("summary_model"), s.summary_model || "");
+  $("summary_frames").value = s.summary_frames ?? 12;
+  $("summary_max_context").value = s.summary_max_context ?? 30000;
   const maps = {
     level: s.levels || {},
     visual: s.visual_actions || {},
@@ -522,6 +578,26 @@ function detectionCaught(d) {
   if (va === "none" && aa === "none") return false;
   return LEVEL_RANK[d.level] <= LEVEL_RANK[lvl];
 }
+let tlTipEl = null;
+function showTlTooltip(ev) {
+  const tip = ev.currentTarget.dataset.tip;
+  if (!tip) return;
+  if (!tlTipEl) {
+    tlTipEl = document.createElement("div");
+    tlTipEl.id = "tl-tooltip";
+    document.body.appendChild(tlTipEl);
+  }
+  tlTipEl.textContent = tip;
+  tlTipEl.style.display = "block";
+  const r = ev.currentTarget.getBoundingClientRect();
+  const w = tlTipEl.offsetWidth;
+  let x = r.left + r.width / 2;
+  x = Math.max(w / 2 + 8, Math.min(x, window.innerWidth - w / 2 - 8));
+  tlTipEl.style.left = x + "px";
+  tlTipEl.style.top = (r.top - 10) + "px";
+  tlTipEl.style.transform = "translate(-50%, -100%)";
+}
+function hideTlTooltip() { if (tlTipEl) tlTipEl.style.display = "none"; }
 function renderTimeline() {
   const tl = $("tl-bar");
   tl.querySelectorAll(".tl-mark").forEach(e => e.remove());
@@ -540,18 +616,36 @@ function renderTimeline() {
   const marks = [];
   // Unconfirmed sweep candidates: generic marks, always shown (they have no
   // category/level yet, so render settings can't filter them).
-  (tlInfo.visual_candidates || []).forEach(c => marks.push([c.start, c.end, "candidate"]));
-  // Confirmed detections: filtered by the currently selected render settings.
-  tlInfo.visual_detections.forEach(d => { if (detectionCaught(d)) marks.push([d.start, d.end, d.category]); });
-  tlInfo.language_detections.forEach(d => { if (detectionCaught(d)) marks.push([d.utterance_start, d.utterance_end, "foul_language"]); });
+  (tlInfo.visual_candidates || []).forEach(c => marks.push({start:c.start, end:c.end, cat:"candidate", tip:null, caught:false}));
+  // ALL confirmed detections are flagged on the timeline — not just the ones
+  // the current render settings would catch. Marks the render WOULD catch are
+  // full opacity; the rest are dimmed. Every mark has a hover tooltip showing
+  // its summary text (the description written by the summary model).
+  (tlInfo.visual_detections || []).forEach(d => {
+    marks.push({
+      start: d.start, end: d.end, cat: d.category, caught: detectionCaught(d),
+      tip: `${d.category} @ ${fmtSecs(d.start)}–${fmtSecs(d.end)} · level ${d.level}\n${d.description || "(no description)"}`,
+    });
+  });
+  (tlInfo.language_detections || []).forEach(d => {
+    marks.push({
+      start: d.utterance_start, end: d.utterance_end, cat: "foul_language", caught: detectionCaught(d),
+      tip: `foul language @ ${fmtSecs(d.utterance_start)}–${fmtSecs(d.utterance_end)} · level ${d.level}\n“${d.word || ""}”`,
+    });
+  });
   marks.forEach(m => {
     const el = document.createElement("div");
-    el.className = "tl-mark " + m[2];
-    const x0 = Math.max(0, m[0] / dur * 100), x1 = Math.min(100, m[1] / dur * 100);
+    el.className = "tl-mark " + m.cat + (m.caught ? "" : " not-caught");
+    const x0 = Math.max(0, m.start / dur * 100), x1 = Math.min(100, m.end / dur * 100);
     el.style.left = x0 + "%"; el.style.width = Math.max(0.4, x1 - x0) + "%";
+    if (m.tip) {
+      el.dataset.tip = m.tip;
+      el.addEventListener("mouseenter", showTlTooltip);
+      el.addEventListener("mouseleave", hideTlTooltip);
+    }
     tl.appendChild(el);
   });
-  const caught = marks.filter(m => m[2] !== "candidate").length;
+  const caught = marks.filter(m => m.cat !== "candidate" && m.caught).length;
   $("tl-count").textContent =
     (marks.length ? `${marks.length} mark(s)` : "") +
     (caught ? ` · ${caught} caught by current render settings` : "");
@@ -588,11 +682,18 @@ function renderState() {
   const etaJob = renderBusy2 ? jobs.render : scanJob;
   $("st-eta").textContent = etaJob.eta != null ? fmtSecs(etaJob.eta) : "—";
 
-  // step bars: transcribe/scan/verify from scan job, render from render job
+  // step bars: transcribe/scan/verify/summary from scan job, render from render job
   setBar("bar-transcribe", "pct-transcribe", scanJob.steps.transcribe);
   setBar("bar-scan", "pct-scan", scanJob.steps.scan);
   setBar("bar-verify", "pct-verify", scanJob.steps.verify);
+  // The SUMMARIZE bar is a REAL progress bar (0→100% as each detection is
+  // rewritten by the summary model) — never let it fall into the indeterminate
+  // "always moving" mode; coerce a missing value to 0% instead.
+  setBar("bar-summary", "pct-summary", (typeof scanJob.steps.summary === "number") ? scanJob.steps.summary : 0);
   setBar("bar-render", "pct-render", jobs.render.steps.render);
+  // The summary bar only means something when a summary model is configured.
+  const summaryRow = $("row-summary");
+  if (summaryRow) summaryRow.classList.toggle("hidden", !(state.settings && state.settings.summary_model));
 
   // status lines + button states + grey-out settings while running
   const scanBusy = scanJob.status === "running" || scanJob.status === "stopping";
@@ -713,7 +814,11 @@ let pickerExts = "";       // "" = media exts, "all" = everything, or ".gguf,.bi
 
 function openPicker(opts) {
   opts = opts || {};
-  pickerTarget = opts.target || "video_path";
+  // `opts.target` must be an element ID string. openPicker is also used directly
+  // as a click handler, in which case opts is the MouseEvent and opts.target is
+  // the clicked element — guard so that never becomes the picker target.
+  const t = opts.target;
+  pickerTarget = (typeof t === "string" && t) ? t : "video_path";
   pickerMode = opts.mode || "file";
   pickerExts = opts.exts || "";
   const cur = $(pickerTarget).value;
@@ -727,16 +832,29 @@ function openPicker(opts) {
 }
 function closePicker() { $("picker-overlay").classList.add("hidden"); }
 async function loadPickerDir(dir) {
+  const list = $("picker-list");
   try {
     const q = "?path=" + encodeURIComponent(dir || "") + "&exts=" + encodeURIComponent(pickerExts);
     const r = await fetch("/api/browse" + q);
-    const d = await r.json();
+    const d = await r.json().catch(() => null);
+    if (!r.ok) {
+      // Show a clear reason inside the picker instead of failing silently
+      // (e.g. a dead SMB share, a permission error, or the server being down).
+      const msg = (d && d.detail) ? d.detail : "browse failed: HTTP " + r.status;
+      list.innerHTML = "";
+      const row = document.createElement("div");
+      row.className = "pick-row file-muted";
+      row.textContent = "⚠ " + msg;
+      list.appendChild(row);
+      $("picker-selected").textContent = "browse error";
+      log(msg);
+      return;
+    }
     pickerDir = d.path;
     pickerFile = "";
     $("picker-path").value = d.path;
     $("picker-selected").textContent = pickerMode === "dir" ? d.path : "no file selected";
     $("picker-use").disabled = pickerMode !== "dir";
-    const list = $("picker-list");
     list.innerHTML = "";
     if (d.parent) addPickRow("..", "dir", () => loadPickerDir(d.parent));
     d.dirs.forEach(name => addPickRow(name + "/", "dir", () => loadPickerDir(d.path + "/" + name)));
@@ -745,7 +863,15 @@ async function loadPickerDir(dir) {
     } else {
       d.files.forEach(name => addPickRow(name, "file", () => selectPickerFile(d.path + "/" + name)));
     }
-  } catch (e) { log("browse failed: " + e.message); }
+  } catch (e) {
+    list.innerHTML = "";
+    const row = document.createElement("div");
+    row.className = "pick-row file-muted";
+    row.textContent = "⚠ " + (e.message || "browse failed");
+    list.appendChild(row);
+    $("picker-selected").textContent = "browse error";
+    log("browse failed: " + (e.message || e));
+  }
 }
 function addPickRow(name, kind, onClick) {
   const row = document.createElement("div");
@@ -775,7 +901,7 @@ function guard(fn) {
   return async () => { try { await fn(); } catch (e) { log(e.message || String(e)); } };
 }
 function wire() {
-  $("btn-browse").addEventListener("click", openPicker);
+  $("btn-browse").addEventListener("click", () => openPicker());
   $("btn-browse-model").addEventListener("click", () => openPicker({target: "model_path", mode: "dir"}));
   $("btn-browse-llama").addEventListener("click", () => openPicker({target: "llama_model_path", mode: "file", exts: ".gguf"}));
   $("btn-browse-mmproj").addEventListener("click", () => openPicker({target: "mmproj_path", mode: "file", exts: "all"}));
@@ -821,6 +947,15 @@ function wire() {
     $("bench-results").innerHTML = "";
     await post("/api/benchmark/start"); log("benchmark started"); poll();
   }));
+  $("btn-scan-models").addEventListener("click", guard(scanForModels));
+  $("vlm_model").addEventListener("change", () => {
+    // Keep the text model in sync by default (user can pick another).
+    if (!$("text_model").value) $("text_model").value = $("vlm_model").value;
+  });
+}
+// Populates the model dropdowns (VLM, text, and summary) from the configured
+// server. Defined at TOP-LEVEL scope so BOTH the "Scan for models" button and
+// the standalone auto-populate on first poll (in poll()) can call it.
 async function scanForModels() {
   const base_url = $("base_url").value;
   const r = await fetch("/api/models?base_url=" + encodeURIComponent(base_url));
@@ -828,29 +963,27 @@ async function scanForModels() {
   if (!d.models.length) {
     fillModelDropdown($("vlm_model"), []);
     fillModelDropdown($("text_model"), []);
+    fillModelDropdownWithNone($("summary_model"), []);
     log("no models found at " + base_url);
     return;
   }
   fillModelDropdown($("vlm_model"), d.models);
   fillModelDropdown($("text_model"), d.models);
+  fillModelDropdownWithNone($("summary_model"), d.models);
   // Keep any saved model selection even if it's not in the fresh list.
   if (state && state.settings) {
     setSelectValue($("vlm_model"), state.settings.vlm_model);
     setSelectValue($("text_model"), state.settings.text_model);
+    setSelectValue($("summary_model"), state.settings.summary_model);
   }
   if (!$("vlm_model").value) $("vlm_model").value = d.models[0];
   if (!$("text_model").value) $("text_model").value = d.models[0];
   log(d.models.length + " model(s) found at " + base_url);
 }
-  $("btn-scan-models").addEventListener("click", guard(scanForModels));
-  $("vlm_model").addEventListener("change", () => {
-    // Keep the text model in sync by default (user can pick another).
-    if (!$("text_model").value) $("text_model").value = $("vlm_model").value;
-  });
-}
 function attachInputListeners() {
   ["video_path","model_path","llama_model_path","mmproj_path","base_url","text_model","whisper_model",
-   "scale","sweep_interval","output_name","scan_path","font_path","blur_strength","mute_padding","blur_padding"
+   "scale","sweep_interval","output_name","scan_path","blur_strength","mute_padding","blur_padding",
+   "summary_model","summary_frames","summary_max_context"
   ].forEach(id => $(id).addEventListener("input", settingsChanged));
   $("show_prompts").addEventListener("change", settingsChanged);
   document.querySelectorAll("input[name=backend]").forEach(r => r.addEventListener("change", () => {

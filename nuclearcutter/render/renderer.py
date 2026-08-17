@@ -169,6 +169,7 @@ def render(
     prefs: Preferences,
     output_path: Path = None,
     font_path: str = None,
+    summarizer=None,
     status_path: Path | str = None,
     progress_callback=None,
     stop_event=None,
@@ -259,6 +260,7 @@ def render(
             stop_event=stop_event,
             workers=workers,
             encode_threads=encode_threads,
+            summarizer=summarizer,
         )
         if status is not None:
             status.set_phase("concat"); _write_status()
@@ -352,19 +354,26 @@ def _build_blur_filter(text: str, font_path: str | None, strength: float = 1.0,
     return ",".join(filters)
 
 
-def _make_overlay_png(text: str, width: int, height: int, font_path: str | None, out_path: Path) -> None:
+def _make_overlay_png(text: str, width: int, height: int, font_path: str | None, out_path: Path,
+                      font_size: int = 32, max_chars_per_line: int = 45, pad_x: int = 24,
+                      pad_y: int = 16, box_alpha: int = 178, y_margin: int = 48,
+                      spacing: int = 8, radius: int = 12) -> None:
     """Render the summary text onto a transparent full-frame PNG.
 
     The text sits in a semi-opaque black box near the bottom-center, matching
     the look of the old drawtext overlay. This works with ffmpeg's universal
     `overlay` filter, so it doesn't depend on a drawtext-capable build.
+
+    The styling parameters let the same helper draw BOTH the large blur/black
+    summary box (defaults) and the compact muted-audio caption (see
+    _make_caption_png) without duplicating the PIL logic.
     """
     from PIL import Image, ImageDraw, ImageFont
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    wrapped = _wrap_for_display(text, max_chars_per_line=45)
+    wrapped = _wrap_for_display(text, max_chars_per_line=max_chars_per_line)
 
     font = None
     candidates = [font_path] if font_path else []
@@ -378,7 +387,7 @@ def _make_overlay_png(text: str, width: int, height: int, font_path: str | None,
         if not path:
             continue
         try:
-            font = ImageFont.truetype(path, 32)
+            font = ImageFont.truetype(path, font_size)
             break
         except Exception:
             continue
@@ -386,29 +395,42 @@ def _make_overlay_png(text: str, width: int, height: int, font_path: str | None,
         font = ImageFont.load_default()
 
     # Measure the wrapped text so the black box hugs it.
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=8)
+    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
 
-    pad_x, pad_y = 24, 16
     box_w = text_w + pad_x * 2
     box_h = text_h + pad_y * 2
     x0 = (width - box_w) // 2
-    y0 = height - box_h - 48
+    y0 = height - box_h - y_margin
 
     draw.rounded_rectangle(
         [x0, y0, x0 + box_w, y0 + box_h],
-        radius=12,
-        fill=(0, 0, 0, 178),
+        radius=radius,
+        fill=(0, 0, 0, box_alpha),
     )
     draw.multiline_text(
         (x0 + pad_x, y0 + pad_y),
         wrapped,
         font=font,
         fill=(255, 255, 255, 255),
-        spacing=8,
+        spacing=spacing,
     )
     img.save(str(out_path))
+
+
+def _make_caption_png(text: str, width: int, height: int, font_path: str | None, out_path: Path) -> None:
+    """Render a SMALL, subtitle-style caption for a muted-audio segment.
+
+    The video is still visible (only audio is muted), so this is intentionally
+    more compact than the blur/black summary box: smaller font, tighter
+    padding, more transparent background, sitting closer to the bottom edge.
+    """
+    _make_overlay_png(
+        text, width, height, font_path, out_path,
+        font_size=22, max_chars_per_line=60, pad_x=14, pad_y=8,
+        box_alpha=140, y_margin=24, spacing=4, radius=8,
+    )
 
 
 def _render_track_segments(
@@ -426,6 +448,7 @@ def _render_track_segments(
     stop_event=None,
     workers: int = 2,
     encode_threads: int | None = None,
+    summarizer=None,
 ) -> tuple[list[Path], list[Path]]:
     """Render every segment's video + audio, running up to `workers` segment
     encodes in PARALLEL (each ffmpeg process pinned to `encode_threads`).
@@ -434,6 +457,11 @@ def _render_track_segments(
     encode using all cores while the others wait, several short segments encode
     at once. `on_segment(done, total, seg_start)` fires as each segment
     COMPLETES (done is monotonic). Results are reassembled in timeline order.
+
+    `summarizer` (optional) is a render/summarize.SegmentSummarizer. When set,
+    audio-only mute segments (video still visible) get a SMALL bottom caption
+    explaining what was said. (Blur/black descriptions come from the scan file,
+    where the summary model already ran at scan time.)
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -449,12 +477,34 @@ def _render_track_segments(
         a_out = tmp_dir / f"a_{i:04d}.m4a"
         output_duration = seg.source_duration
 
+        # Muted foul-language windows within this segment (0-based relative),
+        # computed once so both the caption and the audio mute share it.
+        mute_ranges = _language_mute_ranges_within(scan, prefs, seg)
+
         if seg.visual == VisualAction.NONE:
+            overlay_path: Path | None = None
+            overlay_enable: str | None = None
+            if mute_ranges and summarizer is not None:
+                # Video stays visible; only the audio is muted. Lay a SMALL
+                # bottom caption over the footage explaining what was said,
+                # visible only DURING the muted windows (not the whole segment).
+                caption = summarizer.caption_for_segment(
+                    _absolute_ranges(mute_ranges, seg.start),
+                    _muted_words_within(scan, prefs, seg),
+                )
+                if caption.strip() and _ffmpeg_has_filter("overlay"):
+                    overlay_path = tmp_dir / f"caption_{i:04d}.png"
+                    _make_caption_png(caption, width, height, font_path, overlay_path)
+                    overlay_enable = "+".join(f"between(t,{r0},{r1})" for r0, r1 in mute_ranges)
             _extract_video_segment(input_path, seg.start, output_duration, v_out,
                                    video_encoder, video_filter=None, fps=fps,
+                                   overlay_path=overlay_path, overlay_enable=overlay_enable,
                                    threads=encode_threads)
         elif seg.visual in (VisualAction.BLUR, VisualAction.BLACK):
             overlay_path: Path | None = None
+            # On-screen descriptions are written by the summary model at SCAN
+            # time (see scanner.scan / run_summary_pass) and baked into the
+            # scan file — render just uses whatever is already there.
             if seg.description.strip() and _ffmpeg_has_filter("overlay"):
                 overlay_path = tmp_dir / f"overlay_{i:04d}.png"
                 _make_overlay_png(seg.description, width, height, font_path, overlay_path)
@@ -482,7 +532,6 @@ def _render_track_segments(
                 and seg.category != Category.FOUL_LANGUAGE):
             _silent_audio(output_duration, a_out)
         else:
-            mute_ranges = _language_mute_ranges_within(scan, prefs, seg)
             if mute_ranges:
                 _extract_audio_segment(input_path, seg.start, output_duration, a_out, mute_ranges=mute_ranges)
             else:
@@ -538,6 +587,33 @@ def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg: Time
     return ranges
 
 
+def _muted_words_within(scan: ScanResult, prefs: Preferences, seg: TimelineSegment) -> list[str]:
+    """Confirmed foul words whose mute window falls within this segment.
+
+    Used to seed the muted-audio caption prompt (what was actually said).
+    Mirrors _language_mute_ranges_within's scoping (word vs phrase).
+    """
+    lang_action = prefs.audio_for(Category.FOUL_LANGUAGE)
+    if not lang_action.mutes_audio:
+        return []
+    phrase_scope = lang_action in (AudioAction.MUTE_PHRASE, AudioAction.REPLACE_PHRASE)
+    threshold = prefs.level_for(Category.FOUL_LANGUAGE)
+    words: list[str] = []
+    for d in scan.language_detections:
+        if not d.llm_confirmed or not d.level.is_corrected_by(threshold):
+            continue
+        m_start, m_end = (d.utterance_start, d.utterance_end) if phrase_scope else (d.start, d.end)
+        # Overlap check against the segment (no padding needed for the word list).
+        if m_start < seg.end and m_end > seg.start:
+            words.append(d.word or "")
+    return words
+
+
+def _absolute_ranges(relative_ranges: list[tuple[float, float]], seg_start: float) -> list[tuple[float, float]]:
+    """Shift mute ranges from segment-relative back to absolute movie time."""
+    return [(seg_start + r0, seg_start + r1) for r0, r1 in relative_ranges]
+
+
 def _clamped_window(start: float, end: float, pad: float, seg_start: float, seg_end: float, base: float) -> list[tuple[float, float]]:
     """Return the padded [start,end) window clamped to [seg_start,seg_end), relative to `base`."""
     overlap_start = max(start - pad, seg_start)
@@ -568,19 +644,28 @@ def _wrap_for_display(text: str, max_chars_per_line: int = 40) -> str:
 def _extract_video_segment(
     input_path: Path, start: float, duration: float, out_path: Path,
     video_encoder: str, video_filter: str | None, fps: float,
-    overlay_path: Path | None = None, threads: int | None = None,
+    overlay_path: Path | None = None, overlay_enable: str | None = None,
+    threads: int | None = None,
 ) -> None:
     cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-ss", str(start), "-i", str(input_path)]
     if overlay_path is not None:
-        # Composite a pre-rendered text overlay (PIL PNG) on top of the blurred
-        # video. -loop 1 turns the still PNG into a stream; -t is given as an
-        # OUTPUT option (after all inputs) so the encode stops at `duration`
-        # regardless of the never-ending looped image input.
+        # Composite a pre-rendered text overlay (PIL PNG) on top of the video
+        # (optionally blurred). -loop 1 turns the still PNG into a stream; -t is
+        # given as an OUTPUT option (after all inputs) so the encode stops at
+        # `duration` regardless of the never-ending looped image input.
         cmd += ["-loop", "1", "-i", str(overlay_path)]
+        # With no blur filter (e.g. the small muted-audio caption on footage
+        # that stays visible) just normalize the base video to rgba.
+        bg = f"[0:v]{video_filter}[bg]" if video_filter else "[0:v]format=rgba[bg]"
+        # `overlay_enable` (e.g. a muted-audio caption) restricts the overlay to
+        # specific windows via the overlay filter's `enable` timeline option —
+        # so the caption appears only WHILE the audio is muted, not for the
+        # whole (possibly long) segment. Times are relative to segment start.
+        enable = f":enable='{overlay_enable}'" if overlay_enable else ""
         fc = (
-            f"[0:v]{video_filter}[bg];"
+            f"{bg};"
             "[1:v]format=rgba,scale=iw:ih[ovr];"
-            "[bg][ovr]overlay=0:0:format=auto[v]"
+            f"[bg][ovr]overlay=0:0:format=auto{enable}[v]"
         )
         cmd += ["-filter_complex", fc, "-map", "[v]"]
     elif video_filter:
