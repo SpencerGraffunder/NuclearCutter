@@ -1,5 +1,6 @@
 *.pyc
 *.json
+!nuclearcutter/prompts.json
 *.mkv
 *.mp4
 *.avi

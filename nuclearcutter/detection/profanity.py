@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from nuclearcutter.detection.transcribe import Utterance, Word
+from nuclearcutter.prompts import get_prompt
 from nuclearcutter.schema import LanguageDetection, SeverityLevel
 from nuclearcutter.utils.llm_client import LLMClient
 
@@ -37,46 +38,6 @@ DEFAULT_FOUL_LANGUAGE_SCALE = (
     "tone — in addition to all profanity and crude words. Basically any line that "
     "isn't purely polite should be flagged; err on the side of flagging."
 )
-
-CONTEXT_CHECK_PROMPT = """You are helping a content-filtering tool review a line of movie \
-dialogue for foul language.
-
-Here is the FULL description of each level for foul language:
-
-Note: despite the name, "low" is the STRICTEST definition — it only matches the \
-single worst/most offensive words (severe slurs). "exhigh" is the LOOSEST \
-definition — it matches almost anything rude/mean/disrespectful. Going from \
-low → med → high → exhigh, each definition gets broader and easier to satisfy. \
-It's expected and correct for a word to match multiple levels at once — \
-evaluate each one independently and mark it true if the word fits, regardless \
-of what you answered for the others.
-
-The level definitions (in order, low → exhigh):
-{definition}
-
-Line: "{text}"
-
-Wordlist matches found in this line (may be false positives — e.g. homophones or non-profane \
-usage): {matches}
-
-For EACH wordlist match, decide if it is genuinely foul language as used in this \
-specific line, or a false positive. Also flag any OTHER foul words in the line that \
-the wordlist missed.
-
-Respond with ONLY a JSON object with this exact structure:
-{{
-  "confirmed_words": ["word1", "word2"],
-  "matches": {{
-    "word1": {{"matches_low": false, "matches_med": true, "matches_high": true, "matches_exhigh": true}},
-    "word2": {{"matches_low": false, "matches_med": false, "matches_high": false, "matches_exhigh": true}}
-  }},
-  "reasoning": "one short sentence explaining any false-positive rejections or additions"
-}}
-
-confirmed_words should be the exact word(s) as they appear in the line, lowercase, that \
-should be flagged as foul language. Empty list if none. matches maps each confirmed word \
-to four independent booleans: does the word fit that level's definition above? Mark each \
-independently — a word can match multiple levels."""
 
 
 def load_wordlist(path: Path = DEFAULT_WORDLIST_PATH) -> set[str]:
@@ -116,7 +77,12 @@ def detect_foul_language(
 
         try:
             result = client.text_query_json(
-                CONTEXT_CHECK_PROMPT.format(definition=definition, text=utt.text, matches=matches)
+                get_prompt(
+                    "foul_language_context_prompt",
+                    definition=definition,
+                    text=utt.text,
+                    matches=matches,
+                )
             )
             llm_failed = False
         except Exception:

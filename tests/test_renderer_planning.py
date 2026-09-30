@@ -1,4 +1,7 @@
-from nuclearcutter.render.renderer import TimelineSegment, _language_mute_ranges_within, plan_timeline
+from nuclearcutter.render.renderer import (
+    TimelineSegment, _absolute_ranges, _language_mute_ranges_within, _make_caption_png,
+    _muted_words_within, plan_timeline,
+)
 from nuclearcutter.schema import (
     AudioAction, Category, FilmIdentity, LanguageDetection, Preferences, ScanResult, SeverityLevel,
     VisualAction, VisualDetection,
@@ -291,3 +294,52 @@ def test_language_mute_respects_severity_threshold():
     # word 10.0-10.2 padded 0.5 -> (9.5, 10.7)
     assert abs(ranges[0][0] - 9.5) < 1e-6
     assert abs(ranges[0][1] - 10.7) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Muted-audio caption plumbing (small bottom caption on still-visible video)
+# ---------------------------------------------------------------------------
+
+def test_absolute_ranges_shifts_relative_to_segment_start():
+    assert _absolute_ranges([(9.5, 10.8)], 60.0) == [(69.5, 70.8)]
+
+
+def test_muted_words_within_matches_phrase_scope():
+    identity = make_identity(100.0)
+    ld = LanguageDetection(
+        start=70.0, end=70.3, utterance_start=69.0, utterance_end=71.0,
+        word="damn", transcript_source="whisper", llm_confirmed=True,
+    )
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[],
+                      language_detections=[ld])
+    prefs = Preferences(foul_language_audio=AudioAction.MUTE_PHRASE)
+
+    # The utterance (69,71) overlaps this segment -> the word is listed.
+    words = _muted_words_within(scan, prefs, make_seg(60.0, 100.0))
+    assert words == ["damn"]
+    # A segment that doesn't overlap the utterance gets nothing.
+    assert _muted_words_within(scan, prefs, make_seg(0.0, 60.0)) == []
+
+
+def test_muted_words_within_respects_unconfirmed():
+    identity = make_identity(100.0)
+    ld = LanguageDetection(
+        start=70.0, end=70.3, utterance_start=69.0, utterance_end=71.0,
+        word="damn", transcript_source="whisper", llm_confirmed=False,
+    )
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[],
+                      language_detections=[ld])
+    prefs = Preferences(foul_language_audio=AudioAction.MUTE_PHRASE)
+    assert _muted_words_within(scan, prefs, make_seg(60.0, 100.0)) == []
+
+
+def test_make_caption_png_writes_small_image(tmp_path):
+    out = tmp_path / "caption.png"
+    _make_caption_png("A character swears.", 640, 360, None, out)
+    assert out.exists()
+    assert out.stat().st_size > 0
+    from PIL import Image
+
+    img = Image.open(out)
+    assert img.size == (640, 360)
+    assert img.mode == "RGBA"

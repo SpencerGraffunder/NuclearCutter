@@ -277,6 +277,8 @@ class Preferences:
     blur_strength: float = 1.0
     # Extra seconds muted before/after each flagged word/utterance window.
     mute_padding: float = 0.5
+    # Extra seconds blurred/blacked before/after each flagged visual segment.
+    blur_padding: float = 0.0
 
     def visual_for(self, category: Category) -> VisualAction:
         if category == Category.NUDITY:
@@ -343,4 +345,5 @@ class Preferences:
             foul_language_level=SeverityLevel.from_any(d.get("foul_language_level")),
             blur_strength=float(d.get("blur_strength", 1.0)),
             mute_padding=float(d.get("mute_padding", 0.5)),
+            blur_padding=float(d.get("blur_padding", 0.0)),
         )

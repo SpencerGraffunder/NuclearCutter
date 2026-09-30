@@ -7,13 +7,16 @@ This is what makes the simple workflow work:
 
     git clone https://github.com/SpencerGraffunder/NuclearCutter.git
     cd NuclearCutter
-    python3 nuclearcutter.py scan "/path/to/Movie.mkv"
+    python3 nuclearcutter.py            # starts the web GUI server
+    # open http://localhost:8000 in a browser (any device on the network
+    # can reach it at http://<this-machine-ip>:8000 — no login)
 
 No `pip install`, no `source .venv/bin/activate` needed. The first run
 creates `.venv` and installs everything (this needs network + a moment);
 after that it just launches the venv's Python directly.
 
-You can also call it as `./nuclearcutter.py` (it has a shebang).
+You can also call it as `./nuclearcutter.py` (it has a shebang), or pass a
+command: `python3 nuclearcutter.py serve`, `scan MOVIE.mkv`, `render MOVIE.mkv`.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """
-Live scan status — a small JSON file the scan writes as it runs, which
-`nuclearcutter tui` (nuclearcutter/tui.py) reads to render a live dashboard.
+Live scan status — a small JSON file the scan writes as it runs, which the
+web GUI and resume logic read.
 
 The status file is written atomically (tmp + rename) so a reader never sees a
 half-written file. It's plain JSON and written only on phase changes, every
