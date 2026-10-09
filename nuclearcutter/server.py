@@ -42,9 +42,9 @@ from nuclearcutter.schema import (
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 from nuclearcutter.utils.model_server import (
-    DEFAULT_BASE_URL, ModelServerError, WHISPER_DEFAULT_BASE_URL, WhisperConfig,
-    is_server_up, require_server_up, whisper_is_up, whisper_list_models,
-    whisper_load_model,
+    ModelServerError, WhisperConfig, derive_server_urls, detect_whisper_models_dir,
+    is_server_up, normalize_server_address, require_server_up, whisper_is_up,
+    whisper_list_models, whisper_load_model, whisper_loaded_model_id,
 )
 from nuclearcutter.utils.system_stats import SystemStats
 
@@ -194,19 +194,19 @@ class AppState:
         # When enabled, every model prompt + response (with downscaled image
         # thumbnails for vision calls) is streamed to the terminal.
         self.show_prompts = False
-        # Remote-only model backend: an already-running OpenAI-compatible
-        # /v1 server (llama.cpp / LM Studio / Ollama / vLLM) that serves the
-        # VLM, text, and summary models. NuclearCutter never spawns a server.
-        self.base_url = DEFAULT_BASE_URL
+        # Remote-only model backend: ONE server address (the machine). The
+        # OpenAI-compatible /v1 server (llama.cpp / LM Studio / Ollama / vLLM)
+        # serves the VLM, text, and summary models on :8080, and the
+        # whisper.cpp server serves transcription on :8081 of the SAME
+        # address. NuclearCutter never spawns a server; the two URLs are
+        # derived from this one field (see derive_server_urls).
+        self.server_address = "http://127.0.0.1"
         self.vlm_model = ""
         self.text_model = ""
-        # Whisper transcription server (whisper.cpp). The model is whatever the
-        # server has loaded; the dropdown lists its .bin files and hot-swaps via /load.
-        self.whisper_base_url = WHISPER_DEFAULT_BASE_URL
+        # Whisper transcription: the model is whatever the server has loaded;
+        # the dropdown lists its .bin files (model folder auto-detected from
+        # the whisper-server process) and hot-swaps via /load.
         self.whisper_model = ""  # dropdown id (file stem), e.g. "ggml-base.en"
-        # Local path to the server's model folder (needed only for the dropdown
-        # listing / /load; empty = remote server, dropdown disabled).
-        self.whisper_models_dir = "/home/graffunder/whisper-server/src/models"
         self.scale = "480p"
         self.sweep_interval = 2.0
         # --- Render settings ----------------------------------------------
@@ -265,7 +265,49 @@ class AppState:
         if settings_path is not None:
             self.settings_path = Path(settings_path)
             self._load_settings()
+            self._migrate_legacy_settings()
         self._refresh_loaded_scan()  # load any existing scan for the saved movie
+
+    def _migrate_legacy_settings(self) -> None:
+        """One-time migration of the old two-URL settings shape.
+
+        Older settings saved `base_url` (…:8080/v1) and `whisper_base_url`
+        (…:8081) as separate fields plus a `whisper_models_dir`. The GUI now
+        stores ONE `server_address` (the machine) and derives both URLs. When
+        the saved file predates that (no `server_address` yet), rebuild it
+        from the old host so nothing is lost. The models dir is dropped —
+        it is auto-detected from the whisper-server process now.
+        """
+        if self.settings_path is None or not self.settings_path.exists():
+            return
+        try:
+            data = json.loads(self.settings_path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict) or data.get("server_address"):
+            return
+        legacy = data.get("base_url") or data.get("whisper_base_url") or ""
+        if legacy:
+            from urllib.parse import urlsplit
+
+            host = urlsplit(legacy).netloc or legacy
+            self.server_address = normalize_server_address(host) or self.server_address
+            self._save_settings()
+            print(
+                f"settings: migrated legacy base_url {legacy!r} -> "
+                f"server_address {self.server_address!r}",
+                file=__import__("sys").stderr,
+            )
+
+    @property
+    def llm_base_url(self) -> str:
+        """The derived OpenAI-compatible /v1 URL (LLM default port 8080)."""
+        return derive_server_urls(self.server_address)[0]
+
+    @property
+    def whisper_base_url(self) -> str:
+        """The derived whisper.cpp URL (default port 8081)."""
+        return derive_server_urls(self.server_address)[1]
 
     # ------------------------------------------------------------------
     # Settings persistence (saved on the server, reloaded at startup)
@@ -314,12 +356,10 @@ class AppState:
         return {
             "video_path": self.video_path,
             "show_prompts": self.show_prompts,
-            "base_url": self.base_url,
+            "server_address": self.server_address,
             "vlm_model": self.vlm_model,
             "text_model": self.text_model,
-            "whisper_base_url": self.whisper_base_url,
             "whisper_model": self.whisper_model,
-            "whisper_models_dir": self.whisper_models_dir,
             "scale": self.scale,
             "sweep_interval": self.sweep_interval,
             "output_name": self.output_name,
@@ -342,18 +382,24 @@ class AppState:
             self._refresh_loaded_scan()
         if "show_prompts" in payload:
             self.show_prompts = bool(payload["show_prompts"])
-        if "base_url" in payload:
-            self.base_url = str(payload["base_url"] or DEFAULT_BASE_URL).strip()
+        if "server_address" in payload:
+            self.server_address = normalize_server_address(payload["server_address"]) or "http://127.0.0.1"
+        # Legacy alias: older GUI tabs save `base_url` (…:8080/v1). Accept it
+        # without error and fold it into the single server address (the
+        # whisper URL and models dir are derived/auto-detected now).
+        if "server_address" not in payload and "base_url" in payload:
+            legacy = str(payload["base_url"] or "").strip()
+            if legacy:
+                from urllib.parse import urlsplit
+
+                host = urlsplit(legacy).netloc or legacy
+                self.server_address = normalize_server_address(host) or self.server_address
         if "vlm_model" in payload:
             self.vlm_model = str(payload["vlm_model"] or "").strip()
         if "text_model" in payload:
             self.text_model = str(payload["text_model"] or "").strip()
-        if "whisper_base_url" in payload:
-            self.whisper_base_url = str(payload["whisper_base_url"] or WHISPER_DEFAULT_BASE_URL).strip()
         if "whisper_model" in payload:
             self.whisper_model = str(payload["whisper_model"] or "").strip()
-        if "whisper_models_dir" in payload:
-            self.whisper_models_dir = str(payload["whisper_models_dir"] or "").strip()
         if "scale" in payload:
             scale = str(payload["scale"]).strip().lower()
             if scale not in ("360p", "480p", "720p", "1080p"):
@@ -438,24 +484,23 @@ class AppState:
         OpenAI-compatible /v1 server. Raises RuntimeError if it's down.
         """
         llm_config = LLMConfig(
-            base_url=self.base_url,
+            base_url=self.llm_base_url,
             vlm_model=self.vlm_model,
             text_model=self.text_model,
         )
         llm_config.vision_max_pixels = vision_max_pixels_for_scale(self.scale)
-        require_server_up(self.base_url)
+        require_server_up(self.llm_base_url)
         return llm_config
 
     def _whisper_cfg(self) -> WhisperConfig:
         """Build the WhisperConfig for the configured whisper.cpp server.
 
-        ``models_dir`` points at the server's model folder so the dropdown can
-        list .bin files and resolve the selected model to an absolute path for
-        /load. Only meaningful when the whisper server is on this host.
+        `models_dir` is left empty: it is auto-detected from the local
+        whisper-server process's own `-m` argument (the server already knows
+        where its models live).
         """
         return WhisperConfig(
             base_url=self.whisper_base_url,
-            models_dir=self.whisper_models_dir,
             model=self.whisper_model,
         )
 
@@ -673,7 +718,7 @@ class AppState:
 
     def _validate_model_backend(self) -> None:
         """The model server must be reachable before a job that needs it starts."""
-        require_server_up(self.base_url)
+        require_server_up(self.llm_base_url)
 
     def _run_scan(self) -> None:
         job = self.scan
@@ -1213,7 +1258,7 @@ class AppState:
         now = time.monotonic()
         if now - self._backend_up_at >= 5.0:
             self._backend_up_at = now
-            self._backend_up = is_server_up(self.base_url)
+            self._backend_up = is_server_up(self.llm_base_url)
         if now - self._whisper_up_at >= 5.0:
             self._whisper_up_at = now
             self._whisper_up = whisper_is_up(self.whisper_base_url)
@@ -1229,10 +1274,12 @@ class AppState:
             "system": self.stats.sample(),
             "model": self.model_stats_dict(),
             "server": {
-                "base_url": self.base_url,
+                "server_address": self.server_address,
+                "base_url": self.llm_base_url,
                 "backend_up": self._backend_up,
                 "whisper_base_url": self.whisper_base_url,
                 "whisper_up": self._whisper_up,
+                "whisper_loaded_model": whisper_loaded_model_id(),
                 "settings_file": str(self.settings_path) if self.settings_path else "",
             },
         }
@@ -1262,6 +1309,10 @@ class ClearScanBody(BaseModel):
     section: str = "scan_verify"  # "transcribe" | "scan_verify"
 
 
+class WhisperLoadBody(BaseModel):
+    model: str = ""
+
+
 def create_app(state: AppState | None = None) -> FastAPI:
     app = FastAPI(title="NuclearCutter", version="0.2.0")
     st = state if state is not None else _state()
@@ -1270,7 +1321,10 @@ def create_app(state: AppState | None = None) -> FastAPI:
     def index():
         if not INDEX_HTML.exists():
             raise HTTPException(500, f"UI file missing: {INDEX_HTML}")
-        return FileResponse(INDEX_HTML)
+        # no-cache: the UI must never run stale (an old cached page keeps
+        # polling with removed element ids and spams the terminal with
+        # "state poll error" lines, and its buttons silently hang).
+        return FileResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/state")
     def api_state():
@@ -1278,44 +1332,45 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @app.get("/api/models")
     def api_models(base_url: str = "", vlm: str = ""):
-        """List models advertised by a server (the 'use existing server' flow).
+        """List models advertised by the LLM server (the 'scan for models' flow).
 
-        `vlm` (optional) filters the list to ids containing that string.
+        `base_url` (optional) overrides the derived LLM URL for a one-off probe.
         """
-        url = (base_url or st.base_url).strip()
+        url = (base_url or st.llm_base_url).strip()
         client = LLMClient(LLMConfig(base_url=url))
         models = client.list_models()
         return {"base_url": url, "reachable": bool(models), "models": models}
 
     @app.get("/api/whisper-models")
-    def api_whisper_models(base_url: str = "", models_dir: str = ""):
-        """List whisper model files for the whisper dropdown.
+    def api_whisper_models():
+        """List whisper models for the whisper dropdown.
 
-        The whisper.cpp server has no model-list endpoint, so we list the .bin
-        files in a directory that lives on the machine running that server
-        (defaults to the configured `whisper_models_dir`). `base_url` is
-        echoed back so the GUI can show which server the list is for.
+        The whisper.cpp server has no model-list endpoint, so the .bin files
+        in the server's model folder are listed — the folder is auto-detected
+        from the local whisper-server process's own `-m` argument (the server
+        already knows where its models live; no GUI setting needed). Each
+        entry is {id, label, loaded}, where `loaded` marks the model the
+        server currently has loaded.
         """
-        cfg = WhisperConfig(
-            base_url=(base_url or st.whisper_base_url).strip(),
-            models_dir=(models_dir or st.whisper_models_dir).strip(),
-        )
+        cfg = WhisperConfig(base_url=st.whisper_base_url)
+        models = whisper_list_models(cfg)
         return {
             "base_url": cfg.base_url,
-            "models_dir": cfg.models_dir,
+            "models_dir": detect_whisper_models_dir(),
             "up": whisper_is_up(cfg.base_url),
-            "models": whisper_list_models(cfg),
+            "loaded": whisper_loaded_model_id(),
+            "models": models,
         }
 
-    @app.post("/api/whisper/load")
-    def api_whisper_load(model: str = ""):
+    @app.post("/api/whisper-load")
+    def api_whisper_load(body: WhisperLoadBody):
         """Hot-swap the loaded whisper model on the configured server.
 
         Sends the model id (or absolute path) to the server's /load endpoint,
         which loads the model whose path it is given. A failed /load can leave
         the server's internal state stuck — the error message says how to recover.
         """
-        model = (model or "").strip()
+        model = (body.model or "").strip()
         if not model:
             raise HTTPException(400, "model is required")
         try:

@@ -3,6 +3,7 @@ validation, state snapshot, model listing, prompt endpoints, and job guards.
 No real model server or movie files are needed."""
 
 import json
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -36,9 +37,8 @@ def test_state_snapshot_shape():
 def test_settings_apply_and_validate():
     _, c = make_client()
     ok = c.post("/api/settings", json={"settings": {
-        "base_url": "http://192.168.4.164:8080/v1",
+        "server_address": "http://192.168.4.164",
         "vlm_model": "qwen3-vl-8b",
-        "whisper_base_url": "http://192.168.4.164:8081",
         "whisper_model": "ggml-small",
         "scale": "720p",
         "sweep_interval": 5,
@@ -53,7 +53,25 @@ def test_settings_apply_and_validate():
     assert s["audio_actions"]["foul_language"] == "mute_word"
     assert s["vlm_model"] == "qwen3-vl-8b"
     assert s["whisper_model"] == "ggml-small"
-    assert s["whisper_base_url"] == "http://192.168.4.164:8081"
+    assert s["server_address"] == "http://192.168.4.164"
+
+
+def test_settings_legacy_base_url_alias():
+    """Older GUI tabs save base_url (…:8080/v1) — it must fold into the
+    single server_address instead of erroring. The port is kept (it becomes
+    the LLM port; whisper is the next port), so the derived URLs are
+    unchanged."""
+    _, c = make_client()
+    ok = c.post("/api/settings", json={"settings": {
+        "base_url": "http://192.168.4.164:8080/v1",
+    }})
+    assert ok.status_code == 200
+    s = ok.json()["settings"]
+    assert s["server_address"] == "http://192.168.4.164:8080"
+    # Derived URLs follow the one address.
+    d = c.get("/api/state").json()
+    assert d["server"]["base_url"] == "http://192.168.4.164:8080/v1"
+    assert d["server"]["whisper_base_url"] == "http://192.168.4.164:8081"
 
     # Invalid values still 400.
     bad = c.post("/api/settings", json={"settings": {"sweep_interval": 0}})
@@ -544,7 +562,63 @@ def test_corrupt_settings_file_is_ignored(tmp_path):
     path.write_text("{ not valid json")
     st = AppState(settings_path=path)  # must not raise
     assert st.video_path == ""
-    assert st.base_url  # defaults stay in place
+    assert st.llm_base_url  # defaults stay in place
+
+
+def test_legacy_settings_migrate_to_server_address(tmp_path):
+    """A pre-unification settings.json (base_url + whisper_base_url +
+    whisper_models_dir) must load as one server_address, with the models
+    dir dropped (auto-detected now)."""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "video_path": "/tmp/Movie.mkv",
+        "base_url": "http://192.168.4.164:8080/v1",
+        "whisper_base_url": "http://192.168.4.164:8081",
+        "whisper_models_dir": "/some/old/models",
+        "whisper_model": "ggml-base.en",
+        "vlm_model": "qwen",
+        "text_model": "qwen",
+    }))
+    st = AppState(settings_path=path)
+    assert st.server_address == "http://192.168.4.164:8080"  # port kept = LLM port
+    assert st.llm_base_url == "http://192.168.4.164:8080/v1"
+    assert st.whisper_base_url == "http://192.168.4.164:8081"
+    assert st.whisper_model == "ggml-base.en"
+    assert st.video_path == "/tmp/Movie.mkv"
+    # The migration rewrote the file in the new shape.
+    data = json.loads(path.read_text())
+    assert data["server_address"] == "http://192.168.4.164:8080"
+    assert "whisper_models_dir" not in data
+
+
+def test_whisper_models_endpoint_shape():
+    """/api/whisper-models returns {id,label,loaded} entries (the GUI's
+    whisper dropdown expects objects, not bare strings)."""
+    st, c = make_client()
+    with patch(
+        "nuclearcutter.server.whisper_list_models",
+        return_value=[{"id": "ggml-small", "label": "ggml-small", "loaded": True}],
+    ), patch("nuclearcutter.server.whisper_loaded_model_id", return_value="ggml-small"), \
+         patch("nuclearcutter.server.detect_whisper_models_dir", return_value="/models"), \
+         patch("nuclearcutter.server.whisper_is_up", return_value=True):
+        r = c.get("/api/whisper-models")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["models"][0]["id"] == "ggml-small"
+    assert d["models"][0]["loaded"] is True
+    assert d["loaded"] == "ggml-small"
+    assert d["models_dir"] == "/models"
+
+
+def test_whisper_load_endpoint():
+    """The GUI POSTs /api/whisper-load with a JSON {model} body."""
+    st, c = make_client()
+    with patch("nuclearcutter.server.whisper_load_model", return_value="ok") as mock_load:
+        r = c.post("/api/whisper-load", json={"model": "ggml-small"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    mock_load.assert_called_once()
+    assert st.whisper_model == "ggml-small"
 
 
 def test_settings_load_is_lenient_per_field(tmp_path):

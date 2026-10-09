@@ -374,6 +374,12 @@ class VisualSweepDetector:
         # True once any flagged batch localizes to specific frames; drives the
         # tighter per-frame padding (see _frame_padding_for_interval).
         frame_granularity = False
+        # Batches whose VLM query failed after all retries (unparseable/empty
+        # response, HTTP error, ...). These are NOT verified clean — if too
+        # many, a silent empty result is worse than a loud error (see the
+        # post-sweep check below).
+        failed_batches = 0
+        queried_batches = 0
         try:
             timestamps = [t for t in _arange(0.0, duration - 0.5, sample_interval)]
             start = min(max(resume_from, 0), len(timestamps))
@@ -390,11 +396,25 @@ class VisualSweepDetector:
                         logging.warning("Sweep: frame extraction failed at %.1fs — %s", ts, exc)
 
                 if frame_paths:
+                    queried_batches += 1
                     try:
                         result = self._query_sweep_batch(frame_paths)
                     finally:
                         for p in frame_paths:
                             p.unlink(missing_ok=True)
+
+                    if result is None:
+                        # NOT verified clean — count it and say so (this is the
+                        # difference between "nothing found" and "couldn't
+                        # look").
+                        failed_batches += 1
+                        logging.warning(
+                            "Sweep: batch at %.1fs–%.1fs FAILED after %d attempts "
+                            "(%d failed batch(es) so far) — these frames are NOT "
+                            "verified clean.",
+                            batch_ts[0], batch_ts[-1], MAX_VLM_RETRIES, failed_batches,
+                        )
+                        continue
 
                     if result and result.get("contains_flagged_content"):
                         category = _category_from_str(result.get("category"))
@@ -454,6 +474,28 @@ class VisualSweepDetector:
         # resume-with-nothing-left-to-sweep case where the loop body never ran.
         if on_progress and not stopped:
             on_progress(len(timestamps), len(timestamps))
+
+        if not stopped and queried_batches and failed_batches == queried_batches:
+            # Every single VLM query failed — the result would be a silent, 
+            # totally unreliable "nothing found". Fail loudly instead.
+            raise RuntimeError(
+                f"VLM sweep failed: all {failed_batches} batch(es) returned "
+                f"unparseable or empty responses (after {MAX_VLM_RETRIES} "
+                f"attempts each). The scan found nothing because it couldn't "
+                f"actually see the frames — check the model server (is the "
+                f"model loaded with vision support? does it accept the sweep "
+                f"prompt?) and look at the terminal for the per-batch errors."
+            )
+        if failed_batches and failed_batches >= max(1, queried_batches // 10):
+            # A significant fraction failed — the result is only partially
+            # reliable. Say so loudly; the scan continues (a few dead batches
+            # shouldn't kill a multi-hour run) but the user must know.
+            print(
+                f"[sweep] WARNING: {failed_batches}/{queried_batches} batches failed "
+                f"their VLM query and were NOT verified clean — the scan result "
+                f"may miss content in those windows.",
+                file=sys.stderr,
+            )
 
         merge_gap = _merge_gap_for_interval(sample_interval)
         # Frame-level flags are tight (one sample point per flagged frame), so a

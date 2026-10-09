@@ -165,23 +165,15 @@
       <input type="text" id="video_path" placeholder="/path/to/Movie.mkv">
       <button id="btn-browse">📁 Browse</button></div>
 
-    <div id="opt-remote">
-      <div class="row"><label>Model server IP / URL</label>
-        <input type="text" id="base_url" value="http://127.0.0.1:8080/v1" placeholder="http://IP:PORT/v1">
-        <button id="btn-scan-models">Scan for models</button></div>
+    <div id="opt-models">
+      <div class="row"><label>Server address</label>
+        <input type="text" id="server_address" value="http://127.0.0.1" placeholder="http://HOST">
+        <button id="btn-scan-models" title="Refresh the model lists: LLM/VLM models from the llama server, whisper models from the whisper server">Scan for models</button></div>
+      <div class="row" style="margin:0 0 7px;"><span class="hint" id="derived-urls" style="width:auto;min-width:0;">LLM :8080 · whisper :8081</span></div>
       <div class="row"><label>VLM model</label><select id="vlm_model"></select></div>
       <div class="row"><label>Text model</label><select id="text_model"></select></div>
-    </div>
-
-    <div id="opt-whisper">
-      <div class="row"><label>Whisper server IP</label>
-        <input type="text" id="whisper_base_url" value="http://127.0.0.1:8081" placeholder="http://IP:PORT"></div>
-      <div class="row"><label>Whisper model folder</label>
-        <input type="text" id="whisper_models_dir" value="/home/graffunder/whisper-server/src/models" placeholder="/path/to/whisper/models"></div>
-      <div class="row"><label>Whisper model</label>
-        <button id="btn-scan-whisper" title="List .bin models in the folder above">Scan</button>
-        <select id="whisper_model"></select>
-        <button id="btn-whisper-load" title="Hot-swap the whisper server's loaded model to this one. Shared server — other users see a brief interruption.">Load</button></div>
+      <div class="row"><label>Whisper model</label><select id="whisper_model"></select>
+        <button id="btn-whisper-load" title="Hot-swap the whisper server's loaded model to this one (the one marked (loaded) is active). Shared server — other users see a brief interruption.">Load</button></div>
     </div>
     <div class="row"><label>Scale frames before VLM</label>
       <select id="scale">
@@ -443,13 +435,13 @@ function fillModelDropdownWithNone(sel, models) {
 function setDisabled(ids, disabled) {
   ids.forEach(id => { const el = $(id); if (el) el.disabled = disabled; });
 }
-const SCAN_SETTING_IDS = ["video_path","base_url","vlm_model","text_model",
-  "whisper_base_url","whisper_models_dir","whisper_model","scale","sweep_interval",
+const SCAN_SETTING_IDS = ["video_path","server_address","vlm_model","text_model",
+  "whisper_model","scale","sweep_interval",
   "summary_model","summary_frames","summary_max_context"];
 const RENDER_SETTING_IDS = ["output_name","scan_path","blur_strength","mute_padding","blur_padding"];
 function setScanSettingsDisabled(d) {
   setDisabled(SCAN_SETTING_IDS, d);
-  setDisabled(["btn-scan-models", "btn-scan-whisper", "btn-whisper-load"], d);
+  setDisabled(["btn-scan-models", "btn-whisper-load"], d);
 }
 function setRenderSettingsDisabled(d) {
   setDisabled(RENDER_SETTING_IDS, d);
@@ -476,11 +468,9 @@ function collectSettings() {
   return {
     video_path: $("video_path").value,
     show_prompts: $("show_prompts").checked,
-    base_url: $("base_url").value,
+    server_address: $("server_address").value,
     vlm_model: $("vlm_model").value,
     text_model: $("text_model").value,
-    whisper_base_url: $("whisper_base_url").value,
-    whisper_models_dir: $("whisper_models_dir").value,
     whisper_model: $("whisper_model").value,
     scale: $("scale").value,
     sweep_interval: parseFloat($("sweep_interval").value) || 2,
@@ -502,14 +492,26 @@ function matrixValues(key) {
   document.querySelectorAll(`select[data-key="${key}"]`).forEach(s => out[s.dataset.cat] = s.value);
   return out;
 }
+function derivedUrlHint(address) {
+  // Mirror of the server's derive_server_urls: LLM on :8080 (/v1), whisper on
+  // :8081 (or the given port / port+1 when the address carries one).
+  let a = (address || "").trim().replace(/\/+$/, "");
+  if (!a) return "set the server address";
+  if (!a.includes("://")) a = "http://" + a;
+  const m = a.match(/^([a-z+]+:\/\/)([^:/]+)(?::(\d+))?/i);
+  if (!m) return a;
+  const port = m[3];
+  const llm = port ? m[2] + ":" + port : m[2] + ":8080";
+  const wsp = port ? m[2] + ":" + (parseInt(port, 10) + 1) : m[2] + ":8081";
+  return m[1] + llm + "/v1" + "  ·  " + m[1] + wsp;
+}
 function applySettingsToUI(s, skipSave) {
   $("video_path").value = s.video_path || "";
   $("show_prompts").checked = !!s.show_prompts;
-  $("base_url").value = s.base_url || "http://127.0.0.1:8080/v1";
+  $("server_address").value = s.server_address || "http://127.0.0.1";
+  $("derived-urls").textContent = derivedUrlHint(s.server_address);
   setSelectValue($("vlm_model"), s.vlm_model);
   setSelectValue($("text_model"), s.text_model);
-  $("whisper_base_url").value = s.whisper_base_url || "http://127.0.0.1:8081";
-  $("whisper_models_dir").value = s.whisper_models_dir || "";
   setSelectValue($("whisper_model"), s.whisper_model);
   $("scale").value = s.scale || "480p";
   $("sweep_interval").value = s.sweep_interval || 2;
@@ -542,6 +544,7 @@ function updateBackendVisibility() {
   const parts = [];
   parts.push(srv.backend_up ? "llm: up" : "llm: down");
   parts.push(srv.whisper_up ? "whisper: up" : "whisper: down");
+  if (srv.whisper_loaded_model) parts.push("whisper model: " + srv.whisper_loaded_model);
   $("backend-badge").textContent = parts.join(" · ");
 }
 
@@ -757,6 +760,7 @@ function renderBenchResults(job) {
 }
 
 // ---------------------------------------------------------------- polling
+let lastPollError = "";  // dedupe: log a repeating poll error once, not every poll
 async function poll() {
   try {
     const r = await fetch("/api/state");
@@ -774,9 +778,12 @@ async function poll() {
     }
     state = d;
     renderState();
-    if (autoScan) { guard(scanForModels)(); guard(scanWhisperModels)(); }  // fill the model dropdowns
+    if (autoScan) guard(scanForModels)();  // fills LLM + whisper dropdowns
+    lastPollError = "";
   } catch (e) {
-    log("state poll error: " + e.message);
+    const msg = "state poll error: " + e.message;
+    if (msg !== lastPollError) log(msg);  // repeat failures: log once, not every poll
+    lastPollError = msg;
   }
 }
 function log(msg) {
@@ -883,7 +890,6 @@ function guard(fn) {
 }
 function wire() {
   $("btn-browse").addEventListener("click", () => openPicker());
-  $("btn-scan-whisper").addEventListener("click", guard(scanWhisperModels));
   $("btn-whisper-load").addEventListener("click", guard(loadWhisperModel));
   $("picker-close").addEventListener("click", closePicker);
   $("picker-cancel").addEventListener("click", closePicker);
@@ -933,67 +939,66 @@ function wire() {
     if (!$("text_model").value) $("text_model").value = $("vlm_model").value;
   });
 }
-// Populates the model dropdowns (VLM, text, and summary) from the configured
-// server. Defined at TOP-LEVEL scope so BOTH the "Scan for models" button and
-// the standalone auto-populate on first poll (in poll()) can call it.
+// Populates ALL the model dropdowns from the one configured server address:
+// VLM/text/summary from the LLM server's /v1/models, whisper from the
+// whisper server's model folder (auto-detected server-side — no folder field).
+// Defined at TOP-LEVEL scope so both the "Scan for models" button and the
+// first-poll auto-populate (in poll()) can call it.
 async function scanForModels() {
-  const base_url = $("base_url").value;
-  const r = await fetch("/api/models?base_url=" + encodeURIComponent(base_url));
-  const d = await r.json();
+  const d = await (await fetch("/api/models")).json();
   if (!d.models.length) {
     fillModelDropdown($("vlm_model"), []);
     fillModelDropdown($("text_model"), []);
     fillModelDropdownWithNone($("summary_model"), []);
-    log("no models found at " + base_url);
-    return;
+    log("no models found at " + d.base_url);
+  } else {
+    fillModelDropdown($("vlm_model"), d.models);
+    fillModelDropdown($("text_model"), d.models);
+    fillModelDropdownWithNone($("summary_model"), d.models);
+    // Keep any saved model selection even if it's not in the fresh list.
+    if (state && state.settings) {
+      setSelectValue($("vlm_model"), state.settings.vlm_model);
+      setSelectValue($("text_model"), state.settings.text_model);
+      setSelectValue($("summary_model"), state.settings.summary_model);
+    }
+    if (!$("vlm_model").value) $("vlm_model").value = d.models[0];
+    if (!$("text_model").value) $("text_model").value = d.models[0];
+    log(d.models.length + " model(s) found at " + d.base_url);
   }
-  fillModelDropdown($("vlm_model"), d.models);
-  fillModelDropdown($("text_model"), d.models);
-  fillModelDropdownWithNone($("summary_model"), d.models);
-  // Keep any saved model selection even if it's not in the fresh list.
-  if (state && state.settings) {
-    setSelectValue($("vlm_model"), state.settings.vlm_model);
-    setSelectValue($("text_model"), state.settings.text_model);
-    setSelectValue($("summary_model"), state.settings.summary_model);
-  }
-  if (!$("vlm_model").value) $("vlm_model").value = d.models[0];
-  if (!$("text_model").value) $("text_model").value = d.models[0];
-  log(d.models.length + " model(s) found at " + base_url);
+  await scanWhisperModels();  // one button refreshes all three model selects
 }
-// List the whisper server's .bin models (scanned from the configured model
-// folder) and populate the whisper model dropdown. Defined at top-level scope
-// so both the "Scan" button and the first-poll auto-populate can call it.
+// List the whisper server's .bin models (folder auto-detected server-side from
+// the whisper-server process) and populate the whisper model dropdown.
 async function scanWhisperModels() {
-  const base_url = $("whisper_base_url").value.trim();
-  const models_dir = $("whisper_models_dir").value.trim();
-  if (!models_dir) { log("whisper: no model folder set — can't list models"); return; }
-  const q = "?base_url=" + encodeURIComponent(base_url) + "&models_dir=" + encodeURIComponent(models_dir);
-  const r = await fetch("/api/whisper-models" + q);
+  const r = await fetch("/api/whisper-models");
   const d = await r.json();
   if (!r.ok) { log("whisper models: " + (d.detail || r.status)); return; }
   const sel = $("whisper_model");
   const cur = state && state.settings ? state.settings.whisper_model : "";
   sel.innerHTML = "";
-  d.models.forEach(m => sel.add(new Option(m.label, m.id)));
+  d.models.forEach(m => sel.add(new Option(m.loaded ? m.label + " (loaded)" : m.label, m.id)));
   if (cur && d.models.some(m => m.id === cur)) sel.value = cur;
+  else if (d.loaded) sel.value = d.loaded;
   else if (d.models.length) sel.value = d.models[0].id;
-  log(d.models.length + " whisper model(s) in " + models_dir);
+  if (!d.models.length) log("whisper: no models found (is whisper-server running?" + (d.models_dir ? "" : " no model folder auto-detected") + ")");
+  else log(d.models.length + " whisper model(s)" + (d.models_dir ? " in " + d.models_dir : "") +
+    (d.up ? "" : " — whisper server is DOWN"));
 }
 // Hot-swap the whisper server's loaded model (shared server: /load is a brief
 // interruption for everyone on it).
 async function loadWhisperModel() {
-  const base_url = $("whisper_base_url").value.trim();
   const model = $("whisper_model").value;
   if (!model) { log("whisper: pick a model to load first"); return; }
   const r = await fetch("/api/whisper-load", { method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base_url, model }) });
+    body: JSON.stringify({ model }) });
   const d = await r.json();
   if (!r.ok) { log("whisper load failed: " + (d.detail || r.status)); return; }
-  log("whisper loaded " + model + (d.detail ? " — " + d.detail : ""));
+  log("whisper loaded " + model);
+  guard(scanWhisperModels)();  // refresh the (loaded) marker
 }
 function attachInputListeners() {
-  ["video_path","base_url","text_model","whisper_base_url","whisper_models_dir","whisper_model",
+  ["video_path","server_address","vlm_model","text_model","whisper_model",
    "scale","sweep_interval","output_name","scan_path","blur_strength","mute_padding","blur_padding",
    "summary_model","summary_frames","summary_max_context"
   ].forEach(id => $(id).addEventListener("input", settingsChanged));

@@ -326,7 +326,7 @@ class LLMClient:
         # rely on _parse_json_loose to extract JSON from the text response.
 
         result = self._post(payload, timeout=self.config.vision_timeout)
-        return result["choices"][0]["message"]["content"]
+        return _content_of(result)
 
     def text_query(self, prompt: str, json_mode: bool = False) -> str:
         """Send a text-only prompt to the configured text LLM. Returns raw text response."""
@@ -358,7 +358,7 @@ class LLMClient:
                     result = self._post(payload)
                 else:
                     raise
-            raw = result["choices"][0]["message"]["content"]
+            raw = _content_of(result, empty_ok=True)
             # mlx-vlm's server ACCEPTS json_object (HTTP 200) but returns an
             # empty {} instead of generating — so no HTTPError fires and the
             # retry above never triggers. Detect that and retry as plain text
@@ -366,10 +366,10 @@ class LLMClient:
             if not raw.strip() or raw.strip() == "{}":
                 payload.pop("response_format", None)
                 result = self._post(payload)
-            return result["choices"][0]["message"]["content"]
+            return _content_of(result)
 
         result = self._post(payload)
-        return result["choices"][0]["message"]["content"]
+        return _content_of(result)
 
     def vision_query_json(self, prompt: str, image_paths: list[Path]) -> dict:
         raw = self.vision_query(prompt, image_paths, json_mode=True)
@@ -441,12 +441,41 @@ class LLMClient:
             })
         payload = self._summary_payload(prompt, self._summary_model(vision=True), content)
         result = self._post(payload, timeout=self.config.vision_timeout)
-        return result["choices"][0]["message"]["content"]
+        return _content_of(result)
 
     def _summary_text(self, prompt: str) -> str:
         payload = self._summary_payload(prompt, self._summary_model(vision=False), prompt)
         result = self._post(payload, timeout=self.config.timeout)
-        return result["choices"][0]["message"]["content"]
+        return _content_of(result)
+
+
+def _content_of(result: dict, empty_ok: bool = False) -> str:
+    """Extract the assistant's content from a chat.completions response.
+
+    Raises a clear error when the content is EMPTY but the model produced
+    `reasoning_content` (thinking): a reasoning model that ignores
+    `enable_thinking: false` burns its whole max_tokens budget "thinking" and
+    returns an empty answer — previously that surfaced as a baffling JSON
+    parse failure and, in the sweep, as a batch silently treated as clean.
+    `empty_ok=True` returns "" instead of raising (json_mode's {} retry path
+    needs to see the raw value).
+    """
+    message = result["choices"][0]["message"]
+    content = message.get("content") or ""
+    if not content.strip() and not empty_ok:
+        reasoning = message.get("reasoning_content") or ""
+        if reasoning.strip():
+            raise RuntimeError(
+                f"model returned empty content after {len(reasoning)} reasoning "
+                f"tokens (thinking was not disabled — the request sent "
+                f"enable_thinking=false/chat_template_kwargs but this server "
+                f"ignored them). Check the model supports thinking off, or raise "
+                f"the max_tokens budget."
+            )
+        raise RuntimeError(
+            "model returned an empty response (no content, no reasoning)"
+        )
+    return content
 
 
 def _parse_json_loose(raw: str) -> dict:
