@@ -27,6 +27,7 @@ from nuclearcutter.schema import (
     Category, FilmIdentity, LanguageDetection, ScanResult, SeverityLevel, VisualDetection,
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
+from nuclearcutter.utils.model_server import WhisperConfig
 from nuclearcutter.utils.scan_status import ScanStatus
 
 
@@ -71,18 +72,18 @@ class ScanStopped(RuntimeError):
 
 def scan(
     video_path: Path,
-    llm_config: LLMConfig = None,
-    title: str = None,
-    year: int = None,
+    llm_config: LLMConfig | None = None,
+    title: str | None = None,
+    year: int | None = None,
     progress_callback=None,
-    whisper_model: str = None,
-    sweep_interval: float = None,
-    status_path: Path | str = None,
-    category_prompts: dict = None,
-    partial_result_path: Path | str = None,
-    scale: str = None,
-    stop_event: threading.Event = None,
-    summary_model: str = None,
+    whisper_cfg: WhisperConfig | None = None,
+    sweep_interval: float | None = None,
+    status_path: Path | str | None = None,
+    category_prompts: dict | None = None,
+    partial_result_path: Path | str | None = None,
+    scale: str | None = None,
+    stop_event: threading.Event | None = None,
+    summary_model: str | None = None,
     summary_frames: int = 12,
     summary_max_context: int = 30000,
     client_factory=None,
@@ -264,12 +265,12 @@ def scan(
                 # Interactive (GUI) scans run whisper in a killable child
                 # process so Stop actually stops it mid-transcription.
                 utterances = transcribe_killable(
-                    video_path, model=whisper_model,
+                    video_path, whisper_cfg,
                     progress_callback=_whisper_progress, stop_event=stop_event,
                 )
             else:
                 utterances = transcribe(
-                    video_path, model=whisper_model, progress_callback=_whisper_progress
+                    video_path, whisper_cfg, progress_callback=_whisper_progress
                 )
         except TranscriptionStopped as exc:
             raise ScanStopped(str(exc)) from exc

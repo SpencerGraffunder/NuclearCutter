@@ -3,7 +3,11 @@
 Self-hosted, open-source content censoring for your local movie collection.
 Detects nudity, gore, violence, and foul language and produces a permanently
 modified copy of the file — no live-playback plugin, no dependency on Plex or
-any particular player. Runs on your own hardware, targeting Apple Silicon.
+any particular player. NuclearCutter is a **client** that does all the ffmpeg
+work locally and talks to your own, already-running model servers over the
+network: an OpenAI-compatible LLM/VLM server for visual + text understanding,
+and a whisper.cpp server for transcription. It never launches a model server
+of its own.
 
 Not a live filter like VidAngel/ClearPlay/Skipit — those apply filters at
 playback time. NuclearCutter edits the file itself, once, and you keep the result.
@@ -13,10 +17,13 @@ rationale behind every decision below — read that first if you're contributing
 
 ## Quick start — launch the web GUI
 
-Requirements: macOS on Apple Silicon (recommended), Python 3.10+, and
-`ffmpeg`/`ffprobe` on your PATH. Everything else is handled for you — the
-first run creates a local virtual environment and installs dependencies
-automatically (no `pip install`, no `source activate`).
+Requirements: Python 3.10+, `ffmpeg`/`ffprobe` on your PATH, and two model
+servers you already run yourself (see [Setup](#setup)): an
+OpenAI-compatible LLM/VLM server (e.g. llama.cpp `llama-server`) and a
+whisper.cpp server. NuclearCutter connects to them over the network and does
+not start or stop them. Everything else is handled for you — the first run
+creates a local virtual environment and installs dependencies automatically
+(no `pip install`, no `source activate`).
 
 ```bash
 git clone https://github.com/SpencerGraffunder/NuclearCutter.git
@@ -34,8 +41,8 @@ Then open a browser:
 
 The server binds `0.0.0.0` and has **no login** — anyone on your network who
 can reach the port can use it. Everything is controlled from the browser: pick
-your movie, choose a model backend, start the scan, watch it progress, then
-render the cleaned copy. That's the whole workflow.
+your movie, point it at your model + whisper servers, start the scan, watch it
+progress, then render the cleaned copy. That's the whole workflow.
 
 `python3 nuclearcutter.py` creates `.venv/` and installs dependencies on first
 run, then starts the server. You can also run `./nuclearcutter.py` (it's
@@ -153,17 +160,16 @@ each blur/black segment by extra seconds on both sides.
 
 ### Requirements
 
-- macOS on Apple Silicon (M-series) recommended — `mlx-whisper` and `mlx-vlm`
-  are MLX-accelerated and Apple-Silicon-specific. The rest of the pipeline is
-  plain Python/ffmpeg and should run elsewhere, but isn't the primary target.
-- Python 3.10+
+- Python 3.10+ (any OS the ffmpeg toolchain and your model servers run on)
 - `ffmpeg` and `ffprobe` on your PATH
-- An inference backend. The default is **mlx-vlm**, which NuclearCutter starts
-  for you automatically (a local MLX vision model served over an
-  OpenAI-compatible `/v1` API on port 1234). You can also launch a local
-  **llama.cpp** `llama-server`, or point at any **already-running**
-  OpenAI-compatible server (LM Studio, Ollama, a manually started mlx-vlm
-  server) — see below.
+- Two model servers you run yourself (NuclearCutter only ever *talks* to
+  them — it never launches or stops one):
+  - an **OpenAI-compatible LLM/VLM server** serving a vision-capable model
+    over a `/v1` API (e.g. llama.cpp `llama-server` with a multimodal GGUF +
+    `--mmproj`, LM Studio, Ollama, …). This does the visual sweep, the scene
+    descriptions, and the text-level foul-language re-checks.
+  - a **whisper.cpp server** for transcription (foul language). The GUI can
+    hot-swap which whisper model it has loaded.
 
 ### Install
 
@@ -184,22 +190,21 @@ python3 nuclearcutter.py render MOVIE.mkv    # headless render
 
 Settings are saved automatically on the server to `settings.json` (next to
 the repo) whenever you change them, and reloaded when the server starts — so
-your movie location, model, and render preferences survive restarts. The path
-is shown in the GUI header and in the server banner. The Scan section covers:
+your movie location, server addresses, models, and render preferences survive
+restarts. The path is shown in the GUI header and in the server banner. The
+Scan section covers:
 
 - **Source file location** — the movie to analyze.
-- **Model backend** — one of:
-  - *launch local mlx-vlm* — NuclearCutter spawns `mlx_vlm.server` on port 1234
-    with the **local model path** you give it (default: the LM Studio MLX
-    folder, e.g. `~/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit`).
-  - *launch local llama.cpp* — spawns `llama-server` (from Homebrew's
-    `llama.cpp`) with a `.gguf` file, optionally a `--mmproj` vision
-    projector for image input.
-  - *use existing model server* — type the server's IP / base URL and hit
-    **Scan for models**; the available model ids are fetched from its
-    `/v1/models` and shown in the VLM model dropdown.
-- **Whisper model** — for transcription (default
-  `mlx-community/whisper-small-mlx`).
+- **Model server IP / URL** — the OpenAI-compatible `/v1` server for the
+  LLM/VLM. Hit **Scan for models** to fetch its model ids from `/v1/models`
+  into the dropdowns.
+- **VLM model / Text model** — the vision model for the sweep + descriptions,
+  and (optionally different) the text model for the foul-language re-checks.
+- **Whisper server IP** + **Whisper model folder** — the whisper.cpp server
+  for transcription and the folder that holds its `.bin` models.
+- **Whisper model** — a dropdown of the `.bin` files in that folder. Hit
+  **Load** to hot-swap the server's loaded model to the selected one (this
+  interrupts the shared whisper server for a few seconds while it loads).
 - **Scale frames before VLM** — `360p`/`480p`/`720p`/`1080p`; frames are
   downscaled before being sent to the vision model. Lower is much faster, and
   480p is the recommended default for scene-level detection.
@@ -211,31 +216,15 @@ is shown in the GUI header and in the server banner. The Scan section covers:
   selected model on 12 frames from the movie and reports speed and accuracy
   (a **CANCEL BENCH** button stops it mid-run).
 
-### The mlx-vlm backend (default)
+### Remote model servers (no local spawning)
 
-The default backend is **mlx-vlm**, a fast MLX vision-language model server
-that runs entirely on your Mac's GPU. It's installed automatically into the
-venv by `nuclearcutter.py` on first run (there's no Homebrew formula for
-mlx-vlm, so it's pip-installed). When you start a scan or benchmark,
-NuclearCutter:
-
-1. checks it's installed,
-2. starts its own server (`python -m mlx_vlm.server --port 1234 --model <path>`,
-   with 4-bit KV-cache quantization) pointed at your model path,
-3. waits for it to come up, runs the scan against it, and keeps it running
-   until you stop the NuclearCutter server.
-
-The default model path is the same Qwen MLX 4-bit model that the project was
-previously using through LM Studio:
-`/Users/<you>/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit`. If
-your model lives elsewhere, change the **local model path** in the GUI. Images
-sent to the model are downscaled to the selected scale before upload, which is
-the single biggest speed lever in the whole pipeline.
-
-If you'd rather run your own server (LM Studio, Ollama, or a manual
-`python -m mlx_vlm.server ...`), select **use existing model server** and point
-it at your base URL — NuclearCutter will use it without starting or stopping
-anything.
+NuclearCutter is a pure client: it never starts a model server. Point the GUI
+(or the CLI flags) at servers that are already running and it will use them.
+The header badge shows, live, whether the LLM/VLM server and the whisper
+server are reachable. If a server is down, the scan refuses to start with a
+clear message rather than hanging. Images sent to the vision model are
+downscaled to the selected scale before upload — the single biggest speed
+lever in the whole pipeline.
 
 ### Full-film VLM sweep (the only visual detector)
 
@@ -279,8 +268,9 @@ python3 nuclearcutter.py
 
 Workflow in the browser:
 
-1. **Scan section** — set the source file, backend + model, scale, interval,
-   then **Start scan**. The Status section below shows the timeline, progress
+1. **Scan section** — set the source file, point at your LLM/VLM + whisper
+   servers and pick the models, set scale + interval, then **Start scan**. The
+   Status section below shows the timeline, progress
    bars for each step (transcribe / scan / verify / render), ETA, frame
    counter, and model speed stats. Stop saves progress; Start resumes.
 2. **Render section** — once the scan is done, pick the per-category levels
@@ -296,15 +286,21 @@ The same operations are available from the terminal for scripting:
 
 ```bash
 # Scan a movie (slow — hours to a day+ depending on length/hardware)
-python3 nuclearcutter.py scan "/path/to/Movie.mkv" [--scale 480p] [--sweep-interval 2]
+# Requires the LLM/VLM server running (default http://127.0.0.1:8080/v1) and
+# the whisper.cpp server (default http://127.0.0.1:8081).
+python3 nuclearcutter.py scan "/path/to/Movie.mkv" \
+  --base-url http://192.168.4.164:8080/v1 \
+  --vlm-model "unsloth/Qwen3.8-27B-GGUF" \
+  [--scale 480p] [--sweep-interval 2] \
+  [--whisper-base-url http://127.0.0.1:8081] [--whisper-model ggml-base.en] \
+  [--whisper-models-dir /path/to/whisper/models]
 
 # Render with your preferred actions per category
 python3 nuclearcutter.py render "/path/to/Movie.mkv" [--nudity-level high] [--blur-strength 1.5]
 ```
 
-This produces `/path/to/Movie_cleaned.mkv`. The default backend is mlx-vlm
-with the default model path; for a standalone server pass
-`--backend standalone --base-url ... --vlm-model ... --text-model ...`. See
+This produces `/path/to/Movie_cleaned.mkv`. There is no `--backend` flag any
+more — NuclearCutter always uses the remote servers you point it at; see
 `python3 nuclearcutter.py scan --help` / `render --help` for every flag.
 
 ### Status section (the dashboard)
@@ -332,45 +328,50 @@ terminal TUI:
 A scan samples a frame every 2 seconds across the whole film and sends each
 batch of 4 frames to the vision model for review. That's a lot of model calls —
 a ~2-hour film is roughly **900 model calls** (3600 sampled frames ÷ 4), and
-each one takes several seconds on a MacBook's GPU. Whisper transcription and
+each one takes several seconds on a typical GPU. Whisper transcription and
 the per-scene confirm pass add more on top. So hours are normal (roughly
-proportional to film length × your GPU speed). To trade thoroughness for speed,
-raise the scan interval in the GUI: `5` halves the model calls (but can miss
-scenes shorter than ~5s); `10` is faster still. Lower intervals (the 2s
-default) catch short flashes at the cost of more calls.
+proportional to film length × your model server's speed). To trade
+thoroughness for speed, raise the scan interval in the GUI: `5` halves the
+model calls (but can miss scenes shorter than ~5s); `10` is faster still.
+Lower intervals (the 2s default) catch short flashes at the cost of more calls.
 
 ## Examples
 
 ### Example 1 — Full scan + render in the GUI
 
-Open the GUI, set the source file to your movie, leave the default backend
-(mlx-vlm, auto-started) and scale (480p), hit **Start scan**. When the scan
-finishes, set your render preferences (or keep defaults: blur nudity/gore/
-violence, mute foul-language phrases) and hit **Start render**. Result:
-`Movie_cleaned.mkv` next to the original, which is left untouched.
+Open the GUI, set the source file to your movie, point the **Model server**
+and **Whisper server** rows at your running servers (hit **Scan for models** /
+**Scan** to fill the dropdowns), keep scale at 480p, and hit **Start scan**.
+When the scan finishes, set your render preferences (or keep defaults: blur
+nudity/gore/violence, mute foul-language phrases) and hit **Start render**.
+Result: `Movie_cleaned.mkv` next to the original, which is left untouched.
 
-### Example 2 — Standalone backend (LM Studio / Ollama)
+### Example 2 — Point it at llama.cpp (LLM/VLM) + whisper.cpp
 
-Start your own server first:
+Start your own servers first (or use ones that are already running):
 
 ```bash
-# LM Studio serving on port 1234 (default) — open LM Studio and load the model
-# OR Ollama (different port + model names):
-ollama pull qwen3.5:7b
-ollama serve
+# llama.cpp serving a vision-capable model on port 8080
+./llama-server --host 0.0.0.0 --port 8080 -m Qwen3-VL-8B-Instruct-Q4_K_M.gguf \
+  --mmproj mmproj-model-f16.gguf --jinja
+
+# whisper.cpp server on port 8081
+./server -m models/ggml-base.en.bin
 ```
 
-In the GUI: select **use existing model server**, type the base URL
-(e.g. `http://localhost:11434/v1`), hit **Scan for models**, and pick the VLM
-model from the dropdown. Headless equivalent:
+In the GUI: type the model server URL (e.g. `http://192.168.4.164:8080/v1`),
+hit **Scan for models**, pick the VLM model. Type the whisper server IP
+(e.g. `http://127.0.0.1:8081`), set its **model folder**, hit **Scan**, and
+pick a whisper model — hit **Load** to hot-swap the server to that model.
+Headless equivalent:
 
 ```bash
-python3 nuclearcutter.py scan "/Users/you/Movies/Movie.mkv" \
-  --backend standalone \
-  --base-url http://localhost:11434/v1 \
-  --vlm-model qwen3.5:7b \
-  --text-model qwen3.5:7b \
-  --whisper-model mlx-community/whisper-large-v3-turbo
+python3 nuclearcutter.py scan "/path/to/Movie.mkv" \
+  --base-url http://192.168.4.164:8080/v1 \
+  --vlm-model "Qwen3-VL-8B-Instruct-Q4_K_M" \
+  --whisper-base-url http://127.0.0.1:8081 \
+  --whisper-models-dir /path/to/whisper/models \
+  --whisper-model ggml-base.en
 ```
 
 ### Example 3 — Re-render an old scan with different preferences (no rescan)
@@ -391,7 +392,7 @@ python3 nuclearcutter.py render "/path/to/Movie.mkv" \
 ### Example 4 — Benchmark the model before committing to a scan
 
 In the GUI, click **Test / benchmark VLM** (optionally after setting the
-backend and scale). It builds a 12-frame collection from the movie — including
+model and scale). It builds a 12-frame collection from the movie — including
 frames from known flagged windows if a scan already exists — and runs the real
 sweep + confirm prompts, reporting per-batch time, tokens, pp/gen speed, and
 whether each batch was flagged correctly.

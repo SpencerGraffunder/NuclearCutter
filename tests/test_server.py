@@ -36,7 +36,10 @@ def test_state_snapshot_shape():
 def test_settings_apply_and_validate():
     _, c = make_client()
     ok = c.post("/api/settings", json={"settings": {
-        "backend": "standalone",
+        "base_url": "http://192.168.4.164:8080/v1",
+        "vlm_model": "qwen3-vl-8b",
+        "whisper_base_url": "http://192.168.4.164:8081",
+        "whisper_model": "ggml-small",
         "scale": "720p",
         "sweep_interval": 5,
         "levels": {"nudity": "high"},
@@ -48,8 +51,12 @@ def test_settings_apply_and_validate():
     assert s["sweep_interval"] == 5
     assert s["levels"]["nudity"] == "high"
     assert s["audio_actions"]["foul_language"] == "mute_word"
+    assert s["vlm_model"] == "qwen3-vl-8b"
+    assert s["whisper_model"] == "ggml-small"
+    assert s["whisper_base_url"] == "http://192.168.4.164:8081"
 
-    bad = c.post("/api/settings", json={"settings": {"backend": "bogus"}})
+    # Invalid values still 400.
+    bad = c.post("/api/settings", json={"settings": {"sweep_interval": 0}})
     assert bad.status_code == 400
     bad2 = c.post("/api/settings", json={"settings": {"scale": "4800p"}})
     assert bad2.status_code == 400
@@ -499,15 +506,15 @@ def test_thumbnail_scales_down():
     assert img.width < 640
 
 
-def test_backend_validation_local_model_path(tmp_path):
+def test_scan_requires_vlm_model(tmp_path):
     st, c = make_client()
-    # mlx-vlm with a nonexistent model path -> 400 at scan start.
+    # No VLM model configured -> 400 at scan start (before any server check).
     st.video_path = str(tmp_path / "M.mkv")
     (tmp_path / "M.mkv").write_bytes(b"x")
-    st.model_path = "/nonexistent/model"
+    st.vlm_model = ""
     r = c.post("/api/scan/start")
     assert r.status_code == 400
-    assert "model_path not found" in r.json()["detail"]
+    assert "VLM model" in r.json()["detail"]
 
 
 def test_settings_persist_across_restart(tmp_path):
@@ -537,7 +544,7 @@ def test_corrupt_settings_file_is_ignored(tmp_path):
     path.write_text("{ not valid json")
     st = AppState(settings_path=path)  # must not raise
     assert st.video_path == ""
-    assert st.backend == "mlx-vlm"
+    assert st.base_url  # defaults stay in place
 
 
 def test_settings_load_is_lenient_per_field(tmp_path):

@@ -14,14 +14,11 @@ Run with:  python3 nuclearcutter.py serve   (see README.md)
 
 from __future__ import annotations
 
-import atexit
 import contextlib
 import datetime
 import json
 import os
-import shutil
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,8 +42,9 @@ from nuclearcutter.schema import (
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 from nuclearcutter.utils.model_server import (
-    DEFAULT_MLX_MODEL_PATH, MLX_BASE_URL, ModelServerConfig, _llama_model_id,
-    ensure_backend, is_server_up,
+    DEFAULT_BASE_URL, ModelServerError, WHISPER_DEFAULT_BASE_URL, WhisperConfig,
+    is_server_up, require_server_up, whisper_is_up, whisper_list_models,
+    whisper_load_model,
 )
 from nuclearcutter.utils.system_stats import SystemStats
 
@@ -72,8 +70,6 @@ MEDIA_EXTS = {
     ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".webm", ".ts", ".m2ts",
     ".iso", ".mpg", ".mpeg", ".vob", ".flv", ".ogv",
 }
-
-DEFAULT_WHISPER = "mlx-community/whisper-small-mlx"
 
 _LEVEL_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
 
@@ -195,18 +191,22 @@ class AppState:
     def __init__(self, settings_path: Path | None = None):
         # --- Scan settings -------------------------------------------------
         self.video_path = ""
-        self.backend = "mlx-vlm"  # mlx-vlm | llama.cpp | standalone
         # When enabled, every model prompt + response (with downscaled image
         # thumbnails for vision calls) is streamed to the terminal.
         self.show_prompts = False
-        # Default to the LM Studio MLX folder so "local mlx-vlm" works out of
-        # the box on this machine.
-        self.model_path = DEFAULT_MLX_MODEL_PATH
-        self.mmproj_path = ""
-        self.base_url = MLX_BASE_URL
+        # Remote-only model backend: an already-running OpenAI-compatible
+        # /v1 server (llama.cpp / LM Studio / Ollama / vLLM) that serves the
+        # VLM, text, and summary models. NuclearCutter never spawns a server.
+        self.base_url = DEFAULT_BASE_URL
         self.vlm_model = ""
         self.text_model = ""
-        self.whisper_model = DEFAULT_WHISPER
+        # Whisper transcription server (whisper.cpp). The model is whatever the
+        # server has loaded; the dropdown lists its .bin files and hot-swaps via /load.
+        self.whisper_base_url = WHISPER_DEFAULT_BASE_URL
+        self.whisper_model = ""  # dropdown id (file stem), e.g. "ggml-base.en"
+        # Local path to the server's model folder (needed only for the dropdown
+        # listing / /load; empty = remote server, dropdown disabled).
+        self.whisper_models_dir = "/home/graffunder/whisper-server/src/models"
         self.scale = "480p"
         self.sweep_interval = 2.0
         # --- Render settings ----------------------------------------------
@@ -237,11 +237,12 @@ class AppState:
         self.bench = JobInfo(kind="benchmark")
         self.scan_result: ScanResult | None = None
         self.scan_result_path = ""
-        self.server_proc = None
         self.settings_path: Path | None = None
         self.stats = SystemStats(pid=os.getpid())
         self._backend_up: bool = False
         self._backend_up_at: float = 0.0
+        self._whisper_up: bool = False
+        self._whisper_up_at: float = 0.0
         # Merged terminal stream: every log line from every job, as it comes in.
         self.all_logs: list[dict] = []  # [{"t": "HH:MM:SS", "job": kind, "line": str}, ...]
         # Live timeline during a scan: raw sweep candidates + confirmed
@@ -312,14 +313,13 @@ class AppState:
     def settings_dict(self) -> dict:
         return {
             "video_path": self.video_path,
-            "backend": self.backend,
             "show_prompts": self.show_prompts,
-            "model_path": self.model_path,
-            "mmproj_path": self.mmproj_path,
             "base_url": self.base_url,
             "vlm_model": self.vlm_model,
             "text_model": self.text_model,
+            "whisper_base_url": self.whisper_base_url,
             "whisper_model": self.whisper_model,
+            "whisper_models_dir": self.whisper_models_dir,
             "scale": self.scale,
             "sweep_interval": self.sweep_interval,
             "output_name": self.output_name,
@@ -342,23 +342,18 @@ class AppState:
             self._refresh_loaded_scan()
         if "show_prompts" in payload:
             self.show_prompts = bool(payload["show_prompts"])
-        if "backend" in payload:
-            backend = str(payload["backend"]).strip()
-            if backend not in ("mlx-vlm", "llama.cpp", "standalone"):
-                raise ValueError(f"backend must be mlx-vlm / llama.cpp / standalone, got {backend!r}")
-            self.backend = backend
-        if "model_path" in payload:
-            self.model_path = str(payload["model_path"] or "").strip()
-        if "mmproj_path" in payload:
-            self.mmproj_path = str(payload["mmproj_path"] or "").strip()
         if "base_url" in payload:
-            self.base_url = str(payload["base_url"] or MLX_BASE_URL).strip()
+            self.base_url = str(payload["base_url"] or DEFAULT_BASE_URL).strip()
         if "vlm_model" in payload:
             self.vlm_model = str(payload["vlm_model"] or "").strip()
         if "text_model" in payload:
             self.text_model = str(payload["text_model"] or "").strip()
+        if "whisper_base_url" in payload:
+            self.whisper_base_url = str(payload["whisper_base_url"] or WHISPER_DEFAULT_BASE_URL).strip()
         if "whisper_model" in payload:
-            self.whisper_model = str(payload["whisper_model"] or DEFAULT_WHISPER).strip()
+            self.whisper_model = str(payload["whisper_model"] or "").strip()
+        if "whisper_models_dir" in payload:
+            self.whisper_models_dir = str(payload["whisper_models_dir"] or "").strip()
         if "scale" in payload:
             scale = str(payload["scale"]).strip().lower()
             if scale not in ("360p", "480p", "720p", "1080p"):
@@ -436,32 +431,33 @@ class AppState:
     # Backend + client
     # ------------------------------------------------------------------
 
-    def _ensure_backend(self, job: JobInfo):
-        """Start/verify the model backend; returns (server_proc, llm_config)."""
-        if self.backend == "standalone":
-            cfg = ModelServerConfig(backend="standalone", base_url=self.base_url)
-            proc = ensure_backend(cfg)
-            vlm_model = self.vlm_model
-            text_model = self.text_model
-        elif self.backend == "llama.cpp":
-            cfg = ModelServerConfig(backend="llama.cpp", model_path=self.model_path,
-                                    mmproj_path=self.mmproj_path, base_url=self.base_url)
-            proc = ensure_backend(cfg, log_path=Path(tempfile.gettempdir()) / "nuclearcutter_llama.log")
-            vlm_model = text_model = _llama_model_id(self.model_path)
-        else:  # mlx-vlm
-            cfg = ModelServerConfig(backend="mlx-vlm", model_path=self.model_path,
-                                    base_url=self.base_url)
-            proc = ensure_backend(cfg, log_path=Path(tempfile.gettempdir()) / "nuclearcutter_mlx_vlm.log")
-            # The mlx-vlm server serves the model id as its full filesystem path.
-            vlm_model = text_model = self.model_path
+    def _ensure_backend(self, job: JobInfo) -> LLMConfig:
+        """Verify the remote model backend is reachable; returns llm_config.
 
+        NuclearCutter never spawns a server — it talks to an already-running
+        OpenAI-compatible /v1 server. Raises RuntimeError if it's down.
+        """
         llm_config = LLMConfig(
             base_url=self.base_url,
-            vlm_model=vlm_model,
-            text_model=text_model,
+            vlm_model=self.vlm_model,
+            text_model=self.text_model,
         )
         llm_config.vision_max_pixels = vision_max_pixels_for_scale(self.scale)
-        return proc, llm_config
+        require_server_up(self.base_url)
+        return llm_config
+
+    def _whisper_cfg(self) -> WhisperConfig:
+        """Build the WhisperConfig for the configured whisper.cpp server.
+
+        ``models_dir`` points at the server's model folder so the dropdown can
+        list .bin files and resolve the selected model to an absolute path for
+        /load. Only meaningful when the whisper server is on this host.
+        """
+        return WhisperConfig(
+            base_url=self.whisper_base_url,
+            models_dir=self.whisper_models_dir,
+            model=self.whisper_model,
+        )
 
     def _new_client(self, llm_config: LLMConfig) -> LLMClient:
         client = LLMClient(llm_config)
@@ -668,20 +664,16 @@ class AppState:
         video = Path(self.video_path)
         if not self.video_path or not video.exists():
             raise HTTPException(400, f"video file not found: {self.video_path!r}")
-        if not self.whisper_model:
-            raise HTTPException(400, "whisper_model is required")
-        self._validate_local_backend()
+        if not self.vlm_model:
+            raise HTTPException(400, "a VLM model is required (pick one in Settings)")
+        self._validate_model_backend()
         self._save_settings()  # ensure the current GUI settings are on disk
         self._launch(self.scan, self._run_scan)
         return self.scan
 
-    def _validate_local_backend(self) -> None:
-        if self.backend == "standalone":
-            if not self.vlm_model:
-                raise HTTPException(400, "vlm_model is required when using an existing server")
-            return
-        if not self.model_path or not Path(self.model_path).exists():
-            raise HTTPException(400, f"model_path not found: {self.model_path!r}")
+    def _validate_model_backend(self) -> None:
+        """The model server must be reachable before a job that needs it starts."""
+        require_server_up(self.base_url)
 
     def _run_scan(self) -> None:
         job = self.scan
@@ -693,10 +685,9 @@ class AppState:
             from nuclearcutter.utils.ffmpeg import probe_duration
 
             job.duration = probe_duration(video)
-            job.phase = "starting backend"
-            job.message = f"Starting {self.backend} backend..."
-            proc, llm_config = self._ensure_backend(job)
-            self.server_proc = proc
+            job.phase = "connecting backend"
+            job.message = "Connecting to the model server..."
+            llm_config = self._ensure_backend(job)
 
             def _client_factory(cfg):
                 # Attach the GUI's usage + show-prompts hooks to EVERY client
@@ -803,7 +794,7 @@ class AppState:
                 title=video.stem,
                 year=None,
                 progress_callback=_progress,
-                whisper_model=self.whisper_model,
+                whisper_cfg=self._whisper_cfg(),
                 sweep_interval=self.sweep_interval,
                 status_path=status_path,
                 partial_result_path=partial_path,
@@ -970,8 +961,7 @@ class AppState:
         try:
             from nuclearcutter.render.summarize import SegmentSummarizer, SummaryConfig
 
-            proc, llm_config = self._ensure_backend(job)
-            self.server_proc = proc
+            llm_config = self._ensure_backend(job)
             llm_config.summary_model = self.summary_model
             llm_config.summary_frames = self.summary_frames
             llm_config.summary_max_context = self.summary_max_context
@@ -1096,7 +1086,7 @@ class AppState:
         video = Path(self.video_path)
         if not self.video_path or not video.exists():
             raise HTTPException(400, f"video file not found: {self.video_path!r}")
-        self._validate_local_backend()
+        self._validate_model_backend()
         self._save_settings()  # ensure the current GUI settings are on disk
         self._launch(self.bench, self._run_benchmark)
         return self.bench
@@ -1105,11 +1095,10 @@ class AppState:
         job = self.bench
         video = Path(self.video_path)
         try:
-            job.phase = "starting backend"
-            job.message = f"Starting {self.backend} backend..."
-            self._log(job, f"starting {self.backend} backend...")
-            proc, llm_config = self._ensure_backend(job)
-            self.server_proc = proc
+            job.phase = "connecting backend"
+            job.message = "Connecting to the model server..."
+            self._log(job, "connecting to the model server...")
+            llm_config = self._ensure_backend(job)
             client = self._new_client(llm_config)
             client.test_connection()
             attach_usage_hook(client)
@@ -1225,6 +1214,9 @@ class AppState:
         if now - self._backend_up_at >= 5.0:
             self._backend_up_at = now
             self._backend_up = is_server_up(self.base_url)
+        if now - self._whisper_up_at >= 5.0:
+            self._whisper_up_at = now
+            self._whisper_up = whisper_is_up(self.whisper_base_url)
         return {
             "settings": self.settings_dict(),
             "jobs": {
@@ -1237,9 +1229,10 @@ class AppState:
             "system": self.stats.sample(),
             "model": self.model_stats_dict(),
             "server": {
-                "backend": self.backend,
                 "base_url": self.base_url,
                 "backend_up": self._backend_up,
+                "whisper_base_url": self.whisper_base_url,
+                "whisper_up": self._whisper_up,
                 "settings_file": str(self.settings_path) if self.settings_path else "",
             },
         }
@@ -1293,6 +1286,45 @@ def create_app(state: AppState | None = None) -> FastAPI:
         client = LLMClient(LLMConfig(base_url=url))
         models = client.list_models()
         return {"base_url": url, "reachable": bool(models), "models": models}
+
+    @app.get("/api/whisper-models")
+    def api_whisper_models(base_url: str = "", models_dir: str = ""):
+        """List whisper model files for the whisper dropdown.
+
+        The whisper.cpp server has no model-list endpoint, so we list the .bin
+        files in a directory that lives on the machine running that server
+        (defaults to the configured `whisper_models_dir`). `base_url` is
+        echoed back so the GUI can show which server the list is for.
+        """
+        cfg = WhisperConfig(
+            base_url=(base_url or st.whisper_base_url).strip(),
+            models_dir=(models_dir or st.whisper_models_dir).strip(),
+        )
+        return {
+            "base_url": cfg.base_url,
+            "models_dir": cfg.models_dir,
+            "up": whisper_is_up(cfg.base_url),
+            "models": whisper_list_models(cfg),
+        }
+
+    @app.post("/api/whisper/load")
+    def api_whisper_load(model: str = ""):
+        """Hot-swap the loaded whisper model on the configured server.
+
+        Sends the model id (or absolute path) to the server's /load endpoint,
+        which loads the model whose path it is given. A failed /load can leave
+        the server's internal state stuck — the error message says how to recover.
+        """
+        model = (model or "").strip()
+        if not model:
+            raise HTTPException(400, "model is required")
+        try:
+            resp = whisper_load_model(st._whisper_cfg(), model)
+        except ModelServerError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        st.whisper_model = model
+        st._save_settings()
+        return {"ok": True, "model": model, "response": resp}
 
     @app.post("/api/settings")
     def api_settings(body: SettingsBody):
@@ -1428,16 +1460,6 @@ def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
     if not INDEX_HTML.exists():
         print(f"warning: UI file missing at {INDEX_HTML}", file=__import__("sys").stderr)
 
-    def _cleanup():
-        proc = STATE.server_proc
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=10)
-            except Exception:
-                pass
-
-    atexit.register(_cleanup)
     local_url = f"http://localhost:{port}"
     net_url = f"http://<this-machine-ip>:{port}"
     print("=" * 64)

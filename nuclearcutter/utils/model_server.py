@@ -1,96 +1,54 @@
 """
-Manages the local VLM/text inference backend.
+Talks to the inference backends NuclearCutter uses — which are ALWAYS
+already-running, remote (or local-but-external) servers. NuclearCutter never
+spawns its own inference server:
 
-Three backends:
-- `mlx-vlm` (default): NuclearCutter spawns its own `mlx_vlm.server` on
-  localhost:1234 and serves the configured model in-process. Fast, self-contained,
-  and optimized for this workload (downscaled images, KV-cache quantization,
-  continuous batching). No external app needed.
-- `llama.cpp`: spawns the locally-installed `llama-server` binary serving a
-  .gguf model on the same port. Optionally with `--mmproj` for vision.
-- `standalone`: talk to an already-running OpenAI-compatible server (LM Studio,
-  Ollama, a manually-started mlx-vlm/llama.cpp server, etc.) via `base_url`.
+- OpenAI-compatible /v1 server (llama.cpp, LM Studio, Ollama, vLLM, ...) —
+  one server can serve the VLM, the text model, and the summary model at once
+  (each selected by model id from the /v1/models dropdown).
+- whisper.cpp transcription server (`whisper-server`) — one model loaded at a
+  time, hot-swappable via its /load endpoint; the model dropdown lists the
+  .bin files in a directory that lives on the same machine as that server.
 
-All three speak the same OpenAI-compatible `/v1` API on port 1234 by default,
-so switching backends does not require changing any other configuration.
+All configuration is a base URL + model id (see docs/SPEC.md section 4.1).
 """
 
 from __future__ import annotations
 
-import logging
-import shutil
+import os
+import re
 import subprocess
-import sys
-import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 import requests
 
-# The model path LM Studio was configured with, used by default for the mlx-vlm
-# backend so the exact same model file is served. Overridable via config.
-DEFAULT_MLX_MODEL_PATH = "/Users/spencer/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit"
+# OpenAI-compatible base URL default (llama.cpp/LM Studio/Ollama /v1).
+DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
 
-# Where the mlx-vlm server listens. Kept identical to the old LM Studio default
-# so `base_url` never needs to change between backends.
-MLX_SERVER_HOST = "127.0.0.1"
-MLX_SERVER_PORT = 1234
-MLX_BASE_URL = f"http://{MLX_SERVER_HOST}:{MLX_SERVER_PORT}/v1"
+# whisper.cpp server defaults for this deployment.
+WHISPER_DEFAULT_BASE_URL = "http://127.0.0.1:8081"
+WHISPER_DEFAULT_INFERENCE_PATH = "/audio/transcriptions"
+# Where the whisper-server's .bin model files live (on the machine running the
+# server). The dropdown lists these; /load hot-swaps the loaded model.
+WHISPER_DEFAULT_MODELS_DIR = "/home/graffunder/whisper-server/src/models"
 
-# Speed knobs for the mlx-vlm server (see mlx_vlm.server.cli).
-MLX_KV_BITS = 4  # KV-cache quantization (TurboQuant-ish); ~3% faster, low cost
-MLX_MAX_TOKENS = 2048  # per-request generation cap on the server side
-# Max KV cache (context) in tokens. The model's config advertises 256K, but our
-# largest call (confirm: ~10.1K input + 2048 max output) is ~12.2K. Capping here
-# keeps VRAM down — each KV token costs meaningful unified memory at 9B scale —
-# while leaving comfortable headroom. 16K safely covers the worst case.
-MLX_MAX_KV_SIZE = 16384
-
-# llama.cpp server context size (same rationale as MLX_MAX_KV_SIZE).
-LLAMA_CONTEXT = 16384
+GGML_BIN_RE = re.compile(r"ggml-[A-Za-z0-9._\-]+\.bin$")
 
 
 @dataclass
-class ModelServerConfig:
-    backend: str = "mlx-vlm"  # "mlx-vlm" | "llama.cpp" | "standalone"
-    model_path: str = DEFAULT_MLX_MODEL_PATH  # mlx-vlm backend: HF/MLX model dir; llama.cpp: .gguf file
-    mmproj_path: str = ""  # llama.cpp vision projector (.gguf), enables image input
-    base_url: str = MLX_BASE_URL  # standalone backend (and where mlx-vlm listens)
-    auto_install: bool = True  # pip-install mlx-vlm if missing (mlx-vlm backend)
+class WhisperConfig:
+    base_url: str = WHISPER_DEFAULT_BASE_URL  # e.g. http://192.168.4.164:8081
+    inference_path: str = WHISPER_DEFAULT_INFERENCE_PATH  # the server's --inference-path
+    model: str = ""  # model id (file stem, e.g. "ggml-base.en")
+    models_dir: str = WHISPER_DEFAULT_MODELS_DIR  # for the model dropdown listing
+    timeout: int = 3600  # a 3-hour film is one multipart request; be generous
 
 
 class ModelServerError(RuntimeError):
     pass
 
 
-def _ensure_mlx_vlm_installed() -> None:
-    """Import mlx_vlm, installing it via pip if missing (when allowed)."""
-    try:
-        import mlx_vlm  # noqa: F401
-        return
-    except ImportError:
-        pass
-
-    raise ModelServerError(
-        "mlx-vlm is not installed. Install it into this environment with:\n"
-        "    pip install mlx-vlm\n"
-        "or set model_backend = \"standalone\" in config.toml to use an "
-        "already-running server (LM Studio / Ollama / a manual mlx-vlm server)."
-    )
-
-
-def _llama_model_id(model_path: str) -> str:
-    """The model id llama.cpp's /v1/models will report for a .gguf file.
-
-    Uses the file stem (e.g. "Qwen3-VL-8B-Instruct-Q4_K_M.gguf" -> that stem),
-    so the GUI can pre-select it as the VLM/text model id.
-    """
-    return Path(model_path).stem
-
-
-def _command_exists(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
-
+# ------------------------------------------------------------------ OpenAI /v1
 
 def is_server_up(base_url: str) -> bool:
     """Return True if an OpenAI-compatible server is answering on base_url."""
@@ -101,8 +59,24 @@ def is_server_up(base_url: str) -> bool:
         return False
 
 
+def list_models(base_url: str) -> list[str]:
+    """Model ids advertised by base_url's /v1/models ([] when unreachable)."""
+    try:
+        r = requests.get(f"{base_url}/models", timeout=5)
+        r.raise_for_status()
+    except requests.RequestException:
+        return []
+    try:
+        data = r.json().get("data", [])
+        return [m["id"] for m in data if "id" in m]
+    except ValueError:
+        return []
+
+
 def wait_for_server(base_url: str, timeout: float = 120.0, interval: float = 1.0) -> bool:
     """Poll base_url until the server answers or timeout elapses."""
+    import time
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         if is_server_up(base_url):
@@ -111,126 +85,89 @@ def wait_for_server(base_url: str, timeout: float = 120.0, interval: float = 1.0
     return False
 
 
-def _python() -> str:
-    """Path to the current Python interpreter (venv-aware)."""
-    return sys.executable
-
-
-def start_mlx_vlm_server(config: ModelServerConfig, log_path: Path | None = None) -> subprocess.Popen:
-    """Spawn `python -m mlx_vlm.server` serving the configured model on the
-    shared port, and wait until it answers. Returns the Popen handle so the
-    caller can terminate it when done."""
-    if not config.model_path:
-        raise ModelServerError("model_path is required for the mlx-vlm backend (config.toml: model_path)")
-    if not Path(config.model_path).exists():
+def require_server_up(base_url: str, label: str = "model server") -> None:
+    """Raise a clear error when the configured OpenAI-compatible server is
+    unreachable — the one preflight check NuclearCutter does instead of
+    starting the server itself."""
+    if not is_server_up(base_url):
         raise ModelServerError(
-            f"model_path not found: {config.model_path}\n"
-            "Set model_path in config.toml to the directory containing the MLX "
-            "model (e.g. the LM Studio MLX folder you already use)."
+            f"No {label} answering at {base_url} (expected an OpenAI-compatible "
+            f"/v1 server — llama.cpp, LM Studio, Ollama, vLLM, ...). "
+            f"Start it or fix the base URL."
         )
 
-    _ensure_mlx_vlm_installed()
 
-    log_target = open(log_path, "w") if log_path else subprocess.DEVNULL
-    proc = subprocess.Popen(
-        [
-            _python(), "-m", "mlx_vlm.server",
-            "--host", MLX_SERVER_HOST,
-            "--port", str(MLX_SERVER_PORT),
-            "--model", config.model_path,
-            "--kv-bits", str(MLX_KV_BITS),
-            "--max-tokens", str(MLX_MAX_TOKENS),
-            "--max-kv-size", str(MLX_MAX_KV_SIZE),
-        ],
-        stdout=log_target,
-        stderr=subprocess.STDOUT,
-    )
+# ------------------------------------------------------------------ whisper.cpp
 
-    if not wait_for_server(config.base_url, timeout=180):
-        proc.terminate()
-        raise ModelServerError(
-            f"mlx-vlm server did not start on {config.base_url}. Check the log: {log_path}"
-        )
-    return proc
+def whisper_is_up(cfg: WhisperConfig | str) -> bool:
+    """True if the whisper server's /health answers ok (or "loading model").
 
-
-def start_llama_cpp_server(config: ModelServerConfig, log_path: Path | None = None) -> subprocess.Popen:
-    """Spawn the local `llama-server` binary serving a .gguf model, and wait
-    until it answers on the shared OpenAI-compatible port.
-
-    Returns the Popen handle so the caller can terminate it when done. The
-    model id the server reports is the .gguf file's stem (see _llama_model_id),
-    which is also what the GUI pre-selects as vlm/text model.
+    Accepts a WhisperConfig or a plain base-url string.
     """
-    binary = shutil.which("llama-server") or shutil.which("llama-cli")
-    if not binary:
-        raise ModelServerError(
-            "llama-server not found on PATH. Install llama.cpp first, e.g.\n"
-            "    brew install llama.cpp\n"
-            "or pick another backend in the web GUI."
-        )
-    if not config.model_path or not Path(config.model_path).exists():
-        raise ModelServerError(
-            f"model_path not found: {config.model_path!r}\n"
-            "Set model_path to a .gguf file for the llama.cpp backend."
-        )
-
-    cmd = [
-        binary, "-m", config.model_path,
-        "--host", MLX_SERVER_HOST,
-        "--port", str(MLX_SERVER_PORT),
-        "--alias", _llama_model_id(config.model_path),
-        "-c", str(LLAMA_CONTEXT),
-        "-ngl", "99",  # offload all layers to Metal (Apple Silicon)
-        "--no-webui",
-    ]
-    if config.mmproj_path:
-        if not Path(config.mmproj_path).exists():
-            raise ModelServerError(f"mmproj_path not found: {config.mmproj_path!r}")
-        cmd += ["--mmproj", config.mmproj_path]
-
-    log_target = open(log_path, "w") if log_path else subprocess.DEVNULL
-    proc = subprocess.Popen(cmd, stdout=log_target, stderr=subprocess.STDOUT)
-
-    if not wait_for_server(config.base_url, timeout=180):
-        proc.terminate()
-        raise ModelServerError(
-            f"llama-server did not start on {config.base_url}. Check the log: {log_path}"
-        )
-    return proc
+    base_url = cfg.base_url if isinstance(cfg, WhisperConfig) else cfg
+    try:
+        r = requests.get(f"{base_url.rstrip('/')}/health", timeout=3)
+        return r.status_code in (200, 503)
+    except requests.RequestException:
+        return False
 
 
-def ensure_backend(config: ModelServerConfig, log_path: Path | None = None):
-    """Ensure the configured backend is running.
+def whisper_list_models(cfg: WhisperConfig) -> list[str]:
+    """List whisper model files available for the dropdown.
 
-    For `mlx-vlm` / `llama.cpp`: start (and keep a handle on) our own server,
-    returning it. For `standalone`: just verify something answers on base_url,
-    raising a clear error if not. Returns a cleanup callable (or None if
-    nothing to manage).
+    The whisper.cpp server has no model-list endpoint, so we list the .bin
+    files in `cfg.models_dir` — a directory on the machine that runs the
+    server (it must be readable by the NuclearCutter service user; on this
+    box it is the same machine). Returns model ids (file stems, e.g.
+    "ggml-base.en") sorted for stable dropdown order.
     """
-    if config.backend == "standalone":
-        if not is_server_up(config.base_url):
+    try:
+        names = os.listdir(cfg.models_dir)
+    except OSError:
+        return []
+    ids = []
+    for name in names:
+        m = GGML_BIN_RE.fullmatch(name)
+        if m:
+            ids.append(name[:-4])  # strip .bin -> "ggml-base.en"
+    return sorted(ids)
+
+
+def whisper_load_model(cfg: WhisperConfig, model_id: str) -> str:
+    """Hot-swap the loaded whisper model via the server's /load endpoint.
+
+    `model_id` is a dropdown id (file stem) or an explicit path; it is sent
+    as the `model` form field, which the server resolves against its own
+    filesystem. Returns the server's response text. Raises ModelServerError
+    on failure. NOTE: /load restarts the server's model under its mutex —
+    other clients of that server (e.g. Storyteller) see a brief interruption.
+    """
+    # The whisper-server /load handler reads a multipart FILE field named
+    # `model` and loads the file whose CONTENT is the model path string.
+    # An absolute path is sent verbatim; a dropdown id (file stem, e.g.
+    # "ggml-base.en") is resolved to an absolute path inside models_dir,
+    # because the server must be able to find the file on its own filesystem.
+    path = model_id
+    if not path.startswith("/"):
+        candidate = os.path.join(cfg.models_dir, model_id + ".bin")
+        if not os.path.exists(candidate):
             raise ModelServerError(
-                f"No server answering at {config.base_url}.\n"
-                "Start one (e.g. LM Studio, Ollama, or `python -m mlx_vlm.server "
-                f"--model <path> --port {MLX_SERVER_PORT}`) or set "
-                'model_backend = "mlx-vlm" in config.toml to auto-start it.'
+                f"whisper model {model_id!r} not found (looked for {candidate}). "
+                f"Check the whisper server's model directory."
             )
-        return None
-
-    if config.backend not in ("mlx-vlm", "llama.cpp"):
-        raise ModelServerError(f"Unknown model_backend: {config.backend!r}")
-
-    if is_server_up(config.base_url):
-        # Something is already on the port (e.g. a leftover, or the user started
-        # one manually). Reuse it rather than fighting over the port.
-        logging.warning(
-            "A server is already answering on %s — reusing it for backend '%s'.",
-            config.base_url, config.backend,
+        path = candidate
+    try:
+        r = requests.post(
+            f"{cfg.base_url.rstrip('/')}/load",
+            files={"model": ("model.bin", path.encode("utf-8"), "text/plain")},
+            timeout=600,
         )
-        return None
-
-    if config.backend == "llama.cpp":
-        return start_llama_cpp_server(config, log_path=log_path)
-
-    return start_mlx_vlm_server(config, log_path=log_path)
+    except requests.RequestException as exc:
+        raise ModelServerError(f"whisper /load request failed: {exc}") from exc
+    if not r.ok:
+        raise ModelServerError(
+            f"whisper /load failed ({r.status_code}): {r.text[:300]}\n"
+            "NOTE: a failed /load can leave the server's internal state stuck; "
+            "restart whisper-server if /health stops answering."
+        )
+    return r.text.strip()

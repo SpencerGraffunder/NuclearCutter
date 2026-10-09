@@ -1,0 +1,16 @@
+[Unit]
+Description=NuclearCutter web GUI (movie content censoring)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=graffunder
+WorkingDirectory=/home/graffunder/ai-workspace/NuclearCutter
+ExecStart=/home/graffunder/ai-workspace/NuclearCutter/.venv/bin/python -m nuclearcutter.cli serve --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

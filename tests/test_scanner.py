@@ -228,7 +228,7 @@ def test_scan_skips_transcription_when_cache_valid(monkeypatch, mock_video):
 
     llm_config = LLMConfig(base_url="http://localhost:9999/v1", vlm_model="m", text_model="m")
     events = []
-    scan(mock_video, llm_config=llm_config, whisper_model="wm",
+    scan(mock_video, llm_config=llm_config, whisper_cfg=None,
          progress_callback=lambda stage, detail: events.append((stage, detail)))
     assert ("transcribing", 1.0) in events, "cached transcript must report 100%"
 
@@ -295,7 +295,7 @@ def test_scan_reports_transcribe_100_when_done(monkeypatch, mock_video):
 
     llm_config = LLMConfig(base_url="http://localhost:9999/v1", vlm_model="m", text_model="m")
     events = []
-    scan(mock_video, llm_config=llm_config, whisper_model="wm",
+    scan(mock_video, llm_config=llm_config, whisper_cfg=None,
          progress_callback=lambda s, d: events.append((s, d)))
     assert ("transcribing", 1.0) in events
 

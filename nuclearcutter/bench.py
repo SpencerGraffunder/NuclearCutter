@@ -54,7 +54,7 @@ def _timings_of(data: dict) -> dict:
     """Extract pp/gen speeds from a server response, when the server reports them.
 
     llama.cpp and LM Studio include a `timings` object with prompt_n/prompt_ms
-    and predicted_n/predicted_ms; mlx-vlm does not. Returns {} when absent.
+    and predicted_n/predicted_ms; some backends do not. Returns {} when absent.
     """
     t = data.get("timings") or {}
     out = {}

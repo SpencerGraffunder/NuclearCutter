@@ -18,17 +18,17 @@ CLI flags for the headless commands). VLM prompts come from prompts.json
 from __future__ import annotations
 
 import argparse
-import atexit
 import sys
-import tempfile
 from pathlib import Path
 
 from nuclearcutter.render.renderer import build_output_path, render as render_pass
 from nuclearcutter.schema import AudioAction, Preferences, ScanResult, SeverityLevel, VisualAction
 from nuclearcutter.utils.llm_client import LLMConfig
-from nuclearcutter.utils.model_server import DEFAULT_MLX_MODEL_PATH, MLX_BASE_URL, ModelServerConfig, ensure_backend
+from nuclearcutter.utils.model_server import (
+    DEFAULT_BASE_URL, WHISPER_DEFAULT_BASE_URL, WHISPER_DEFAULT_MODELS_DIR,
+    WhisperConfig, require_server_up,
+)
 
-DEFAULT_WHISPER = "mlx-community/whisper-small-mlx"
 DEFAULT_SCALE = "480p"
 
 
@@ -77,47 +77,28 @@ def _save_result_with_fallback(result: ScanResult, out_path: Path) -> Path:
     return saved_to
 
 
-def _ensure_server(cfg: ModelServerConfig):
-    """Start (or verify) the inference backend. Returns a cleanup callable or None."""
-    log_path = Path(tempfile.gettempdir()) / "nuclearcutter_mlx_vlm.log"
-    proc = ensure_backend(cfg, log_path=log_path)
-    if proc is not None:
-        atexit.register(lambda p=proc: (p.terminate(), p.wait(timeout=10)))
-    return proc
-
-
 def cmd_scan(args: argparse.Namespace) -> int:
     video_path = Path(args.video).resolve()
     if not video_path.exists():
         print(f"error: file not found: {video_path}", file=sys.stderr)
         return 1
 
-    server_cfg = ModelServerConfig(
-        backend=args.backend,
-        model_path=args.model_path or DEFAULT_MLX_MODEL_PATH,
-        base_url=args.base_url or MLX_BASE_URL,
-    )
-    print(f"Starting model backend: {args.backend} ...")
+    base_url = args.base_url or DEFAULT_BASE_URL
+    print(f"Connecting to model server: {base_url} ...")
     try:
-        _ensure_server(server_cfg)
+        require_server_up(base_url)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    llm_config = LLMConfig(base_url=server_cfg.base_url, vlm_model=None, text_model=None)
-    if server_cfg.backend == "mlx-vlm":
-        llm_config.vlm_model = llm_config.text_model = server_cfg.model_path
-    elif server_cfg.backend == "llama.cpp":
-        from nuclearcutter.utils.model_server import _llama_model_id
+    vlm_model = args.vlm_model
+    text_model = args.text_model or vlm_model
+    if not vlm_model:
+        print("error: --vlm-model is required (the VLM model id served by --base-url)",
+              file=sys.stderr)
+        return 1
 
-        llm_config.vlm_model = llm_config.text_model = _llama_model_id(server_cfg.model_path)
-    else:  # standalone
-        if not args.vlm_model or not args.text_model:
-            print("error: --vlm-model and --text-model are required with backend=standalone",
-                  file=sys.stderr)
-            return 1
-        llm_config.vlm_model = args.vlm_model
-        llm_config.text_model = args.text_model
+    llm_config = LLMConfig(base_url=base_url, vlm_model=vlm_model, text_model=text_model)
 
     def progress(stage: str, detail):
         if detail is None:
@@ -142,13 +123,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     from nuclearcutter.scan.scanner import scan as scan_pass
 
+    whisper_cfg = WhisperConfig(
+        base_url=args.whisper_base_url or WHISPER_DEFAULT_BASE_URL,
+        models_dir=args.whisper_models_dir or WHISPER_DEFAULT_MODELS_DIR,
+        model=args.whisper_model or "",
+    )
+
     result: ScanResult = scan_pass(
         video_path,
         llm_config=llm_config,
         title=args.title or Path(video_path).stem,
         year=args.year,
         progress_callback=progress,
-        whisper_model=args.whisper_model or DEFAULT_WHISPER,
+        whisper_cfg=whisper_cfg,
         sweep_interval=args.sweep_interval,
         status_path=status_path,
         partial_result_path=out_path,
@@ -227,7 +214,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             from nuclearcutter.render.summarize import SegmentSummarizer, SummaryConfig
             from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 
-            base_url = args.base_url or "http://localhost:1234/v1"
+            base_url = args.base_url or DEFAULT_BASE_URL
             cfg = LLMConfig(
                 base_url=base_url,
                 vlm_model=args.summary_model,
@@ -298,12 +285,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--output", "-o", help="Output path for scan JSON (default: MOVIE.nuclearcutter.json)")
     p_scan.add_argument("--title", help="Movie title, stored in the scan file for reference")
     p_scan.add_argument("--year", type=int, help="Release year, stored in the scan file for reference")
-    p_scan.add_argument("--backend", choices=["mlx-vlm", "llama.cpp", "standalone"], default="mlx-vlm")
-    p_scan.add_argument("--model-path", default=None, help="Local model path (mlx-vlm dir or llama.cpp .gguf)")
-    p_scan.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL (standalone)")
-    p_scan.add_argument("--vlm-model", default=None, help="VLM model id (required with --backend standalone)")
-    p_scan.add_argument("--text-model", default=None, help="Text model id (required with --backend standalone)")
-    p_scan.add_argument("--whisper-model", default=None, help=f"Whisper model (default: {DEFAULT_WHISPER})")
+    p_scan.add_argument("--base-url", default=None,
+                        help=f"OpenAI-compatible /v1 model server (default: {DEFAULT_BASE_URL})")
+    p_scan.add_argument("--vlm-model", required=True,
+                        help="VLM model id served by --base-url (required)")
+    p_scan.add_argument("--text-model", default=None,
+                        help="Text model id (default: same as --vlm-model)")
+    p_scan.add_argument("--whisper-base-url", default=None,
+                        help=f"whisper.cpp transcription server (default: {WHISPER_DEFAULT_BASE_URL})")
+    p_scan.add_argument("--whisper-model", default=None,
+                        help="whisper model id (file stem) or absolute path; empty = use whatever the server has loaded")
+    p_scan.add_argument("--whisper-models-dir", default=None,
+                        help=f"dir of the whisper server's .bin models (default: {WHISPER_DEFAULT_MODELS_DIR})")
     p_scan.add_argument("--scale", choices=["360p", "480p", "720p", "1080p"], default=None,
                         help=f"Scale frames before VLM (default: {DEFAULT_SCALE})")
     p_scan.add_argument("--sweep-interval", type=float, default=2.0,
@@ -350,8 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_render.add_argument("--summary-max-context", type=int, default=30000,
                           help="Assumed loaded context window (tokens) for the summary model when the server "
                                "reports none (default: 30000)")
-    p_render.add_argument("--base-url", default="http://localhost:1234/v1",
-                          help="OpenAI-compatible API base URL for the summary model (default: http://localhost:1234/v1)")
+    p_render.add_argument("--base-url", default=DEFAULT_BASE_URL,
+                          help=f"OpenAI-compatible /v1 model server for the summary model (default: {DEFAULT_BASE_URL})")
     p_render.set_defaults(func=cmd_render)
 
     return parser

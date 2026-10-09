@@ -52,10 +52,6 @@
   button.danger { color: var(--red); border-color: #7a3030; background: #230c0c; }
   button.danger:hover { background: #3a1414; }
   .btn-group { display: flex; gap: 10px; margin: 10px 0 18px; flex-wrap: wrap; }
-  .radio-group { display: flex; gap: 14px; align-items: center; }
-  .radio-group label { min-width: 0; display: flex; align-items: center; gap: 5px; cursor: pointer; }
-  #backend-options.blocked { pointer-events: none; opacity: .75; }
-  #backend-options.blocked label { cursor: default; }
   .hint { color: var(--text-dim); font-size: 11px; }
   .bar-wrap { background: #0d0d0d; border: 1px solid var(--border); height: 16px; border-radius: 3px; position: relative; overflow: hidden; flex: 1; }
   .bar { height: 100%; background: var(--green); box-shadow: 0 0 10px rgba(0,255,65,.7); transition: width .5s; }
@@ -169,33 +165,24 @@
       <input type="text" id="video_path" placeholder="/path/to/Movie.mkv">
       <button id="btn-browse">📁 Browse</button></div>
 
-    <div class="row"><label>Model backend</label>
-      <div class="radio-group" id="backend-options">
-        <label><input type="radio" name="backend" value="mlx-vlm" checked> launch local mlx-vlm</label>
-        <label><input type="radio" name="backend" value="llama.cpp"> launch local llama.cpp</label>
-        <label><input type="radio" name="backend" value="standalone"> use existing model server</label>
-      </div>
-    </div>
-
-    <div id="opt-local" class="row"><label>Local model path</label>
-      <input type="text" id="model_path" placeholder="/Users/you/.lmstudio/models/lmstudio-community/Qwen3.5-9B-MLX-4bit">
-      <button id="btn-browse-model">📁 Browse</button></div>
-    <div id="opt-llama" class="row hidden"><label>llama.cpp .gguf path</label>
-      <input type="text" id="llama_model_path" placeholder="/path/to/model-Q4_K_M.gguf">
-      <button id="btn-browse-llama">📁 Browse</button></div>
-    <div id="opt-llama-mmproj" class="row hidden"><label>Vision projector (--mmproj)</label>
-      <input type="text" id="mmproj_path" placeholder="/path/to/mmproj-*.gguf (optional)">
-      <button id="btn-browse-mmproj">📁 Browse</button></div>
     <div id="opt-remote">
-      <div class="row"><label>Server IP / base URL</label>
-        <input type="text" id="base_url" value="http://localhost:1234/v1">
+      <div class="row"><label>Model server IP / URL</label>
+        <input type="text" id="base_url" value="http://127.0.0.1:8080/v1" placeholder="http://IP:PORT/v1">
         <button id="btn-scan-models">Scan for models</button></div>
       <div class="row"><label>VLM model</label><select id="vlm_model"></select></div>
       <div class="row"><label>Text model</label><select id="text_model"></select></div>
     </div>
 
-    <div class="row"><label>Whisper model</label>
-      <input type="text" id="whisper_model" value="mlx-community/whisper-small-mlx"></div>
+    <div id="opt-whisper">
+      <div class="row"><label>Whisper server IP</label>
+        <input type="text" id="whisper_base_url" value="http://127.0.0.1:8081" placeholder="http://IP:PORT"></div>
+      <div class="row"><label>Whisper model folder</label>
+        <input type="text" id="whisper_models_dir" value="/home/graffunder/whisper-server/src/models" placeholder="/path/to/whisper/models"></div>
+      <div class="row"><label>Whisper model</label>
+        <button id="btn-scan-whisper" title="List .bin models in the folder above">Scan</button>
+        <select id="whisper_model"></select>
+        <button id="btn-whisper-load" title="Hot-swap the whisper server's loaded model to this one. Shared server — other users see a brief interruption.">Load</button></div>
+    </div>
     <div class="row"><label>Scale frames before VLM</label>
       <select id="scale">
         <option value="360p">360p</option>
@@ -456,15 +443,13 @@ function fillModelDropdownWithNone(sel, models) {
 function setDisabled(ids, disabled) {
   ids.forEach(id => { const el = $(id); if (el) el.disabled = disabled; });
 }
-const SCAN_SETTING_IDS = ["video_path","model_path","llama_model_path","mmproj_path","base_url",
-  "vlm_model","text_model","whisper_model","scale","sweep_interval",
+const SCAN_SETTING_IDS = ["video_path","base_url","vlm_model","text_model",
+  "whisper_base_url","whisper_models_dir","whisper_model","scale","sweep_interval",
   "summary_model","summary_frames","summary_max_context"];
 const RENDER_SETTING_IDS = ["output_name","scan_path","blur_strength","mute_padding","blur_padding"];
 function setScanSettingsDisabled(d) {
   setDisabled(SCAN_SETTING_IDS, d);
-  // Block clicks on the backend radios without `disabled`, so the selected
-  // radio keeps its normal checked appearance while a scan is running.
-  $("backend-options").classList.toggle("blocked", d);
+  setDisabled(["btn-scan-models", "btn-scan-whisper", "btn-whisper-load"], d);
 }
 function setRenderSettingsDisabled(d) {
   setDisabled(RENDER_SETTING_IDS, d);
@@ -490,13 +475,12 @@ function settingsChanged() {
 function collectSettings() {
   return {
     video_path: $("video_path").value,
-    backend: document.querySelector("input[name=backend]:checked").value,
     show_prompts: $("show_prompts").checked,
-    model_path: backendLocal() ? $("model_path").value : $("llama_model_path").value,
-    mmproj_path: $("mmproj_path").value,
     base_url: $("base_url").value,
     vlm_model: $("vlm_model").value,
     text_model: $("text_model").value,
+    whisper_base_url: $("whisper_base_url").value,
+    whisper_models_dir: $("whisper_models_dir").value,
     whisper_model: $("whisper_model").value,
     scale: $("scale").value,
     sweep_interval: parseFloat($("sweep_interval").value) || 2,
@@ -513,7 +497,6 @@ function collectSettings() {
     audio_actions: matrixValues("audio"),
   };
 }
-function backendLocal() { return document.querySelector("input[name=backend]:checked").value === "mlx-vlm"; }
 function matrixValues(key) {
   const out = {};
   document.querySelectorAll(`select[data-key="${key}"]`).forEach(s => out[s.dataset.cat] = s.value);
@@ -521,15 +504,13 @@ function matrixValues(key) {
 }
 function applySettingsToUI(s, skipSave) {
   $("video_path").value = s.video_path || "";
-  document.querySelectorAll("input[name=backend]").forEach(r => { r.checked = (r.value === s.backend); });
   $("show_prompts").checked = !!s.show_prompts;
-  $("model_path").value = s.model_path || "";
-  $("llama_model_path").value = s.model_path || "";
-  $("mmproj_path").value = s.mmproj_path || "";
-  $("base_url").value = s.base_url || "http://localhost:1234/v1";
+  $("base_url").value = s.base_url || "http://127.0.0.1:8080/v1";
   setSelectValue($("vlm_model"), s.vlm_model);
   setSelectValue($("text_model"), s.text_model);
-  $("whisper_model").value = s.whisper_model || "";
+  $("whisper_base_url").value = s.whisper_base_url || "http://127.0.0.1:8081";
+  $("whisper_models_dir").value = s.whisper_models_dir || "";
+  setSelectValue($("whisper_model"), s.whisper_model);
   $("scale").value = s.scale || "480p";
   $("sweep_interval").value = s.sweep_interval || 2;
   $("output_name").value = s.output_name || "";
@@ -555,13 +536,13 @@ function applySettingsToUI(s, skipSave) {
   if (!skipSave) renderTimeline(); // levels changed -> refresh timeline marks
 }
 function updateBackendVisibility() {
-  const b = document.querySelector("input[name=backend]:checked").value;
-  $("opt-local").classList.toggle("hidden", b !== "mlx-vlm");
-  $("opt-llama").classList.toggle("hidden", b !== "llama.cpp");
-  $("opt-llama-mmproj").classList.toggle("hidden", b !== "llama.cpp");
-  $("opt-remote").classList.toggle("hidden", b !== "standalone");
-  const badge = {"mlx-vlm":"local mlx-vlm", "llama.cpp":"local llama.cpp", standalone:"existing server"};
-  $("backend-badge").textContent = "backend: " + (badge[b] || b);
+  // The backend is always a remote server now; the header badge just reflects
+  // whether it (and the whisper server) answered last poll.
+  const srv = (state && state.server) || {};
+  const parts = [];
+  parts.push(srv.backend_up ? "llm: up" : "llm: down");
+  parts.push(srv.whisper_up ? "whisper: up" : "whisper: down");
+  $("backend-badge").textContent = parts.join(" · ");
 }
 
 // ---------------------------------------------------------------- timeline
@@ -786,14 +767,14 @@ async function poll() {
       readyWaiters.forEach(fn => fn());
       readyWaiters.length = 0;
       attachInputListeners();  // now safe: form is populated with real settings
-      autoScan = d.settings.backend === "standalone";
+      autoScan = true;
     }
     if (!state || !state.settings || JSON.stringify(state.settings) !== JSON.stringify(d.settings)) {
       applySettingsToUI(d.settings, true);
     }
     state = d;
     renderState();
-    if (autoScan) guard(scanForModels)();  // "use existing server": fill model dropdowns
+    if (autoScan) { guard(scanForModels)(); guard(scanWhisperModels)(); }  // fill the model dropdowns
   } catch (e) {
     log("state poll error: " + e.message);
   }
@@ -902,9 +883,8 @@ function guard(fn) {
 }
 function wire() {
   $("btn-browse").addEventListener("click", () => openPicker());
-  $("btn-browse-model").addEventListener("click", () => openPicker({target: "model_path", mode: "dir"}));
-  $("btn-browse-llama").addEventListener("click", () => openPicker({target: "llama_model_path", mode: "file", exts: ".gguf"}));
-  $("btn-browse-mmproj").addEventListener("click", () => openPicker({target: "mmproj_path", mode: "file", exts: "all"}));
+  $("btn-scan-whisper").addEventListener("click", guard(scanWhisperModels));
+  $("btn-whisper-load").addEventListener("click", guard(loadWhisperModel));
   $("picker-close").addEventListener("click", closePicker);
   $("picker-cancel").addEventListener("click", closePicker);
   $("picker-go").addEventListener("click", () => loadPickerDir($("picker-path").value));
@@ -980,18 +960,44 @@ async function scanForModels() {
   if (!$("text_model").value) $("text_model").value = d.models[0];
   log(d.models.length + " model(s) found at " + base_url);
 }
+// List the whisper server's .bin models (scanned from the configured model
+// folder) and populate the whisper model dropdown. Defined at top-level scope
+// so both the "Scan" button and the first-poll auto-populate can call it.
+async function scanWhisperModels() {
+  const base_url = $("whisper_base_url").value.trim();
+  const models_dir = $("whisper_models_dir").value.trim();
+  if (!models_dir) { log("whisper: no model folder set — can't list models"); return; }
+  const q = "?base_url=" + encodeURIComponent(base_url) + "&models_dir=" + encodeURIComponent(models_dir);
+  const r = await fetch("/api/whisper-models" + q);
+  const d = await r.json();
+  if (!r.ok) { log("whisper models: " + (d.detail || r.status)); return; }
+  const sel = $("whisper_model");
+  const cur = state && state.settings ? state.settings.whisper_model : "";
+  sel.innerHTML = "";
+  d.models.forEach(m => sel.add(new Option(m.label, m.id)));
+  if (cur && d.models.some(m => m.id === cur)) sel.value = cur;
+  else if (d.models.length) sel.value = d.models[0].id;
+  log(d.models.length + " whisper model(s) in " + models_dir);
+}
+// Hot-swap the whisper server's loaded model (shared server: /load is a brief
+// interruption for everyone on it).
+async function loadWhisperModel() {
+  const base_url = $("whisper_base_url").value.trim();
+  const model = $("whisper_model").value;
+  if (!model) { log("whisper: pick a model to load first"); return; }
+  const r = await fetch("/api/whisper-load", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url, model }) });
+  const d = await r.json();
+  if (!r.ok) { log("whisper load failed: " + (d.detail || r.status)); return; }
+  log("whisper loaded " + model + (d.detail ? " — " + d.detail : ""));
+}
 function attachInputListeners() {
-  ["video_path","model_path","llama_model_path","mmproj_path","base_url","text_model","whisper_model",
+  ["video_path","base_url","text_model","whisper_base_url","whisper_models_dir","whisper_model",
    "scale","sweep_interval","output_name","scan_path","blur_strength","mute_padding","blur_padding",
    "summary_model","summary_frames","summary_max_context"
   ].forEach(id => $(id).addEventListener("input", settingsChanged));
   $("show_prompts").addEventListener("change", settingsChanged);
-  document.querySelectorAll("input[name=backend]").forEach(r => r.addEventListener("change", () => {
-    settingsChanged();
-    if (document.querySelector("input[name=backend]:checked").value === "standalone") {
-      guard(scanForModels)();  // auto-populate the model dropdowns
-    }
-  }));
   document.querySelectorAll("#matrix select").forEach(s => s.addEventListener("change", () => { settingsChanged(); renderTimeline(); }));
 }
 async function loadDefinitions() {

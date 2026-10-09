@@ -12,6 +12,7 @@ from nuclearcutter.detection.transcribe import (
     read_transcript_cache,
     write_transcript_cache,
 )
+from nuclearcutter.utils.model_server import WhisperConfig
 
 
 def _utterances():
@@ -80,7 +81,7 @@ def test_transcribe_killable_stops_before_start(monkeypatch, tmp_path):
     stop = threading.Event()
     stop.set()
     with pytest.raises(TranscriptionStopped):
-        transcribe_killable(video, "some-model", stop_event=stop)
+        transcribe_killable(video, WhisperConfig(), stop_event=stop)
 
 
 def test_transcribe_killable_terminates_child_on_stop(monkeypatch, tmp_path):
@@ -127,5 +128,5 @@ def test_transcribe_killable_terminates_child_on_stop(monkeypatch, tmp_path):
 
     threading.Thread(target=_set_stop, daemon=True).start()
     with pytest.raises(TranscriptionStopped):
-        transcribe_killable(video, "some-model", stop_event=stop)
+        transcribe_killable(video, WhisperConfig(), stop_event=stop)
     assert fake.terminated
