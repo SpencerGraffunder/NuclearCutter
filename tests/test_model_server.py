@@ -165,6 +165,9 @@ class TestWhisperListModels:
 
 
 class TestWhisperLoadModel:
+    """The whisper server's /load hot-swap — the tool behind the on-demand
+    model load that transcribe.ensure_whisper_model_loaded triggers."""
+
     def test_resolves_dropdown_id_to_absolute_path(self, tmp_path):
         (tmp_path / "ggml-small.bin").write_bytes(b"x")
         cfg = WhisperConfig(models_dir=str(tmp_path))

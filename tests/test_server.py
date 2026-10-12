@@ -610,17 +610,6 @@ def test_whisper_models_endpoint_shape():
     assert d["models_dir"] == "/models"
 
 
-def test_whisper_load_endpoint():
-    """The GUI POSTs /api/whisper-load with a JSON {model} body."""
-    st, c = make_client()
-    with patch("nuclearcutter.server.whisper_load_model", return_value="ok") as mock_load:
-        r = c.post("/api/whisper-load", json={"model": "ggml-small"})
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
-    mock_load.assert_called_once()
-    assert st.whisper_model == "ggml-small"
-
-
 def test_settings_load_is_lenient_per_field(tmp_path):
     """One bad saved field must not reset all the others."""
     path = tmp_path / "settings.json"

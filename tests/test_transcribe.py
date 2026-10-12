@@ -13,6 +13,7 @@ import pytest
 from nuclearcutter.detection.transcribe import (
     TranscriptionStopped,
     _remote_transcribe,
+    ensure_whisper_model_loaded,
     segments_to_utterances,
     transcribe,
     transcribe_killable,
@@ -157,6 +158,42 @@ class TestRemoteTranscribe:
         assert "file" in kwargs["files"]
         name, fh, ctype = kwargs["files"]["file"]
         assert name == "audio.wav" and ctype == "audio/wav"
+
+
+class TestEnsureWhisperModelLoaded:
+    """On-demand whisper model load: hot-swap the server only when the
+    selected model differs from the one the server currently has loaded."""
+
+    def test_empty_model_is_noop(self):
+        with patch("nuclearcutter.detection.transcribe.whisper_load_model") as mock_load:
+            ensure_whisper_model_loaded(WhisperConfig(model=""))
+        mock_load.assert_not_called()
+
+    def test_already_loaded_is_noop(self):
+        cfg = WhisperConfig(model="ggml-small")
+        with patch("nuclearcutter.detection.transcribe.whisper_loaded_model_id",
+                   return_value="ggml-small"), \
+             patch("nuclearcutter.detection.transcribe.whisper_load_model") as mock_load:
+            ensure_whisper_model_loaded(cfg)
+        mock_load.assert_not_called()
+
+    def test_different_model_hot_swaps(self):
+        cfg = WhisperConfig(model="ggml-large")
+        with patch("nuclearcutter.detection.transcribe.whisper_loaded_model_id",
+                   return_value="ggml-small"), \
+             patch("nuclearcutter.detection.transcribe.whisper_load_model",
+                   return_value="ok") as mock_load:
+            ensure_whisper_model_loaded(cfg)
+        mock_load.assert_called_once_with(cfg, "ggml-large")
+
+    def test_failed_load_raises(self):
+        cfg = WhisperConfig(model="ggml-large")
+        with patch("nuclearcutter.detection.transcribe.whisper_loaded_model_id",
+                   return_value="ggml-small"), \
+             patch("nuclearcutter.detection.transcribe.whisper_load_model",
+                   side_effect=RuntimeError("bad model")):
+            with pytest.raises(RuntimeError, match="could not load model"):
+                ensure_whisper_model_loaded(cfg)
 
 
 class TestTranscribeKillable:
