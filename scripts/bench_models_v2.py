@@ -6,12 +6,17 @@ frames), then runs each model through the real sweep + confirm prompts used by
 `nuclearcutter scan`, with thinking disabled. Reports per-model speed and
 accuracy (did it flag the known-flagged frames? correct category?).
 
+By default the full prompt and the model's full response are printed to the
+terminal for every request (the sweep prompt is identical across batches, so it
+is shown once). Pass `--no-prompts` to suppress that and see only the
+per-batch timing/accuracy lines.
+
 Usage:
     python3 scripts/bench_models_v2.py <video_path> <scan_json> [--model ID ...]
 
 Example:
-    python3 scripts/bench_models_v2.py "/Volumes/.../movie.mkv.iso" \\
-        "/Volumes/.../movie.nuclearcutter.json" \\
+    python3 scripts/bench_models_v2.py "/Volumes/.../movie.mkv.iso" \
+        "/Volumes/.../movie.nuclearcutter.json" \
         --model qwen/qwen3.6-35b-a3b qwen/qwen3-vl-8b qwen/qwen3-vl-30b
 """
 
@@ -41,6 +46,8 @@ CONFIRM_SCALE = 720
 N_FLAGGED = 8
 N_TOTAL = 32
 RANDOM_SEED = 20260811
+SYSTEM_PROMPT = ("Answer directly and concisely. Do not provide lengthy reasoning "
+                 "or chain-of-thought; output only the requested result.")
 
 
 def _b64_uri(path: Path) -> str:
@@ -83,6 +90,15 @@ def _parse_json_loose(raw: str) -> dict:
         return json.loads(text.strip())
     except Exception:
         return {}
+
+
+def _show(label: str, text: str) -> None:
+    """Print a full prompt or response as a clearly-labelled block in the
+    terminal, indented to read as a sub-section of the current pass."""
+    bar = "─" * 48
+    print(f"\n  {bar}\n  {label}\n  {bar}")
+    for line in str(text).splitlines() or ["(empty)"]:
+        print(f"    {line}")
 
 
 def _flag_windows(scan: dict) -> list[tuple[float, float, str]]:
@@ -139,7 +155,11 @@ def main() -> int:
     ap.add_argument("scan_json", type=Path)
     ap.add_argument("--model", action="append", default=[])
     ap.add_argument("--url", default=BASE_URL)
+    ap.add_argument("--no-prompts", action="store_true",
+                    help="do not print the full prompts and responses to the "
+                         "terminal (shown by default)")
     args = ap.parse_args()
+    show = not args.no_prompts
 
     if not args.video.exists():
         print(f"error: video not found: {args.video}", file=sys.stderr)
@@ -174,13 +194,13 @@ def main() -> int:
 
         # --- Sweep pass: 8 batches x 4 frames, exact sweep prompt ---
         print("-- sweep (8 batches x 4 frames) --")
+        if show:
+            _show("SWEEP PROMPT (same prompt for every batch)", sweep_prompt)
         sweep_times, sweep_correct = [], 0
         for bi, batch in enumerate(batches):
             content, dt, usage = _query(
                 args.url, model,
-                [{"role": "system", "content":
-                  "Answer directly and concisely. Do not provide lengthy reasoning or "
-                  "chain-of-thought; output only the requested result."},
+                [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content":
                   [{"type": "text", "text": sweep_prompt}] +
                   [{"type": "image_url", "image_url": {"url": _b64_uri(p)}} for p in batch]}],
@@ -195,10 +215,10 @@ def main() -> int:
             sweep_times.append(dt)
             truth = expected or "clean"
             mark = "OK " if ok else "MISS"
-            print(f"  batch {bi+1}: {dt:6.1f}s | truth={truth:8s} got={cat or ('clean' if not flagged else 'flagged')} "
+            print(f"\n  batch {bi+1}: {dt:6.1f}s | truth={truth:8s} got={cat or ('clean' if not flagged else 'flagged')} "
                   f"[{usage.get('completion_tokens','?')} tok] {mark}")
-            if not ok:
-                print(f"      raw: {content[:200]!r}")
+            if show:
+                _show(f"RESPONSE (batch {bi+1})", content)
 
         print(f"  sweep accuracy: {sweep_correct}/{len(batches)} | "
               f"mean/call {sum(sweep_times)/len(sweep_times):.1f}s | total {sum(sweep_times):.1f}s")
@@ -224,9 +244,7 @@ def main() -> int:
             prompt = build_confirm_prompt(cat_enum, definition, "(no dialogue)")
             content, dt, usage = _query(
                 args.url, model,
-                [{"role": "system", "content":
-                  "Answer directly and concisely. Do not provide lengthy reasoning or "
-                  "chain-of-thought; output only the requested result."},
+                [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content":
                   [{"type": "text", "text": prompt}] +
                   [{"type": "image_url", "image_url": {"url": _b64_uri(p)}} for p in c_frames]}],
@@ -239,9 +257,12 @@ def main() -> int:
             any_match = any(matches.values())
             flagged = bool(parsed.get("contains_flagged_content", any_match))
             conf_results.append(flagged)
-            print(f"  {cat:8s} [{start:.0f}-{end:.0f}]: {dt:6.1f}s | flagged={flagged} "
+            print(f"\n  {cat:8s} [{start:.0f}-{end:.0f}]: {dt:6.1f}s | flagged={flagged} "
                   f"matches={[k.split('_')[1] for k,v in matches.items() if v]} "
                   f"[{usage.get('completion_tokens','?')} tok]")
+            if show:
+                _show(f"CONFIRM PROMPT ({cat}, {start:.0f}-{end:.0f})", prompt)
+                _show(f"RESPONSE ({cat}, {start:.0f}-{end:.0f})", content)
             for p in c_frames:
                 p.unlink(missing_ok=True)
 
