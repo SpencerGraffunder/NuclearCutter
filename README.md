@@ -168,8 +168,9 @@ each blur/black segment by extra seconds on both sides.
     over a `/v1` API (e.g. llama.cpp `llama-server` with a multimodal GGUF +
     `--mmproj`, LM Studio, Ollama, …). This does the visual sweep, the scene
     descriptions, and the text-level foul-language re-checks.
-  - a **whisper.cpp server** for transcription (foul language). The GUI can
-    hot-swap which whisper model it has loaded.
+  - a **whisper.cpp server** for transcription (foul language). NuclearCutter
+    loads the model you pick in the GUI on demand — the server hot-swaps to
+    it when a transcription starts.
 
 ### Install
 
@@ -200,11 +201,14 @@ Scan section covers:
   into the dropdowns.
 - **VLM model / Text model** — the vision model for the sweep + descriptions,
   and (optionally different) the text model for the foul-language re-checks.
-- **Whisper server IP** + **Whisper model folder** — the whisper.cpp server
-  for transcription and the folder that holds its `.bin` models.
-- **Whisper model** — a dropdown of the `.bin` files in that folder. Hit
-  **Load** to hot-swap the server's loaded model to the selected one (this
-  interrupts the shared whisper server for a few seconds while it loads).
+- **Whisper server** — derived from the same server address (port +1); the
+  whisper.cpp server for transcription. Its `.bin` model folder is
+  auto-detected from the server process — no setting needed.
+- **Whisper model** — a dropdown of the `.bin` models the whisper server can
+  use (the model folder is auto-detected from the server process). The model
+  is loaded on demand: when a scan transcribes, the server hot-swaps to the
+  selected model first (a few-second interruption of the shared whisper
+  server while it loads). The entry marked `(loaded)` is the one active now.
 - **Scale frames before VLM** — `360p`/`480p`/`720p`/`1080p`; frames are
   downscaled before being sent to the vision model. Lower is much faster, and
   480p is the recommended default for scene-level detection.
@@ -361,8 +365,9 @@ Start your own servers first (or use ones that are already running):
 
 In the GUI: type the model server URL (e.g. `http://192.168.4.164:8080/v1`),
 hit **Scan for models**, pick the VLM model. Type the whisper server IP
-(e.g. `http://127.0.0.1:8081`), set its **model folder**, hit **Scan**, and
-pick a whisper model — hit **Load** to hot-swap the server to that model.
+(e.g. `http://127.0.0.1:8081`), hit **Scan** — pick a whisper model and it is
+loaded on demand when the transcription starts (the server hot-swaps to it
+first).
 Headless equivalent:
 
 ```bash

@@ -7,9 +7,11 @@ spawns its own inference server:
   one server can serve the VLM, the text model, and the summary model at once
   (each selected by model id from the /v1/models dropdown).
 - whisper.cpp transcription server (`whisper-server`) — one model loaded at a
-  time, hot-swappable via its /load endpoint; the model dropdown lists the
-  .bin files in the server's model folder, auto-detected from the
-  whisper-server process's own `-m` argument when both run on one host.
+  time, loaded ON DEMAND: right before a transcription, NuclearCutter hot-swaps
+  the server's model via its /load endpoint when the selected model differs
+  from the one currently loaded; the model dropdown lists the .bin files in
+  the server's model folder, auto-detected from the whisper-server process's
+  own `-m` argument when both run on one host.
 
 One server ADDRESS (the machine) configures everything: the LLM/VLM server is
 expected on port 8080 and the whisper server on port 8081 of that address
@@ -287,6 +289,8 @@ def whisper_load_model(cfg: WhisperConfig, model_id: str) -> str:
     filesystem. Returns the server's response text. Raises ModelServerError
     on failure. NOTE: /load restarts the server's model under its mutex —
     other clients of that server (e.g. Storyteller) see a brief interruption.
+    Called on demand by transcribe.ensure_whisper_model_loaded right before a
+    transcription when the server has a different model loaded.
     """
     # The whisper-server /load handler reads a multipart FILE field named
     # `model` and loads the file whose CONTENT is the model path string.

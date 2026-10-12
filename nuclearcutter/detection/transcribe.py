@@ -7,9 +7,10 @@ with word-level timestamps. That JSON has the same `segments[].words[]` shape
 as mlx-whisper, so `segments_to_utterances` converts it unchanged.
 
 NuclearCutter never runs whisper itself — the model is loaded on the server
-(hot-swappable via its `/load` endpoint; see utils/model_server.py). If a
-subtitle file is available (sidecar), it's parsed and cross-checked against
-the transcription.
+(loaded ON DEMAND: right before a transcription, `ensure_whisper_model_loaded`
+hot-swaps the server to `cfg.model` if the server currently has a different
+model loaded — see utils/model_server.py). If a subtitle file is available
+(sidecar), it's parsed and cross-checked against the transcription.
 """
 
 from __future__ import annotations
@@ -27,7 +28,11 @@ import pysrt
 import requests
 
 from nuclearcutter.utils.ffmpeg import extract_audio_track
-from nuclearcutter.utils.model_server import WhisperConfig
+from nuclearcutter.utils.model_server import (
+    WhisperConfig,
+    whisper_load_model,
+    whisper_loaded_model_id,
+)
 
 # How long a single transcription request may take. A 3-hour film is one
 # multipart request; on a GPU this is minutes, on a slow CPU it can be long.
@@ -58,8 +63,9 @@ def transcribe(video_path: Path, cfg: WhisperConfig | None,
     transcription complete (0.0..1.0). The whisper.cpp server does the whole
     film in one request and exposes no progress API, so we report 0.0 while
     in flight and 1.0 on completion (the GUI renders 0.0 as an indeterminate
-    bar). The whisper model is whatever the server currently has loaded —
-    select it with the GUI's whisper model dropdown (which hot-swaps it).
+    bar). The whisper model is loaded on demand: `ensure_whisper_model_loaded`
+    hot-swaps the server to `cfg.model` first when the server currently has a
+    different model (no-op when `cfg.model` is empty or already loaded).
     """
     if not cfg or not cfg.base_url:
         raise RuntimeError(
@@ -68,6 +74,7 @@ def transcribe(video_path: Path, cfg: WhisperConfig | None,
             "See README.md."
         )
     _require_whisper_up(cfg)
+    ensure_whisper_model_loaded(cfg)
 
     with tempfile.TemporaryDirectory() as tmp:
         audio_path = Path(tmp) / "audio.wav"
@@ -100,6 +107,40 @@ def _require_whisper_up(cfg: WhisperConfig) -> None:
         raise RuntimeError(
             f"cannot reach the whisper server at {cfg.base_url}: {exc}. "
             "Start whisper-server or fix the whisper IP/URL in the GUI."
+        ) from exc
+
+
+def ensure_whisper_model_loaded(cfg: WhisperConfig) -> None:
+    """Hot-swap the whisper server to `cfg.model` when needed (on-demand load).
+
+    Compares the configured model (the GUI's whisper model dropdown, persisted
+    in settings; an absolute .bin path also works) against the model the
+    server currently has loaded (auto-detected from the server process's
+    `-m` argument, see utils/model_server.py). When they differ, the server's
+    /load endpoint is called first and the transcription proceeds with the
+    freshly loaded model. No-op when `cfg.model` is empty (the server keeps
+    whatever it has loaded) or the server already has `cfg.model`.
+
+    Raises RuntimeError (with the server's error) when a hot-swap is required
+    and fails — transcribing with the wrong model would silently give
+    different-quality results, so a failed load aborts the transcription
+    rather than falling back.
+    """
+    model = (cfg.model or "").strip()
+    if not model:
+        return
+    if model == whisper_loaded_model_id():
+        return
+    print(
+        f"[whisper] server has {whisper_loaded_model_id() or '(unknown)'} loaded — "
+        f"loading {model} on demand",
+        file=sys.stderr,
+    )
+    try:
+        whisper_load_model(cfg, model)
+    except Exception as exc:
+        raise RuntimeError(
+            f"whisper server at {cfg.base_url} could not load model {model!r} on demand: {exc}"
         ) from exc
 
 
@@ -182,6 +223,7 @@ def transcribe_killable(video_path: Path, cfg: WhisperConfig | None,
             "No whisper server configured for transcription. Set the whisper "
             "server IP/URL in the web GUI (or --whisper-base-url on the CLI)."
         )
+    ensure_whisper_model_loaded(cfg)
 
     with tempfile.TemporaryDirectory() as tmp:
         audio_path = Path(tmp) / "audio.wav"

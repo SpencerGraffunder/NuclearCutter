@@ -42,9 +42,9 @@ from nuclearcutter.schema import (
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 from nuclearcutter.utils.model_server import (
-    ModelServerError, WhisperConfig, derive_server_urls, detect_whisper_models_dir,
+    WhisperConfig, derive_server_urls, detect_whisper_models_dir,
     is_server_up, normalize_server_address, require_server_up, whisper_is_up,
-    whisper_list_models, whisper_load_model, whisper_loaded_model_id,
+    whisper_list_models, whisper_loaded_model_id,
 )
 from nuclearcutter.utils.system_stats import SystemStats
 
@@ -203,10 +203,12 @@ class AppState:
         self.server_address = "http://127.0.0.1"
         self.vlm_model = ""
         self.text_model = ""
-        # Whisper transcription: the model is whatever the server has loaded;
-        # the dropdown lists its .bin files (model folder auto-detected from
-        # the whisper-server process) and hot-swaps via /load.
-        self.whisper_model = ""  # dropdown id (file stem), e.g. "ggml-base.en"
+        # Whisper transcription: the model to use (dropdown id / file stem,
+        # e.g. "ggml-base.en"). The dropdown lists the server's .bin files
+        # (model folder auto-detected from the whisper-server process); the
+        # chosen model is loaded ON DEMAND when a transcription starts
+        # (transcribe.ensure_whisper_model_loaded hot-swaps if needed).
+        self.whisper_model = ""
         self.scale = "480p"
         self.sweep_interval = 2.0
         # --- Render settings ----------------------------------------------
@@ -1309,10 +1311,6 @@ class ClearScanBody(BaseModel):
     section: str = "scan_verify"  # "transcribe" | "scan_verify"
 
 
-class WhisperLoadBody(BaseModel):
-    model: str = ""
-
-
 def create_app(state: AppState | None = None) -> FastAPI:
     app = FastAPI(title="NuclearCutter", version="0.2.0")
     st = state if state is not None else _state()
@@ -1361,25 +1359,6 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "loaded": whisper_loaded_model_id(),
             "models": models,
         }
-
-    @app.post("/api/whisper-load")
-    def api_whisper_load(body: WhisperLoadBody):
-        """Hot-swap the loaded whisper model on the configured server.
-
-        Sends the model id (or absolute path) to the server's /load endpoint,
-        which loads the model whose path it is given. A failed /load can leave
-        the server's internal state stuck — the error message says how to recover.
-        """
-        model = (body.model or "").strip()
-        if not model:
-            raise HTTPException(400, "model is required")
-        try:
-            resp = whisper_load_model(st._whisper_cfg(), model)
-        except ModelServerError as exc:
-            raise HTTPException(502, str(exc)) from exc
-        st.whisper_model = model
-        st._save_settings()
-        return {"ok": True, "model": model, "response": resp}
 
     @app.post("/api/settings")
     def api_settings(body: SettingsBody):
