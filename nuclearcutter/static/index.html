@@ -25,13 +25,15 @@
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
     font-family: var(--mono); font-size: 13px; }
   body { background-image: repeating-linear-gradient(0deg, rgba(0,255,65,0.015) 0 1px, transparent 1px 3px); }
-  header { display: flex; align-items: baseline; gap: 14px; padding: 14px 20px;
+  header { display: flex; align-items: baseline; justify-content: center; gap: 14px;
+    position: relative; padding: 14px 20px;
     border-bottom: 1px solid var(--border); background: #0e0e0e; }
   header h1 { margin: 0; font-size: 20px; letter-spacing: 4px; color: var(--green);
     text-shadow: 0 0 8px rgba(0,255,65,.6); }
   header .sub { color: var(--text-dim); font-size: 11px; }
-  header .backend-badge { margin-left: auto; color: var(--green); border: 1px solid var(--green-dim);
-    padding: 3px 10px; border-radius: 3px; font-size: 11px; }
+  header .gh-link { position: absolute; right: 20px; top: 50%; transform: translateY(-50%);
+    color: var(--text-dim); text-decoration: none; font-size: 11px; letter-spacing: 1px; }
+  header .gh-link:hover { color: var(--green); text-shadow: 0 0 6px rgba(0,255,65,.5); }
   main { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px 20px; max-width: 1500px; margin: 0 auto; }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
   section.full { grid-column: 1 / -1; }
@@ -155,7 +157,7 @@
   <h1>NUCLEARCUTTER</h1>
   <span class="sub">self-hosted content censoring — web console</span>
   <span class="sub" id="settings-file"></span>
-  <span class="backend-badge" id="backend-badge">backend: …</span>
+  <a class="gh-link" href="https://github.com/SpencerGraffunder/NuclearCutter" target="_blank" rel="noopener">github ↗</a>
 </header>
 <main>
   <!-- ================= SCAN ================= -->
@@ -534,18 +536,7 @@ function applySettingsToUI(s, skipSave) {
       if (val != null && [...sel.options].some(o => o.value === val)) sel.value = val;
     });
   });
-  updateBackendVisibility();
   if (!skipSave) renderTimeline(); // levels changed -> refresh timeline marks
-}
-function updateBackendVisibility() {
-  // The backend is always a remote server now; the header badge just reflects
-  // whether it (and the whisper server) answered last poll.
-  const srv = (state && state.server) || {};
-  const parts = [];
-  parts.push(srv.backend_up ? "llm: up" : "llm: down");
-  parts.push(srv.whisper_up ? "whisper: up" : "whisper: down");
-  if (srv.whisper_loaded_model) parts.push("whisper model: " + srv.whisper_loaded_model);
-  $("backend-badge").textContent = parts.join(" · ");
 }
 
 // ---------------------------------------------------------------- timeline
