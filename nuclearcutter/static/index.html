@@ -91,7 +91,28 @@
   #tl-tooltip { display: none; position: fixed; z-index: 80; background: #0d0d0d;
     border: 1px solid var(--green-dim); color: var(--text); padding: 10px 12px;
     white-space: pre-wrap; max-width: 420px; box-shadow: 0 0 16px rgba(0,255,65,.25);
-    font-size: 11px; line-height: 1.5; border-radius: 4px; pointer-events: none; }
+    font-size: 11px; line-height: 1.5; border-radius: 4px; pointer-events: auto; }
+  .tl-tip-text { display: block; }
+  /* Hold-to-preview button inside the tooltip (the tooltip is
+     pointer-events:auto so the button is reachable). You HOLD it to reveal a
+     frame in a separate popup at the cursor; release to hide — the frame is
+     never shown in the tooltip itself, so the press is the confirmation. */
+  .tl-preview-btn { pointer-events: auto; margin-top: 8px; display: inline-flex;
+    align-items: center; gap: 6px; cursor: pointer; user-select: none;
+    background: #101810; color: var(--green); border: 1px solid var(--green-dim);
+    border-radius: 3px; padding: 4px 8px; font-size: 10px; letter-spacing: .5px;
+    font-family: inherit; touch-action: none; }
+  .tl-preview-btn:hover { background: #162416; }
+  .tl-preview-btn:active, .tl-preview-btn.holding { background: #1c2e1c;
+    color: #d7ffd7; box-shadow: 0 0 8px rgba(0,255,65,.4); }
+  /* The frame popup that appears at the cursor while the button is held. */
+  #frame-preview { display: none; position: fixed; z-index: 90; background: #0d0d0d;
+    border: 1px solid var(--green-dim); padding: 6px; border-radius: 4px;
+    box-shadow: 0 0 18px rgba(0,255,65,.35); pointer-events: none; }
+  #frame-preview img { display: block; max-height: 300px; border-radius: 2px;
+    background: #000; }
+  #frame-preview .fp-label { font-size: 10px; color: var(--green-dim);
+    margin-top: 5px; letter-spacing: .5px; white-space: nowrap; }
   .legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 6px; flex-wrap: wrap; }
   .legend span i { display: inline-block; width: 10px; height: 10px; margin-right: 4px; }
   #status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
@@ -554,25 +575,129 @@ function detectionCaught(d) {
   return LEVEL_RANK[d.level] <= LEVEL_RANK[lvl];
 }
 let tlTipEl = null;
-function showTlTooltip(ev) {
-  const tip = ev.currentTarget.dataset.tip;
-  if (!tip) return;
+let tlPreviewBtn = null;   // the hold-to-reveal button inside the tooltip
+let tlPreviewTs = 0;       // timestamp (s) the current tooltip's button previews
+let framePopEl = null;     // the separate at-cursor frame popup
+let framePopBusy = false;
+let tlTipHideTimer = null; // deferred hide: lets the mouse cross the 10px gap
+                           // from the mark to the tooltip (to reach the button)
+function ensureTlTooltip() {
   if (!tlTipEl) {
     tlTipEl = document.createElement("div");
     tlTipEl.id = "tl-tooltip";
+    // Moving onto the tooltip cancels a pending hide; leaving it re-arms one.
+    tlTipEl.addEventListener("mouseenter", () => clearTimeout(tlTipHideTimer));
+    tlTipEl.addEventListener("mouseleave", scheduleTipHide);
     document.body.appendChild(tlTipEl);
   }
-  tlTipEl.textContent = tip;
-  tlTipEl.style.display = "block";
-  const r = ev.currentTarget.getBoundingClientRect();
-  const w = tlTipEl.offsetWidth;
+  return tlTipEl;
+}
+function scheduleTipHide() {
+  clearTimeout(tlTipHideTimer);
+  // Never hide while the preview button is held (the pointer is captured by
+  // the button and its pointerup will clean up).
+  if (tlPreviewBtn && tlPreviewBtn.classList.contains("holding")) return;
+  tlTipHideTimer = setTimeout(hideTlTooltip, 150);
+}
+function showTlTooltip(ev) {
+  clearTimeout(tlTipHideTimer);
+  const mark = ev.currentTarget;
+  const tip = mark.dataset.tip;
+  if (!tip) return;
+  const tl = ensureTlTooltip();
+  // Text block + (for marks with a timestamp) a hold-to-preview button.
+  tl.innerHTML = "";
+  const text = document.createElement("span");
+  text.className = "tl-tip-text";
+  text.textContent = tip;
+  tl.appendChild(text);
+  tlPreviewTs = parseFloat(mark.dataset.t) || 0;
+  if (tlPreviewTs > 0) {
+    if (!tlPreviewBtn) {
+      tlPreviewBtn = document.createElement("button");
+      tlPreviewBtn.type = "button";
+      tlPreviewBtn.className = "tl-preview-btn";
+      tlPreviewBtn.textContent = "⌕ hold to preview frame";
+      // Hold-to-reveal (password-reveal style): the frame shows only while
+      // the button is held and hides on release.
+      tlPreviewBtn.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        tlPreviewBtn.setPointerCapture(e.pointerId);
+        tlPreviewBtn.classList.add("holding");
+        showFrameAtCursor(tlPreviewTs, e);
+      });
+      const stopHold = (e) => {
+        if (!tlPreviewBtn.classList.contains("holding")) return;
+        tlPreviewBtn.classList.remove("holding");
+        hideFramePopup();
+      };
+      tlPreviewBtn.addEventListener("pointerup", stopHold);
+      tlPreviewBtn.addEventListener("pointercancel", stopHold);
+      // Keyboard: Space/Enter press = show, release = hide.
+      tlPreviewBtn.addEventListener("keydown", (e) => {
+        if ((e.key === " " || e.key === "Enter") && !e.repeat) {
+          e.preventDefault();
+          const r = tlPreviewBtn.getBoundingClientRect();
+          tlPreviewBtn.classList.add("holding");
+          showFrameAtCursor(tlPreviewTs, {clientX: r.left + r.width / 2, clientY: r.bottom});
+        }
+      });
+      tlPreviewBtn.addEventListener("keyup", (e) => {
+        if (e.key === " " || e.key === "Enter") stopHold(e);
+      });
+    }
+    tl.appendChild(tlPreviewBtn);
+  }
+  tl.style.display = "block";
+  const r = mark.getBoundingClientRect();
+  const w = tl.offsetWidth;
   let x = r.left + r.width / 2;
   x = Math.max(w / 2 + 8, Math.min(x, window.innerWidth - w / 2 - 8));
-  tlTipEl.style.left = x + "px";
-  tlTipEl.style.top = (r.top - 10) + "px";
-  tlTipEl.style.transform = "translate(-50%, -100%)";
+  tl.style.left = x + "px";
+  tl.style.top = (r.top - 10) + "px";
+  tl.style.transform = "translate(-50%, -100%)";
 }
-function hideTlTooltip() { if (tlTipEl) tlTipEl.style.display = "none"; }
+function hideTlTooltip() {
+  clearTimeout(tlTipHideTimer);
+  if (tlTipEl) tlTipEl.style.display = "none";
+  hideFramePopup(); // releasing the mouse also hides any held preview
+}
+// ---------------------------------------------------------------- frame preview
+function ensureFramePopup() {
+  if (!framePopEl) {
+    framePopEl = document.createElement("div");
+    framePopEl.id = "frame-preview";
+    const img = document.createElement("img");
+    img.alt = "frame";
+    framePopEl.appendChild(img);
+    const label = document.createElement("div");
+    label.className = "fp-label";
+    framePopEl.appendChild(label);
+    document.body.appendChild(framePopEl);
+  }
+  return framePopEl;
+}
+function showFrameAtCursor(ts, ev) {
+  const pop = ensureFramePopup();
+  const img = pop.querySelector("img");
+  const label = pop.querySelector(".fp-label");
+  label.textContent = fmtSecs(ts) + (framePopBusy ? " · extracting…" : "");
+  pop.style.display = "block";
+  // Position at the cursor, clamped to stay on screen.
+  const w = pop.offsetWidth || 260, h = pop.offsetHeight || 240;
+  let x = (ev.clientX || 0) + 16;
+  let y = (ev.clientY || 0) + 16;
+  x = Math.min(x, window.innerWidth - w - 8);
+  y = Math.min(y, window.innerHeight - h - 8);
+  pop.style.left = Math.max(8, x) + "px";
+  pop.style.top = Math.max(8, y) + "px";
+  // Fresh frame for this timestamp (the server caches repeats).
+  img.onload = () => { label.textContent = fmtSecs(ts); framePopBusy = false; };
+  img.onerror = () => { label.textContent = fmtSecs(ts) + " · unavailable"; framePopBusy = false; };
+  framePopBusy = true;
+  img.src = "/api/frame?t=" + ts.toFixed(1) + "&h=320" + "&r=" + Date.now();
+}
+function hideFramePopup() { if (framePopEl) framePopEl.style.display = "none"; }
 function renderTimeline() {
   const tl = $("tl-bar");
   tl.querySelectorAll(".tl-mark").forEach(e => e.remove());
@@ -615,8 +740,9 @@ function renderTimeline() {
     el.style.left = x0 + "%"; el.style.width = Math.max(0.4, x1 - x0) + "%";
     if (m.tip) {
       el.dataset.tip = m.tip;
+      el.dataset.t = String(m.start); // hold-to-preview frame timestamp
       el.addEventListener("mouseenter", showTlTooltip);
-      el.addEventListener("mouseleave", hideTlTooltip);
+      el.addEventListener("mouseleave", scheduleTipHide);
     }
     tl.appendChild(el);
   });

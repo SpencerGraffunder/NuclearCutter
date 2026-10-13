@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from nuclearcutter.bench import attach_usage_hook, run_benchmark
@@ -263,6 +263,13 @@ class AppState:
         }
         self._usage_lock = threading.Lock()
         self._sweep_started_at: float | None = None
+        # Frame-preview cache: the timeline's hold-to-preview button extracts
+        # a frame on demand. Extraction is a real ffmpeg seek (slow), so we
+        # memoize by (video identity, rounded timestamp, height) and drop
+        # entries whose source file changed (mtime) or aged out, so holding
+        # the button or re-pressing the same mark never re-seeks.
+        self._frame_cache: dict = {}  # key -> (video_mtime, fetched_at, jpeg_bytes)
+        self._frame_cache_lock = threading.Lock()
 
         if settings_path is not None:
             self.settings_path = Path(settings_path)
@@ -312,7 +319,84 @@ class AppState:
         return derive_server_urls(self.server_address)[1]
 
     # ------------------------------------------------------------------
-    # Settings persistence (saved on the server, reloaded at startup)
+    # Frame preview (timeline hold-to-preview)
+    # ------------------------------------------------------------------
+
+    # Frame preview: how long a cached frame stays valid, and how many
+    # distinct (timestamp, height) frames we keep per video before evicting
+    # the oldest. Bounded so holding the preview button on a long scan can't
+    # grow memory forever.
+    FRAME_CACHE_TTL_SECONDS = 300.0
+    FRAME_CACHE_MAX_ENTRIES = 48
+    FRAME_MIN_HEIGHT = 64
+    FRAME_MAX_HEIGHT = 480
+
+    def extract_frame_jpeg(self, timestamp: float, height: int) -> tuple[bytes, str]:
+        """Return (jpeg_bytes, cache_state) for one frame of the loaded movie.
+
+        `cache_state` is "hit" or "miss" so the GUI can show a tiny hint that
+        the first press is extracting (a real ffmpeg seek). Extracts at the
+        requested `height` (clamped to a postage-stamp range) and memoizes the
+        result. Raises HTTPException(4xx) on bad input, 500 on ffmpeg failure.
+        """
+        if not self.video_path:
+            raise HTTPException(400, "no movie loaded")
+        video = Path(self.video_path)
+        if not video.exists():
+            raise HTTPException(400, f"video file not found: {self.video_path!r}")
+        try:
+            ts = float(timestamp)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "invalid timestamp")
+        if not (0.0 <= ts):
+            raise HTTPException(400, "timestamp must be >= 0")
+        try:
+            h = int(height)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "invalid height")
+        h = max(self.FRAME_MIN_HEIGHT, min(self.FRAME_MAX_HEIGHT, h))
+        # Round the timestamp to 0.1s so re-presses within a frame window hit
+        # the cache instead of re-seeking (frames are ~1/24s apart anyway).
+        ts_key = round(ts, 1)
+
+        try:
+            mtime = video.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        key = (video, ts_key, h)
+
+        with self._frame_cache_lock:
+            now = time.time()
+            # Drop entries whose source changed or that aged out, plus evict
+            # the oldest if we're over budget. (Cheap: bounded dict.)
+            stale = [
+                k for k, (mt, at, _) in self._frame_cache.items()
+                if mt != mtime or (now - at) > self.FRAME_CACHE_TTL_SECONDS
+            ]
+            for k in stale:
+                del self._frame_cache[k]
+            if key in self._frame_cache:
+                return self._frame_cache[key][2], "hit"
+            if len(self._frame_cache) >= self.FRAME_CACHE_MAX_ENTRIES:
+                # Evict the oldest entry by fetch time.
+                oldest = min(self._frame_cache, key=lambda k: self._frame_cache[k][1])
+                del self._frame_cache[oldest]
+
+        from nuclearcutter.utils.ffmpeg import extract_frame_jpeg_bytes
+
+        try:
+            jpeg = extract_frame_jpeg_bytes(video, ts, scale_height=h)
+        except Exception as exc:
+            raise HTTPException(500, f"frame extraction failed: {exc}") from exc
+        if not jpeg:
+            raise HTTPException(500, "frame extraction returned no data")
+
+        with self._frame_cache_lock:
+            self._frame_cache[key] = (mtime, time.time(), jpeg)
+        return jpeg, "miss"
+
+    # ------------------------------------------------------------------
+    # Settings persistence (saved on the server, reloaded on startup)
     # ------------------------------------------------------------------
 
     def _load_settings(self) -> None:
@@ -1327,6 +1411,18 @@ def create_app(state: AppState | None = None) -> FastAPI:
     @app.get("/api/state")
     def api_state():
         return st.state_dict()
+
+    @app.get("/api/frame")
+    def api_frame(t: float, h: int = 320):
+        """One frame of the loaded movie as a JPEG, for the timeline's
+        hold-to-preview button. `t` is the timestamp (seconds); `h` the
+        requested height in px (clamped to the postage-stamp range server-side).
+        Frames are extracted on demand and cached, so holding the button or
+        re-pressing the same mark doesn't re-run ffmpeg.
+        """
+        jpeg, _state = st.extract_frame_jpeg(t, h)
+        return Response(content=jpeg, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
 
     @app.get("/api/models")
     def api_models(base_url: str = "", vlm: str = ""):
