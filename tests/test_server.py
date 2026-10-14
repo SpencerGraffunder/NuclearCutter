@@ -629,3 +629,79 @@ def test_settings_file_surfaces_in_state(tmp_path):
     st, c = make_client(AppState(settings_path=path))
     d = c.get("/api/state").json()
     assert d["server"]["settings_file"] == str(path)
+
+
+# ---------------------------------------------------------------- frame preview
+
+def test_frame_requires_video():
+    _, c = make_client()
+    r = c.get("/api/frame", params={"t": 1.0})
+    assert r.status_code == 400
+    assert "no movie loaded" in r.json()["detail"]
+
+
+def test_frame_rejects_bad_inputs(tmp_path):
+    movie = tmp_path / "M.mkv"
+    movie.write_bytes(b"x")
+    st, c = make_client()
+    c.post("/api/settings", json={"settings": {"video_path": str(movie)}})
+    # Negative timestamp is a semantic error -> our 400.
+    assert c.get("/api/frame", params={"t": -1}).status_code == 400
+    # Non-numeric values are type errors -> FastAPI's 422.
+    assert c.get("/api/frame", params={"t": "abc"}).status_code == 422
+    assert c.get("/api/frame", params={"t": 1.0, "h": "xyz"}).status_code == 422
+
+
+def test_frame_returns_jpeg_and_caches(tmp_path):
+    """A valid request returns a JPEG; the same (ts, height) request is a
+    cache hit — ffmpeg is invoked exactly once."""
+    movie = tmp_path / "M.mkv"
+    movie.write_bytes(b"x")
+    st, c = make_client()
+    c.post("/api/settings", json={"settings": {"video_path": str(movie)}})
+    calls = []
+
+    def fake_extract(video, timestamp_seconds, scale_height=None):
+        calls.append((video, timestamp_seconds, scale_height))
+        return b"\xff\xd8fake-jpeg\xff\xd9"
+
+    with patch("nuclearcutter.utils.ffmpeg.extract_frame_jpeg_bytes",
+               side_effect=fake_extract) as m:
+        r1 = c.get("/api/frame", params={"t": 12.34, "h": 320})
+        r2 = c.get("/api/frame", params={"t": 12.3, "h": 320})
+    assert r1.status_code == 200
+    assert r1.headers["content-type"] == "image/jpeg"
+    assert r1.content == b"\xff\xd8fake-jpeg\xff\xd9"
+    # 12.34 rounds to 12.3 -> same cache key as r2.
+    assert r2.content == r1.content
+    assert len(calls) == 1
+    # Height is passed through (clamped server-side to the stamp range).
+    assert calls[0][1] == 12.34 and calls[0][2] == 320
+
+
+def test_frame_height_clamped(tmp_path):
+    movie = tmp_path / "M.mkv"
+    movie.write_bytes(b"x")
+    st, c = make_client()
+    c.post("/api/settings", json={"settings": {"video_path": str(movie)}})
+    with patch("nuclearcutter.utils.ffmpeg.extract_frame_jpeg_bytes",
+               return_value=b"\xff\xd8x\xff\xd9") as m:
+        c.get("/api/frame", params={"t": 1.0, "h": 5000})
+    assert m.call_args.kwargs["scale_height"] == st.FRAME_MAX_HEIGHT
+    m.reset_mock()
+    with patch("nuclearcutter.utils.ffmpeg.extract_frame_jpeg_bytes",
+               return_value=b"\xff\xd8x\xff\xd9") as m:
+        c.get("/api/frame", params={"t": 1.0, "h": 2})
+    assert m.call_args.kwargs["scale_height"] == st.FRAME_MIN_HEIGHT
+
+
+def test_frame_extraction_failure_is_500(tmp_path):
+    movie = tmp_path / "M.mkv"
+    movie.write_bytes(b"x")
+    st, c = make_client()
+    c.post("/api/settings", json={"settings": {"video_path": str(movie)}})
+    with patch("nuclearcutter.utils.ffmpeg.extract_frame_jpeg_bytes",
+               side_effect=RuntimeError("boom")):
+        r = c.get("/api/frame", params={"t": 1.0})
+    assert r.status_code == 500
+    assert "frame extraction failed" in r.json()["detail"]

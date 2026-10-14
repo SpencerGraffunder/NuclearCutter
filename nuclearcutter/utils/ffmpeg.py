@@ -6,6 +6,7 @@ ffmpeg.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -161,3 +162,49 @@ def extract_frames_in_range(
         **_FFMPEG_RUN_KWARGS,
     )
     return sorted(out_dir.glob("frame_*.png"))
+
+
+def extract_frame_jpeg_bytes(
+    video_path: Path, timestamp_seconds: float, scale_height: int | None = None,
+) -> bytes:
+    """Extract one frame at `timestamp_seconds` and return it as JPEG bytes.
+
+    Unlike `extract_frame_at` (which writes a temp PNG the caller must clean
+    up), this streams straight to an in-memory JPEG — the right shape for
+    serving a frame over HTTP. `scale_height` downscales to that output height
+    (width auto, aspect preserved), e.g. 800px tall for a postage-stamp
+    preview. On ffmpeg failure (e.g. timestamp past the end of the file) it
+    retries once 0.1s earlier, then raises RuntimeError.
+    """
+    out = Path(tempfile.mktemp(suffix=".jpg"))
+
+    def _run(ts: float) -> tuple[bool, str]:
+        cmd = ["ffmpeg", "-y", "-ss", str(ts), "-i", str(video_path), "-frames:v", "1"]
+        if scale_height:
+            cmd += ["-vf", f"scale=-2:{scale_height}"]
+        cmd += ["-q:v", "2", str(out)]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return True, result.stderr or ""
+        except subprocess.CalledProcessError as e:
+            return False, e.stderr or "(no stderr)"
+
+    ok, stderr = _run(timestamp_seconds)
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        with contextlib.suppress(OSError):
+            out.unlink(missing_ok=True)
+        retry_ts = max(0.0, timestamp_seconds - 0.1)
+        ok2, stderr2 = _run(retry_ts)
+        if not ok2 or not out.exists() or out.stat().st_size == 0:
+            with contextlib.suppress(OSError):
+                out.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"ffmpeg failed to extract frame at {timestamp_seconds}s "
+                f"(retry at {retry_ts}s) for {video_path}\n"
+                f"ffmpeg stderr:\n{stderr2}"
+            )
+    try:
+        return out.read_bytes()
+    finally:
+        with contextlib.suppress(OSError):
+            out.unlink(missing_ok=True)
