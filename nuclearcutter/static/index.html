@@ -164,6 +164,10 @@
     height: 260px; overflow-y: auto; padding: 8px 10px; font-family: var(--mono);
     font-size: 11px; line-height: 1.55; color: var(--green); }
   #terminal div { white-space: pre-wrap; word-break: break-word; }
+  /* Hover preview for terminal thumbnails: half the terminal panel's height. */
+  .term-img-preview { position: fixed; z-index: 1000; display: none;
+    border: 1px solid var(--border); border-radius: 4px; background: #000;
+    max-width: 80vw; }
   /* Fixed-width percentage labels keep every STATUS progress bar the same
      length regardless of the displayed value ("0%" vs "100%" — without this,
      a shorter label leaves more flex space for the bar and it drifts). All the
@@ -822,6 +826,41 @@ function renderState() {
 const TERM_JOB_COLOR = {scan: "var(--green)", render: "var(--yellow)", benchmark: "var(--magenta)", ui: "var(--text-dim)"};
 let termRenderedCount = 0;
 
+// Hover preview for terminal thumbnails: one shared fixed-position element
+// sized to half the terminal panel's height, anchored near the hovered image.
+let termImgPreview = null;
+function getTermImgPreview() {
+  if (!termImgPreview) {
+    termImgPreview = document.createElement("img");
+    termImgPreview.className = "term-img-preview";
+    document.body.appendChild(termImgPreview);
+    termImgPreview.addEventListener("mouseleave", hideTermImgPreview);
+  }
+  return termImgPreview;
+}
+function showTermImgPreview(img) {
+  const p = getTermImgPreview();
+  p.src = img.src;
+  const term = $("terminal");
+  const h = Math.max(80, Math.floor((term ? term.clientHeight : 260) / 2));
+  p.style.height = h + "px";
+  const r = img.getBoundingClientRect();
+  // Anchor just above the thumbnail; if there isn't room, put it below.
+  let top = r.top - h - 8;
+  if (top < 8) top = r.bottom + 8;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 8);
+  let left = Math.max(8, r.left);
+  p.style.display = "block";
+  p.style.top = top + "px";
+  p.style.left = left + "px";
+  if (left + p.offsetWidth > window.innerWidth - 8) {
+    p.style.left = Math.max(8, window.innerWidth - p.offsetWidth - 8) + "px";
+  }
+}
+function hideTermImgPreview() {
+  if (termImgPreview) termImgPreview.style.display = "none";
+}
+
 function renderTerminal() {
   if (!state || !state.all_logs) return;
   const logs = state.all_logs;
@@ -850,6 +889,13 @@ function renderTerminal() {
         img.style.verticalAlign = "middle";
         img.style.marginLeft = "4px";
         img.style.border = "1px solid var(--border)";
+        img.style.cursor = "zoom-in";
+        img.addEventListener("mouseenter", () => showTermImgPreview(img));
+        img.addEventListener("mouseleave", ev => {
+          // Stay open if the mouse is heading to the preview itself.
+          if (ev.relatedTarget && termImgPreview && ev.relatedTarget === termImgPreview) return;
+          hideTermImgPreview();
+        });
         row.appendChild(img);
       });
       term.appendChild(row);
