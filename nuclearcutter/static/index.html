@@ -86,6 +86,23 @@
   /* Marks the current render settings WOULD catch are full opacity; the rest
      stay visible (flagged on the timeline) but dimmed. */
   .tl-mark.not-caught { opacity: .4; }
+  /* A detection the user dismissed via the popup override ("removed"): it stays
+     flagged on the timeline but in dark grey, and the render leaves it alone.
+     This wins over the category color and the not-caught dimming. */
+  .tl-mark.removed { background: #3a3a3a; opacity: 1; }
+  /* Override controls inside the timeline popup: a level dropdown + Apply.
+     pointer-events:auto so they're reachable (the tooltip allows them). */
+  .tl-override { pointer-events: auto; margin-top: 8px; display: flex;
+    align-items: center; gap: 6px; }
+  .tl-override select { background: #101810; color: var(--green);
+    border: 1px solid var(--green-dim); border-radius: 3px; padding: 3px 5px;
+    font-size: 10px; font-family: inherit; }
+  .tl-override .tl-apply { cursor: pointer; background: #101810;
+    color: var(--green); border: 1px solid var(--green-dim); border-radius: 3px;
+    padding: 3px 9px; font-size: 10px; letter-spacing: .5px; font-family: inherit; }
+  .tl-override .tl-apply:hover { background: #162416; }
+  .tl-override .tl-apply:active { background: #1c2e1c; }
+  .tl-override .tl-apply.done { color: #d7ffd7; border-color: var(--green); }
   /* Floating hover tooltip for timeline marks (shows the summary text). Fixed
      position so it isn't clipped by #tl-bar's overflow:hidden. */
   #tl-tooltip { display: none; position: fixed; z-index: 80; background: #0d0d0d;
@@ -565,22 +582,34 @@ function applySettingsToUI(s, skipSave) {
 }
 
 // ---------------------------------------------------------------- timeline
+// The severity the render gates a detection on: the user's per-detection level
+// override when set to a level (low/med/high/exhigh), else the scanned level.
+// A "removed" override is handled by the caller (the render skips it outright).
+function effectiveLevelOf(d) {
+  if (d.level_override && d.level_override !== "removed" && LEVEL_RANK[d.level_override] != null) {
+    return d.level_override;
+  }
+  return d.level;
+}
 function detectionCaught(d) {
   const s = state.settings;
   const cat = d.category;
+  // A user-removed detection is never rendered, regardless of settings.
+  if (d.level_override === "removed") return false;
   if (cat === "foul_language") {
     const lvl = s.levels["foul_language"], va = s.visual_actions["foul_language"], aa = s.audio_actions["foul_language"];
     if (va === "none" && aa === "none") return false;
     if (d.llm_confirmed === false) return false;
-    return LEVEL_RANK[d.level] <= LEVEL_RANK[lvl];
+    return LEVEL_RANK[effectiveLevelOf(d)] <= LEVEL_RANK[lvl];
   }
   const lvl = s.levels[cat], va = s.visual_actions[cat], aa = s.audio_actions[cat];
   if (va === "none" && aa === "none") return false;
-  return LEVEL_RANK[d.level] <= LEVEL_RANK[lvl];
+  return LEVEL_RANK[effectiveLevelOf(d)] <= LEVEL_RANK[lvl];
 }
 let tlTipEl = null;
 let tlPreviewBtn = null;   // the hold-to-reveal button inside the tooltip
 let tlPreviewTs = 0;       // timestamp (s) the current tooltip's button previews
+let tlOverride = null;     // the level-override dropdown + Apply row in the tooltip
 let framePopEl = null;     // the separate at-cursor frame popup
 let framePopBusy = false;
 let tlTipHideTimer = null; // deferred hide: lets the mouse cross the 10px gap
@@ -602,6 +631,48 @@ function scheduleTipHide() {
   // the button and its pointerup will clean up).
   if (tlPreviewBtn && tlPreviewBtn.classList.contains("holding")) return;
   tlTipHideTimer = setTimeout(hideTlTooltip, 150);
+}
+// The level-override dropdown + Apply row inside the tooltip. One shared element,
+// re-pointed at each mark via mark.dataset (oType/oIndex). `current` is the
+// mark's stored override (or null).
+const OVERRIDE_OPTIONS = ["low", "med", "high", "exhigh", "removed"];
+function ensureTlOverride() {
+  if (tlOverride) return tlOverride;
+  tlOverride = document.createElement("div");
+  tlOverride.className = "tl-override";
+  const sel = document.createElement("select");
+  const def = document.createElement("option");
+  def.value = ""; def.textContent = "level: (scan default)";
+  sel.appendChild(def);
+  OVERRIDE_OPTIONS.forEach(v => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v === "removed" ? "remove" : "level: " + v;
+    sel.appendChild(o);
+  });
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tl-apply";
+  btn.textContent = "Apply";
+  btn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const m = tlOverride._mark;
+    if (!m || !m.dataset.oType) return;
+    const level = sel.value === "" ? null : sel.value;
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      await post("/api/detection/override",
+        {type: m.dataset.oType, index: parseInt(m.dataset.oIndex, 10), level});
+      poll(); // refetch state -> the persisted override re-colors the mark / counts
+    } catch (err) {
+      btn.textContent = "err";
+      log("override failed: " + err);
+    }
+    btn.disabled = false; btn.textContent = "Apply";
+  });
+  tlOverride.appendChild(sel);
+  tlOverride.appendChild(btn);
+  tlOverride._sel = sel; tlOverride._btn = btn; tlOverride._mark = null;
+  return tlOverride;
 }
 function showTlTooltip(ev) {
   clearTimeout(tlTipHideTimer);
@@ -651,6 +722,15 @@ function showTlTooltip(ev) {
       });
     }
     tl.appendChild(tlPreviewBtn);
+  }
+  // Level-override controls, for classified detections only (visual + language —
+  // unconfirmed candidates have no category/level to override). One shared row,
+  // re-pointed at this mark; its select is pre-filled with the stored override.
+  if (mark.dataset.oType) {
+    const ov = ensureTlOverride();
+    ov._mark = mark;
+    ov._sel.value = mark.dataset.oOverride || "";
+    tl.appendChild(ov);
   }
   tl.style.display = "block";
   const r = mark.getBoundingClientRect();
@@ -725,26 +805,37 @@ function renderTimeline() {
   // the current render settings would catch. Marks the render WOULD catch are
   // full opacity; the rest are dimmed. Every mark has a hover tooltip showing
   // its summary text (the description written by the summary model).
-  (tlInfo.visual_detections || []).forEach(d => {
+  (tlInfo.visual_detections || []).forEach((d, i) => {
     marks.push({
       start: d.start, end: d.end, cat: d.category, caught: detectionCaught(d),
+      removed: d.level_override === "removed",
+      oType: "visual", oIndex: i, oOverride: d.level_override || "",
       tip: `${d.category} @ ${fmtSecs(d.start)}–${fmtSecs(d.end)} · level ${d.level}\n${d.description || "(no description)"}`,
     });
   });
-  (tlInfo.language_detections || []).forEach(d => {
+  (tlInfo.language_detections || []).forEach((d, i) => {
     marks.push({
       start: d.utterance_start, end: d.utterance_end, cat: "foul_language", caught: detectionCaught(d),
+      removed: d.level_override === "removed",
+      oType: "language", oIndex: i, oOverride: d.level_override || "",
       tip: `foul language @ ${fmtSecs(d.utterance_start)}–${fmtSecs(d.utterance_end)} · level ${d.level}\n“${d.word || ""}”`,
     });
   });
   marks.forEach(m => {
     const el = document.createElement("div");
-    el.className = "tl-mark " + m.cat + (m.caught ? "" : " not-caught");
+    el.className = "tl-mark " + m.cat + (m.caught ? "" : " not-caught") + (m.removed ? " removed" : "");
     const x0 = Math.max(0, m.start / dur * 100), x1 = Math.min(100, m.end / dur * 100);
     el.style.left = x0 + "%"; el.style.width = Math.max(0.4, x1 - x0) + "%";
     if (m.tip) {
       el.dataset.tip = m.tip;
       el.dataset.t = String(m.start); // hold-to-preview frame timestamp
+      if (m.oType) {
+        // Classified detection: expose its type/index/override so the timeline
+        // popup can offer a level override (low/med/high/exhigh/remove).
+        el.dataset.oType = m.oType;
+        el.dataset.oIndex = String(m.oIndex);
+        el.dataset.oOverride = m.oOverride;
+      }
       el.addEventListener("mouseenter", showTlTooltip);
       el.addEventListener("mouseleave", scheduleTipHide);
     }

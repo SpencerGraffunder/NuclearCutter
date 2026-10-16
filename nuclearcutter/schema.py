@@ -139,6 +139,24 @@ class SeverityLevel(str, Enum):
 # into a member). Used for ordering comparisons.
 _SEVERITY_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
 
+# A per-detection level OVERRIDE the user can set from the timeline popup. It
+# is stored as a plain string sentinel on the detection (NOT a SeverityLevel
+# member), so the standardized SeverityLevel scale stays untouched and shared
+# scan files stay valid. "removed" means the user dismissed this detection: it
+# stays flagged on the timeline (in dark grey) but the render must leave it
+# alone no matter what the render settings say.
+LEVEL_OVERRIDE_REMOVED = "removed"
+LEVEL_OVERRIDE_CHOICES = ("low", "med", "high", "exhigh", LEVEL_OVERRIDE_REMOVED)
+
+
+def _parse_level_override(value) -> Optional[str]:
+    """Tolerant parse of a stored level override: a valid choice string, or
+    None when absent/blank/unknown. Returns the string (lowercased) or None."""
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    return v if v in LEVEL_OVERRIDE_CHOICES else None
+
 
 @dataclass
 class VisualDetection:
@@ -151,6 +169,8 @@ class VisualDetection:
     confidence: float  # 0-1, from the VLM confirmation stage
     level: SeverityLevel = SeverityLevel.MED  # how severe (low/med/high/exhigh)
     stage_a_score: Optional[float] = None  # retained for backward-compat; always None with the VLM sweep
+    level_override: Optional[str] = None  # per-detection override set in the GUI
+                                            # ("low"/"med"/"high"/"exhigh"/"removed"), else None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -163,7 +183,22 @@ class VisualDetection:
         d = dict(d)
         d["category"] = Category.from_legacy(d["category"])
         d["level"] = SeverityLevel.from_any(d.get("level"))
+        d["level_override"] = _parse_level_override(d.get("level_override"))
         return VisualDetection(**d)
+
+    @property
+    def is_removed(self) -> bool:
+        """True when the user dismissed this detection via the timeline popup.
+        It stays in the timeline (dark grey) but the render leaves it alone."""
+        return self.level_override == LEVEL_OVERRIDE_REMOVED
+
+    def effective_level(self) -> SeverityLevel:
+        """The severity the render gates on: the user's override when set to a
+        level, otherwise the scanned level. (A "removed" override is handled
+        separately by `is_removed` — the render skips the detection outright.)"""
+        if self.level_override in ("low", "med", "high", "exhigh"):
+            return SeverityLevel(self.level_override)
+        return self.level
 
 
 @dataclass
@@ -179,6 +214,8 @@ class LanguageDetection:
     llm_confirmed: bool  # result of the always-on LLM context check
     llm_reasoning: Optional[str] = None
     level: SeverityLevel = SeverityLevel.MED  # severity of this word (low/med/high/exhigh)
+    level_override: Optional[str] = None  # per-detection override set in the GUI
+                                            # ("low"/"med"/"high"/"exhigh"/"removed"), else None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -189,7 +226,22 @@ class LanguageDetection:
     def from_dict(d: dict) -> "LanguageDetection":
         d = dict(d)
         d["level"] = SeverityLevel.from_any(d.get("level"))
+        d["level_override"] = _parse_level_override(d.get("level_override"))
         return LanguageDetection(**d)
+
+    @property
+    def is_removed(self) -> bool:
+        """True when the user dismissed this detection via the timeline popup.
+        It stays in the timeline (dark grey) but the render leaves it alone."""
+        return self.level_override == LEVEL_OVERRIDE_REMOVED
+
+    def effective_level(self) -> SeverityLevel:
+        """The severity the render gates on: the user's override when set to a
+        level, otherwise the scanned level. (A "removed" override is handled
+        separately by `is_removed` — the render skips the detection outright.)"""
+        if self.level_override in ("low", "med", "high", "exhigh"):
+            return SeverityLevel(self.level_override)
+        return self.level
 
 
 @dataclass
