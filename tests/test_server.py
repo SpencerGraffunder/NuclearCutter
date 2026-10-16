@@ -242,6 +242,47 @@ def test_restart_after_scan_clear_reflects_kept_transcript(tmp_path):
     assert "Transcript cached" in st.scan.message
 
 
+def test_switching_to_movie_without_scan_resets_status(tmp_path):
+    """Issue #13: selecting a file that has no existing scan must reset the
+    displayed status to 0 progress instead of leaving the previous movie's
+    status on the bars and timeline."""
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    assert st.scan.status == "done"
+    assert st.scan.progress == 1.0
+
+    # Switch to a DIFFERENT movie that has no scan file: everything zeroes.
+    other = tmp_path / "Other.mkv"
+    other.write_bytes(b"x")
+    st.update_settings({"video_path": str(other)})
+    assert st.scan_result is None
+    assert st.scan_result_path == ""
+    assert st.scan.status == "idle"
+    assert st.scan.progress == 0.0
+    assert st.scan.duration == 0.0
+    assert st.scan.steps == {"transcribe": 0.0, "scan": 0.0, "verify": 0.0,
+                             "summary": 0.0, "render": 0.0}
+    assert st.timeline_dict() is None
+
+
+def test_clearing_video_path_resets_status(tmp_path):
+    """Selecting no file (empty path) also resets the displayed status."""
+    st = AppState()
+    st.scan.status = "done"
+    st.scan.progress = 0.5
+    st.scan.duration = 42.0
+    st.live_timeline = {"visual_candidates": [{"start": 1.0, "end": 2.0}],
+                        "visual_detections": [], "language_detections": []}
+    st.update_settings({"video_path": ""})
+    assert st.scan.status == "idle"
+    assert st.scan.progress == 0.0
+    assert st.scan.duration == 0.0
+    assert st.live_timeline == {"visual_candidates": [], "visual_detections": [],
+                                "language_detections": []}
+    assert st.timeline_dict() is None
+
+
 def test_scan_clear_section_dispatch(tmp_path):
     """/api/scan/clear routes on the section body; unknown sections 400."""
     movie = _write_full_scan(tmp_path)
