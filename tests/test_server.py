@@ -746,3 +746,40 @@ def test_frame_extraction_failure_is_500(tmp_path):
         r = c.get("/api/frame", params={"t": 1.0})
     assert r.status_code == 500
     assert "frame extraction failed" in r.json()["detail"]
+
+
+def test_switching_movie_resets_render_display(tmp_path):
+    """Switching to a different movie also clears the RENDER job's display —
+    its progress belongs to the previous movie."""
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    st.render.status = "done"
+    st.render.progress = 1.0
+    st.render.steps["render"] = 1.0
+
+    other = tmp_path / "Other.mkv"
+    other.write_bytes(b"x")
+    st.update_settings({"video_path": str(other)})
+    assert st.render.status == "idle"
+    assert st.render.progress == 0.0
+    assert st.render.steps["render"] == 0.0
+
+
+def test_unrelated_settings_tweak_keeps_render_display(tmp_path):
+    """The GUI re-POSTs the full settings (video_path included) on every
+    tweak, so an UNCHANGED movie path must reset nothing — a completed
+    render's done/100% display survives."""
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    st.render.status = "done"
+    st.render.progress = 1.0
+    st.render.steps["render"] = 1.0
+
+    st.update_settings({"video_path": str(movie), "blur_strength": 2.0})
+    assert st.render.status == "done"
+    assert st.render.progress == 1.0
+    assert st.render.steps["render"] == 1.0
+    # The scan display is untouched too (the movie still has its scan).
+    assert st.scan.status == "done"

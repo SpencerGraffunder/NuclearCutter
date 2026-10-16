@@ -464,8 +464,10 @@ class AppState:
     def update_settings(self, payload: dict) -> dict:
         """Apply validated GUI settings. Raises ValueError on bad values."""
         if "video_path" in payload:
-            self.video_path = str(payload["video_path"] or "").strip()
-            self._refresh_loaded_scan()
+            new_path = str(payload["video_path"] or "").strip()
+            video_changed = new_path != self.video_path
+            self.video_path = new_path
+            self._refresh_loaded_scan(video_changed=video_changed)
         if "show_prompts" in payload:
             self.show_prompts = bool(payload["show_prompts"])
         if "server_address" in payload:
@@ -730,17 +732,26 @@ class AppState:
         self.live_timeline = {"visual_candidates": [], "visual_detections": [],
                               "language_detections": []}
 
-    def _refresh_loaded_scan(self) -> None:
+    def _refresh_loaded_scan(self, video_changed: bool = False) -> None:
         """When a movie is selected (or the server starts), load any existing
         scan JSON for it so the timeline shows its detections and the progress
         bars reflect the already-completed work. Also reflects a preserved
         transcript even when the scan/verify result was cleared (the two are
         separate sections). If no scan exists for the (new) movie, the scan
         job's displayed status is RESET to 0 progress — a stale status from
-        the previously selected movie must not leak into the new one."""
+        the previously selected movie must not leak into the new one.
+
+        `video_changed` is True only when the movie path ACTUALLY changed
+        (the GUI re-POSTs the full settings — current video_path included —
+        on every tweak, so an unchanged path must not reset anything). When
+        it is, the RENDER job's display is reset too: its progress belongs to
+        the previous movie. A running render is never reset."""
         self.scan_result = None
         self.scan_result_path = ""
         scan_running = self.scan.thread is not None and self.scan.thread.is_alive()
+        if video_changed and not (self.render.thread is not None
+                                  and self.render.thread.is_alive()):
+            self.render = JobInfo(kind="render")
         video = Path(self.video_path) if self.video_path else None
         if video is None or not video.exists():
             if not scan_running:
