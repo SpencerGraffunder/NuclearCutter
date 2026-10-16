@@ -91,19 +91,14 @@
      flagged on the timeline but in dark grey, and the render leaves it alone.
      This wins over the category color and the not-caught dimming. */
   .tl-mark.removed { background: #3a3a3a; opacity: 1; }
-  /* Override controls inside the timeline popup: a level dropdown + Apply.
-     pointer-events:auto so they're reachable (the tooltip allows them). */
+  /* Override controls inside the timeline popup: a level dropdown that applies
+     on selection (no Apply button — see issue #21). pointer-events:auto so
+     they're reachable (the tooltip allows them). */
   .tl-override { pointer-events: auto; margin-top: 8px; display: flex;
     align-items: center; gap: 6px; }
   .tl-override select { background: #101810; color: var(--green);
     border: 1px solid var(--green-dim); border-radius: 3px; padding: 3px 5px;
     font-size: 10px; font-family: inherit; }
-  .tl-override .tl-apply { cursor: pointer; background: #101810;
-    color: var(--green); border: 1px solid var(--green-dim); border-radius: 3px;
-    padding: 3px 9px; font-size: 10px; letter-spacing: .5px; font-family: inherit; }
-  .tl-override .tl-apply:hover { background: #162416; }
-  .tl-override .tl-apply:active { background: #1c2e1c; }
-  .tl-override .tl-apply.done { color: #d7ffd7; border-color: var(--green); }
   /* Floating hover tooltip for timeline marks (shows the summary text). Fixed
      position so it isn't clipped by #tl-bar's overflow:hidden. */
   #tl-tooltip { display: none; position: fixed; z-index: 80; background: #0d0d0d;
@@ -610,7 +605,10 @@ function detectionCaught(d) {
 let tlTipEl = null;
 let tlPreviewBtn = null;   // the hold-to-reveal button inside the tooltip
 let tlPreviewTs = 0;       // timestamp (s) the current tooltip's button previews
-let tlOverride = null;     // the level-override dropdown + Apply row in the tooltip
+let tlOverride = null;     // the level-override dropdown row in the tooltip
+let overrideSelectActive = false; // a level-override select is being interacted
+                           // with — the tooltip must not hide (the native
+                           // dropdown steals the pointer, firing mouseleave)
 let framePopEl = null;     // the separate at-cursor frame popup
 let framePopBusy = false;
 let tlTipHideTimer = null; // deferred hide: lets the mouse cross the 10px gap
@@ -631,11 +629,17 @@ function scheduleTipHide() {
   // Never hide while the preview button is held (the pointer is captured by
   // the button and its pointerup will clean up).
   if (tlPreviewBtn && tlPreviewBtn.classList.contains("holding")) return;
+  // Never hide while a level-override dropdown is open/focused: the native
+  // select popup takes the pointer out of the tooltip, firing mouseleave, and
+  // the choice must still be reachable to pick (issue #21).
+  if (overrideSelectActive) return;
   tlTipHideTimer = setTimeout(hideTlTooltip, 150);
 }
-// The level-override dropdown + Apply row inside the tooltip. One shared element,
+// The level-override dropdown row inside the tooltip. One shared element,
 // re-pointed at each mark via mark.dataset (oType/oIndex). `current` is the
-// mark's stored override (or null).
+// mark's stored override (or null). The override is applied the moment a
+// level is selected — no Apply button (issue #21): it was unreachable, since
+// the popup closed before it could be pressed.
 const OVERRIDE_OPTIONS = ["low", "med", "high", "exhigh", "removed"];
 function ensureTlOverride() {
   if (tlOverride) return tlOverride;
@@ -650,29 +654,32 @@ function ensureTlOverride() {
     o.value = v; o.textContent = v === "removed" ? "remove" : "level: " + v;
     sel.appendChild(o);
   });
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "tl-apply";
-  btn.textContent = "Apply";
-  btn.addEventListener("click", async (e) => {
-    e.preventDefault();
-    const m = tlOverride._mark;
+  // While the select is open/focused, the tooltip must stay put (see
+  // scheduleTipHide); leaving it via blur re-arms the normal auto-hide.
+  sel.addEventListener("mousedown", () => { overrideSelectActive = true; });
+  sel.addEventListener("focus", () => {
+    overrideSelectActive = true;
+    clearTimeout(tlTipHideTimer);
+  });
+  sel.addEventListener("blur", () => { overrideSelectActive = false; scheduleTipHide(); });
+  sel.addEventListener("change", async () => {
+    const m = tlOverride && tlOverride._mark;
     if (!m || !m.dataset.oType) return;
     const level = sel.value === "" ? null : sel.value;
-    btn.disabled = true; btn.textContent = "…";
+    sel.disabled = true;
+    overrideSelectActive = false;
     try {
       await post("/api/detection/override",
         {type: m.dataset.oType, index: parseInt(m.dataset.oIndex, 10), level});
-      poll(); // refetch state -> the persisted override re-colors the mark / counts
+      hideTlTooltip(); // the marks rebuild from the refreshed state anyway
+      poll();
     } catch (err) {
-      btn.textContent = "err";
+      sel.disabled = false;
       log("override failed: " + err);
     }
-    btn.disabled = false; btn.textContent = "Apply";
   });
   tlOverride.appendChild(sel);
-  tlOverride.appendChild(btn);
-  tlOverride._sel = sel; tlOverride._btn = btn; tlOverride._mark = null;
+  tlOverride._sel = sel; tlOverride._mark = null;
   return tlOverride;
 }
 function showTlTooltip(ev) {
