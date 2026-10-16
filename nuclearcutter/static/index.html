@@ -666,7 +666,7 @@ function ensureTlOverride() {
     const m = tlOverride && tlOverride._mark;
     if (!m || !m.dataset.oType) return;
     const level = sel.value === "" ? null : sel.value;
-    sel.disabled = true;
+    sel.disabled = true; // in-flight guard — ALWAYS cleared below (success or not)
     overrideSelectActive = false;
     try {
       await post("/api/detection/override",
@@ -674,9 +674,9 @@ function ensureTlOverride() {
       hideTlTooltip(); // the marks rebuild from the refreshed state anyway
       poll();
     } catch (err) {
-      sel.disabled = false;
       log("override failed: " + err);
     }
+    sel.disabled = false; // the row is shared between all popups — never leave it disabled
   });
   tlOverride.appendChild(sel);
   tlOverride._sel = sel; tlOverride._mark = null;
@@ -737,6 +737,8 @@ function showTlTooltip(ev) {
   if (mark.dataset.oType) {
     const ov = ensureTlOverride();
     ov._mark = mark;
+    ov._sel.disabled = false; // belt-and-braces: a previous apply must never
+                              // leave the shared dropdown disabled
     ov._sel.value = mark.dataset.oOverride || "";
     tl.appendChild(ov);
   }
