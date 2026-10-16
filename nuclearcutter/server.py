@@ -721,6 +721,16 @@ class AppState:
         except Exception:
             pass  # never let prompt logging break a request
 
+    @staticmethod
+    def _reset_job_idle(job: JobInfo) -> JobInfo:
+        """Return a fresh idle JobInfo of the same kind — used to clear a
+        movie's status/progress when switching files. A job whose thread is
+        still alive is returned UNCHANGED (resetting it would destroy a live
+        running job and its stop event)."""
+        if job.thread is not None and job.thread.is_alive():
+            return job
+        return JobInfo(kind=job.kind)
+
     def _refresh_loaded_scan(self) -> None:
         """When a movie is selected (or the server starts), load any existing
         scan JSON for it so the timeline shows its detections and the progress
@@ -729,6 +739,12 @@ class AppState:
         separate sections)."""
         self.scan_result = None
         self.scan_result_path = ""
+        # Switching file means the previous movie's status/progress no longer
+        # applies — reset the scan + render jobs to a clean idle state so the
+        # GUI doesn't show a stale "done"/100% from the prior file when the new
+        # one has no saved scan. Never touch a job whose thread is still alive.
+        self.scan = self._reset_job_idle(self.scan)
+        self.render = self._reset_job_idle(self.render)
         if not self.video_path:
             return
         video = Path(self.video_path)

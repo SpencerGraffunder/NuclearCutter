@@ -242,6 +242,64 @@ def test_restart_after_scan_clear_reflects_kept_transcript(tmp_path):
     assert "Transcript cached" in st.scan.message
 
 
+def test_switching_to_unscanned_file_resets_status(tmp_path):
+    """Selecting a file that has NO saved scan must reset the scan/render
+    status to idle/0% — it must not leave the previous file's done/100%
+    status on screen (issue #13)."""
+    # A first movie WITH a completed scan, so its status is "done"/100%.
+    scanned = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(scanned)})
+    assert st.scan_result is not None
+    assert st.scan.status == "done"
+    assert st.scan.progress == 1.0
+    assert st.scan.steps["scan"] == 1.0
+    assert st.scan.steps["verify"] == 1.0
+    # Simulate a prior render so the render bar is non-zero too.
+    st.render.status = "done"
+    st.render.progress = 1.0
+    st.render.steps["render"] = 1.0
+
+    # Now switch to a brand-new movie that has no scan of any kind.
+    fresh = tmp_path / "Fresh.mkv"
+    fresh.write_bytes(b"x")
+    st.update_settings({"video_path": str(fresh)})
+
+    # Status must be fully reset, not carried over from the previous file.
+    assert st.scan_result is None
+    assert st.scan.status == "idle"
+    assert st.scan.progress == 0.0
+    assert st.scan.steps == {
+        "transcribe": 0.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0,
+    }
+    assert st.render.status == "idle"
+    assert st.render.progress == 0.0
+    assert st.render.steps["render"] == 0.0
+
+
+def test_reset_job_idle_guard(tmp_path):
+    """_reset_job_idle must clear an idle job to a fresh JobInfo, but return a
+    job with a LIVE thread UNCHANGED (resetting it would destroy a running
+    job and its stop event)."""
+    from unittest.mock import MagicMock
+
+    fresh = AppState._reset_job_idle(JobInfo(kind="scan"))
+    assert fresh.status == "idle"
+    assert fresh.progress == 0.0
+    assert fresh.steps == {
+        "transcribe": 0.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0,
+    }
+
+    live = JobInfo(kind="scan")
+    live.status = "running"
+    live.progress = 0.5
+    live.thread = MagicMock()
+    live.thread.is_alive.return_value = True
+    same = AppState._reset_job_idle(live)
+    assert same is live            # untouched
+    assert same.progress == 0.5    # state preserved
+
+
 def test_scan_clear_section_dispatch(tmp_path):
     """/api/scan/clear routes on the section body; unknown sections 400."""
     movie = _write_full_scan(tmp_path)
