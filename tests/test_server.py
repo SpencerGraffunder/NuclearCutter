@@ -21,6 +21,16 @@ def test_index_serves_ui():
     assert r.status_code == 200
     assert "NUCLEARCUTTER" in r.text
     assert "matrix" in r.text.lower() or "--green" in r.text
+    assert 'rel="icon"' in r.text  # page declares the favicon
+
+
+def test_favicon_serves_image():
+    _, c = make_client()
+    r = c.get("/favicon.ico")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/")
+    # PNG magic bytes (the .ico path serves PNG bytes).
+    assert r.content[:4] == b"\x89PNG"
 
 
 def test_state_snapshot_shape():

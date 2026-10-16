@@ -50,6 +50,7 @@ from nuclearcutter.utils.system_stats import SystemStats
 
 STATIC_DIR = Path(__file__).parent / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
+FAVICON_32 = STATIC_DIR / "favicon-32.png"
 
 # Where GUI settings are persisted (loaded at startup, saved on every change).
 # The old config.toml is gone; this is the app's own saved state.
@@ -1407,6 +1408,14 @@ def create_app(state: AppState | None = None) -> FastAPI:
         # polling with removed element ids and spams the terminal with
         # "state poll error" lines, and its buttons silently hang).
         return FileResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/favicon.ico")
+    def favicon():
+        if not FAVICON_32.exists():
+            raise HTTPException(500, f"favicon missing: {FAVICON_32}")
+        # PNG bytes at the classic .ico path — every modern browser accepts
+        # it, and it avoids shipping a real .ico encoder/dependency.
+        return FileResponse(FAVICON_32, media_type="image/png")
 
     @app.get("/api/state")
     def api_state():
