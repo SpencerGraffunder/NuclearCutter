@@ -23,6 +23,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
@@ -38,6 +39,7 @@ from nuclearcutter.render.renderer import (
 )
 from nuclearcutter.scan.scanner import ScanStopped, scan as scan_pass
 from nuclearcutter.schema import (
+    LEVEL_OVERRIDE_CHOICES, LEVEL_OVERRIDE_REMOVED,
     AudioAction, Preferences, ScanResult, SeverityLevel, VisualAction,
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
@@ -1075,6 +1077,52 @@ class AppState:
             return auto
         raise HTTPException(400, "no scan file found — scan the movie first, or set a scan file path")
 
+    def set_detection_override(self, dtype: str, index: int, level: Optional[str]) -> dict:
+        """Set (or clear) a per-detection level override from the timeline popup.
+
+        `dtype` is "visual" or "language"; `index` is the 0-based position in the
+        corresponding detection list; `level` is one of the LEVEL_OVERRIDE_CHOICES
+        ("low"/"med"/"high"/"exhigh"/"removed") or None to clear. The override is
+        stored ON the detection (a plain string sentinel, not a SeverityLevel), so
+        the standardized severity scale and shared-scan invariants stay intact.
+
+        It is written to the scan file (the same file the render reads), so a
+        "removed" detection is skipped on the next render no matter the settings,
+        and a level override re-gates that detection against the user's threshold.
+        """
+        if self.scan_result is None:
+            raise HTTPException(400, "no scan loaded — load/scan a movie first")
+        if dtype not in ("visual", "language"):
+            raise HTTPException(400, f"detection type must be 'visual' or 'language', got {dtype!r}")
+        if level is not None and level not in LEVEL_OVERRIDE_CHOICES:
+            raise HTTPException(
+                400,
+                f"level override must be one of {list(LEVEL_OVERRIDE_CHOICES)} or null, got {level!r}",
+            )
+        detections = (
+            self.scan_result.visual_detections
+            if dtype == "visual"
+            else self.scan_result.language_detections
+        )
+        if not 0 <= index < len(detections):
+            raise HTTPException(404, f"no {dtype} detection at index {index}")
+        det = detections[index]
+        det.level_override = level
+        # Persist to the scan file the render will read.
+        path = Path(self.scan_result_path) if self.scan_result_path else None
+        if path is not None and path.exists():
+            try:
+                self.scan_result.save(path)
+            except OSError as exc:
+                raise HTTPException(500, f"could not save scan file: {exc}") from exc
+        return {
+            "ok": True,
+            "type": dtype,
+            "index": index,
+            "level": det.level_override,
+            "saved": bool(path is not None and path.exists()),
+        }
+
     def _build_summarizer(self, job: JobInfo, video: Path):
         """Build the RENDER-time summarizer for muted-audio captions, or None.
 
@@ -1303,16 +1351,17 @@ class AppState:
                 "duration": self.scan_result.identity.duration_seconds,
                 "visual_candidates": [],
                 "visual_detections": [
-                    {"category": d.category.value, "start": d.start, "end": d.end,
+                    {"index": i, "category": d.category.value, "start": d.start, "end": d.end,
                      "level": d.level.value, "confidence": d.confidence,
-                     "description": d.description}
-                    for d in self.scan_result.visual_detections
+                     "description": d.description, "level_override": d.level_override}
+                    for i, d in enumerate(self.scan_result.visual_detections)
                 ],
                 "language_detections": [
-                    {"category": "foul_language", "start": d.start, "end": d.end,
+                    {"index": i, "category": "foul_language", "start": d.start, "end": d.end,
                      "utterance_start": d.utterance_start, "utterance_end": d.utterance_end,
-                     "word": d.word, "level": d.level.value, "llm_confirmed": d.llm_confirmed}
-                    for d in self.scan_result.language_detections
+                     "word": d.word, "level": d.level.value, "llm_confirmed": d.llm_confirmed,
+                     "level_override": d.level_override}
+                    for i, d in enumerate(self.scan_result.language_detections)
                 ],
             }
         live = self.live_timeline
@@ -1393,6 +1442,12 @@ class LogBody(BaseModel):
 
 class ClearScanBody(BaseModel):
     section: str = "scan_verify"  # "transcribe" | "scan_verify"
+
+
+class OverrideBody(BaseModel):
+    type: str  # "visual" | "language"
+    index: int  # 0-based position in the detection list
+    level: Optional[str] = None  # "low"|"med"|"high"|"exhigh"|"removed", or None to clear
 
 
 def create_app(state: AppState | None = None) -> FastAPI:
@@ -1488,6 +1543,16 @@ def create_app(state: AppState | None = None) -> FastAPI:
         if section in ("scan", "verify", "scan_verify"):
             return st.clear_scan_progress()
         raise HTTPException(400, f"unknown clear section: {section!r}")
+
+    @app.post("/api/detection/override")
+    def api_detection_override(body: OverrideBody):
+        """Set or clear a per-detection level override from the timeline popup.
+
+        The override is stored on the detection and written to the scan file the
+        render reads, so a "removed" detection is skipped on the next render no
+        matter the settings, and a level override re-gates that detection.
+        """
+        return st.set_detection_override(body.type, body.index, body.level)
 
     @app.post("/api/render/start")
     def api_render_start():
