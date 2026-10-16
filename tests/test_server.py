@@ -23,6 +23,18 @@ def test_index_serves_ui():
     assert "matrix" in r.text.lower() or "--green" in r.text
 
 
+def test_favicon_served_and_linked():
+    """Issue #14: the UI must ship a favicon — the SVG is served at
+    /favicon.svg and the page links it in <head>."""
+    _, c = make_client()
+    r = c.get("/favicon.svg")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/svg+xml")
+    assert "00ff41" in r.text and "ff5f5f" in r.text
+    page = c.get("/")
+    assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in page.text
+
+
 def test_state_snapshot_shape():
     _, c = make_client()
     r = c.get("/api/state")

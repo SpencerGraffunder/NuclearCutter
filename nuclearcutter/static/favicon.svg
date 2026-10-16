@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Dark rounded-square background (matches the interface bg). -->
+  <rect x="0" y="0" width="100" height="100" rx="18" fill="#0d0d0d"/>
+  <!-- Single-color radioactive trefoil (☢ U+2622 shape) in interface green.
+       One blade drawn pointing up, reused rotated 120/240 degrees. -->
+  <g fill="#00ff41">
+    <circle cx="50" cy="50" r="8"/>
+    <path id="blade" d="M 29 13.63 A 42 42 0 0 1 71 13.63 L 56.5 38.74 A 13 13 0 0 0 43.5 38.74 Z"/>
+    <use href="#blade" transform="rotate(120 50 50)"/>
+    <use href="#blade" transform="rotate(240 50 50)"/>
+  </g>
+  <!-- Prohibition "not" symbol over it, in interface red. -->
+  <g stroke="#ff5f5f" fill="none" stroke-linecap="round">
+    <circle cx="50" cy="50" r="45" stroke-width="7"/>
+    <line x1="18.2" y1="18.2" x2="81.8" y2="81.8" stroke-width="7"/>
+  </g>
+</svg>
