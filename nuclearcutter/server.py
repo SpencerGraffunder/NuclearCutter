@@ -1463,6 +1463,17 @@ def create_app(state: AppState | None = None) -> FastAPI:
         # "state poll error" lines, and its buttons silently hang).
         return FileResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
 
+    @app.get("/favicon.svg")
+    def favicon():
+        """The tab icon: a green trefoil with a red prohibition slash
+        (nuclearcutter/static/favicon.svg). Browsers request this
+        automatically once the UI's <link rel="icon"> points at it."""
+        path = STATIC_DIR / "favicon.svg"
+        if not path.exists():
+            raise HTTPException(404, "favicon missing")
+        return FileResponse(path, media_type="image/svg+xml",
+                            headers={"Cache-Control": "no-cache"})
+
     @app.get("/api/state")
     def api_state():
         return st.state_dict()
