@@ -254,6 +254,47 @@ def test_restart_after_scan_clear_reflects_kept_transcript(tmp_path):
     assert "Transcript cached" in st.scan.message
 
 
+def test_switching_to_movie_without_scan_resets_status(tmp_path):
+    """Issue #13: selecting a file that has no existing scan must reset the
+    displayed status to 0 progress instead of leaving the previous movie's
+    status on the bars and timeline."""
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    assert st.scan.status == "done"
+    assert st.scan.progress == 1.0
+
+    # Switch to a DIFFERENT movie that has no scan file: everything zeroes.
+    other = tmp_path / "Other.mkv"
+    other.write_bytes(b"x")
+    st.update_settings({"video_path": str(other)})
+    assert st.scan_result is None
+    assert st.scan_result_path == ""
+    assert st.scan.status == "idle"
+    assert st.scan.progress == 0.0
+    assert st.scan.duration == 0.0
+    assert st.scan.steps == {"transcribe": 0.0, "scan": 0.0, "verify": 0.0,
+                             "summary": 0.0, "render": 0.0}
+    assert st.timeline_dict() is None
+
+
+def test_clearing_video_path_resets_status(tmp_path):
+    """Selecting no file (empty path) also resets the displayed status."""
+    st = AppState()
+    st.scan.status = "done"
+    st.scan.progress = 0.5
+    st.scan.duration = 42.0
+    st.live_timeline = {"visual_candidates": [{"start": 1.0, "end": 2.0}],
+                        "visual_detections": [], "language_detections": []}
+    st.update_settings({"video_path": ""})
+    assert st.scan.status == "idle"
+    assert st.scan.progress == 0.0
+    assert st.scan.duration == 0.0
+    assert st.live_timeline == {"visual_candidates": [], "visual_detections": [],
+                                "language_detections": []}
+    assert st.timeline_dict() is None
+
+
 def test_scan_clear_section_dispatch(tmp_path):
     """/api/scan/clear routes on the section body; unknown sections 400."""
     movie = _write_full_scan(tmp_path)
@@ -717,3 +758,40 @@ def test_frame_extraction_failure_is_500(tmp_path):
         r = c.get("/api/frame", params={"t": 1.0})
     assert r.status_code == 500
     assert "frame extraction failed" in r.json()["detail"]
+
+
+def test_switching_movie_resets_render_display(tmp_path):
+    """Switching to a different movie also clears the RENDER job's display —
+    its progress belongs to the previous movie."""
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    st.render.status = "done"
+    st.render.progress = 1.0
+    st.render.steps["render"] = 1.0
+
+    other = tmp_path / "Other.mkv"
+    other.write_bytes(b"x")
+    st.update_settings({"video_path": str(other)})
+    assert st.render.status == "idle"
+    assert st.render.progress == 0.0
+    assert st.render.steps["render"] == 0.0
+
+
+def test_unrelated_settings_tweak_keeps_render_display(tmp_path):
+    """The GUI re-POSTs the full settings (video_path included) on every
+    tweak, so an UNCHANGED movie path must reset nothing — a completed
+    render's done/100% display survives."""
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    st.render.status = "done"
+    st.render.progress = 1.0
+    st.render.steps["render"] = 1.0
+
+    st.update_settings({"video_path": str(movie), "blur_strength": 2.0})
+    assert st.render.status == "done"
+    assert st.render.progress == 1.0
+    assert st.render.steps["render"] == 1.0
+    # The scan display is untouched too (the movie still has its scan).
+    assert st.scan.status == "done"

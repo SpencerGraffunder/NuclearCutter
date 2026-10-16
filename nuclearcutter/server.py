@@ -466,8 +466,10 @@ class AppState:
     def update_settings(self, payload: dict) -> dict:
         """Apply validated GUI settings. Raises ValueError on bad values."""
         if "video_path" in payload:
-            self.video_path = str(payload["video_path"] or "").strip()
-            self._refresh_loaded_scan()
+            new_path = str(payload["video_path"] or "").strip()
+            video_changed = new_path != self.video_path
+            self.video_path = new_path
+            self._refresh_loaded_scan(video_changed=video_changed)
         if "show_prompts" in payload:
             self.show_prompts = bool(payload["show_prompts"])
         if "server_address" in payload:
@@ -723,18 +725,39 @@ class AppState:
         except Exception:
             pass  # never let prompt logging break a request
 
-    def _refresh_loaded_scan(self) -> None:
+    def _reset_scan_job(self) -> None:
+        """Reset the displayed scan status to a fresh 0-progress state (idle
+        bars, empty timeline). Used when the selected movie changes and no
+        scan exists for it, so stale progress from the previous movie never
+        shows. Never resets a RUNNING scan (callers guard on that)."""
+        self.scan = JobInfo(kind="scan")
+        self.live_timeline = {"visual_candidates": [], "visual_detections": [],
+                              "language_detections": []}
+
+    def _refresh_loaded_scan(self, video_changed: bool = False) -> None:
         """When a movie is selected (or the server starts), load any existing
         scan JSON for it so the timeline shows its detections and the progress
         bars reflect the already-completed work. Also reflects a preserved
         transcript even when the scan/verify result was cleared (the two are
-        separate sections)."""
+        separate sections). If no scan exists for the (new) movie, the scan
+        job's displayed status is RESET to 0 progress — a stale status from
+        the previously selected movie must not leak into the new one.
+
+        `video_changed` is True only when the movie path ACTUALLY changed
+        (the GUI re-POSTs the full settings — current video_path included —
+        on every tweak, so an unchanged path must not reset anything). When
+        it is, the RENDER job's display is reset too: its progress belongs to
+        the previous movie. A running render is never reset."""
         self.scan_result = None
         self.scan_result_path = ""
-        if not self.video_path:
-            return
-        video = Path(self.video_path)
-        if not video.exists():
+        scan_running = self.scan.thread is not None and self.scan.thread.is_alive()
+        if video_changed and not (self.render.thread is not None
+                                  and self.render.thread.is_alive()):
+            self.render = JobInfo(kind="render")
+        video = Path(self.video_path) if self.video_path else None
+        if video is None or not video.exists():
+            if not scan_running:
+                self._reset_scan_job()
             return
         transcript_path = video.with_suffix(".nuclearcutter.transcript.json")
         has_transcript = transcript_path.exists()
@@ -742,9 +765,14 @@ class AppState:
         if self.scan_path and Path(self.scan_path).exists():
             candidate = Path(self.scan_path)
         if not candidate.exists():
-            # No scan/verify result, but the whisper transcript may have been
-            # preserved by a scan+verify clear — keep its bar accurate.
-            if has_transcript and not (self.scan.thread is not None and self.scan.thread.is_alive()):
+            if scan_running:
+                return
+            # No scan/verify result for this movie: start from a clean 0%
+            # status instead of showing the previous movie's progress. The
+            # whisper transcript may still exist (preserved by a scan+verify
+            # clear) — keep its bar accurate even though nothing else is done.
+            self._reset_scan_job()
+            if has_transcript:
                 self.scan.steps["transcribe"] = 1.0
                 self.scan.status = "stopped"
                 self.scan.message = ("Transcript cached — scan + verify were cleared "
