@@ -159,3 +159,70 @@ def test_category_from_legacy_maps_old_names():
     assert Category.from_legacy("gore") == Category.GORE
     assert Category.from_legacy("violence") == Category.VIOLENCE
     assert Category.from_legacy("foul_language") == Category.FOUL_LANGUAGE
+
+
+# ---------------------------------------------------------------------------
+# Per-detection classification override (issue #10)
+# ---------------------------------------------------------------------------
+
+def test_detection_override_defaults_to_none():
+    vd = VisualDetection(category=Category.NUDITY, start=1.0, end=2.0,
+                         description="d", confidence=0.9)
+    ld = LanguageDetection(start=3.0, end=3.5, utterance_start=2.5, utterance_end=4.0,
+                           word="damn", transcript_source="whisper", llm_confirmed=True)
+    assert vd.override is None and ld.override is None
+    assert not vd.is_removed and not ld.is_removed
+    assert vd.effective_level() == vd.level
+    assert ld.effective_level() == ld.level
+
+
+def test_detection_override_round_trips_through_scan_file():
+    identity = FilmIdentity(title="T", year=None, duration_seconds=100.0, phash_samples=[])
+    vd = VisualDetection(category=Category.NUDITY, start=1.0, end=2.0,
+                         description="d", confidence=0.9, override="remove")
+    ld = LanguageDetection(start=3.0, end=3.5, utterance_start=2.5, utterance_end=4.0,
+                           word="damn", transcript_source="whisper", llm_confirmed=True,
+                           override="low")
+    scan = ScanResult(schema_version=1, identity=identity,
+                      visual_detections=[vd], language_detections=[ld])
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "scan.json"
+        scan.save(path)
+        loaded = ScanResult.load(path)
+    assert loaded.visual_detections[0].override == "remove"
+    assert loaded.visual_detections[0].is_removed
+    assert loaded.language_detections[0].override == "low"
+    assert loaded.language_detections[0].effective_level() == SeverityLevel.LOW
+
+
+def test_override_field_is_backward_compatible():
+    """Old scan files (no override key) still load; invalid values sanitize
+    to None instead of poisoning the whole file."""
+    raw = {
+        "schema_version": 1,
+        "identity": {"title": "T", "year": None, "duration_seconds": 10.0, "phash_samples": []},
+        "visual_detections": [
+            {"category": "nudity", "start": 1.0, "end": 2.0, "description": "d",
+             "confidence": 0.9, "level": "high"},
+            {"category": "gore", "start": 3.0, "end": 4.0, "description": "e",
+             "confidence": 0.9, "level": "med", "override": "bogus"},
+        ],
+        "language_detections": [],
+    }
+    scan = ScanResult(
+        schema_version=raw["schema_version"],
+        identity=FilmIdentity.from_dict(raw["identity"]),
+        visual_detections=[VisualDetection.from_dict(x) for x in raw["visual_detections"]],
+        language_detections=[LanguageDetection.from_dict(x) for x in raw["language_detections"]],
+        generator={},
+    )
+    assert scan.visual_detections[0].override is None
+    assert scan.visual_detections[1].override is None  # bogus value sanitized
+
+
+def test_effective_level_prefers_override():
+    vd = VisualDetection(category=Category.GORE, start=1.0, end=2.0,
+                         description="d", confidence=0.9, level=SeverityLevel.HIGH,
+                         override="low")
+    assert vd.effective_level() == SeverityLevel.LOW
+    assert not vd.is_removed

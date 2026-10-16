@@ -343,3 +343,83 @@ def test_make_caption_png_writes_small_image(tmp_path):
     img = Image.open(out)
     assert img.size == (640, 360)
     assert img.mode == "RGBA"
+
+
+# ---------------------------------------------------------------------------
+# Per-detection classification override (issue #10)
+# ---------------------------------------------------------------------------
+
+def test_removed_visual_detection_is_never_rendered():
+    """override='remove' keeps the detection on the timeline but the render
+    must not touch its section NO MATTER the render settings — even the most
+    permissive one (blur + exhigh + mute_scene)."""
+    identity = make_identity(100.0)
+    vd = VisualDetection(category=Category.NUDITY, start=10.0, end=20.0,
+                         description="a", confidence=0.9, override="remove")
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd],
+                      language_detections=[])
+    prefs = Preferences(nudity_visual=VisualAction.BLUR, nudity_audio=AudioAction.MUTE_SCENE,
+                        nudity_level=SeverityLevel.EXHIGH)
+    timeline = plan_timeline(scan, prefs, 100.0)
+    assert [s.visual for s in timeline] == [VisualAction.NONE]
+    assert [s.audio for s in timeline] == [AudioAction.NONE]
+
+
+def test_level_override_changes_which_detections_are_caught():
+    """An explicit level override replaces the scan's own classification when
+    the threshold is applied."""
+    identity = make_identity(100.0)
+    # Scan classified it HIGH (mild) — would be skipped at the med threshold.
+    vd = VisualDetection(category=Category.NUDITY, start=10.0, end=20.0,
+                         description="a", confidence=0.9, level=SeverityLevel.HIGH,
+                         override="low")  # user: it's actually the WORST kind
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[vd],
+                      language_detections=[])
+    prefs = Preferences(nudity_visual=VisualAction.BLUR, nudity_level=SeverityLevel.MED)
+    timeline = plan_timeline(scan, prefs, 100.0)
+    assert any(s.category == Category.NUDITY for s in timeline)
+
+    # And the reverse: scanned LOW but overridden EXHIGH skips a med threshold.
+    vd2 = VisualDetection(category=Category.GORE, start=40.0, end=50.0,
+                          description="b", confidence=0.9, level=SeverityLevel.LOW,
+                          override="exhigh")
+    scan2 = ScanResult(schema_version=1, identity=identity, visual_detections=[vd2],
+                       language_detections=[])
+    timeline2 = plan_timeline(scan2, prefs, 100.0)
+    assert all(s.category is None for s in timeline2)
+
+
+def test_removed_language_detection_is_never_muted():
+    identity = make_identity(100.0)
+    ld = LanguageDetection(
+        start=70.0, end=70.3, utterance_start=69.0, utterance_end=71.0,
+        word="damn", transcript_source="whisper", llm_confirmed=True, override="remove",
+    )
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[],
+                      language_detections=[ld])
+    prefs = Preferences(foul_language_audio=AudioAction.MUTE_WORD,
+                        foul_language_level=SeverityLevel.EXHIGH)
+    assert _language_mute_ranges_within(scan, prefs, make_seg(60.0, 100.0)) == []
+    assert _muted_words_within(scan, prefs, make_seg(60.0, 100.0)) == []
+    # Even with foul_language_visual enabled, no segment is created.
+    prefs_visual = Preferences(foul_language_visual=VisualAction.BLUR,
+                               foul_language_level=SeverityLevel.EXHIGH)
+    assert all(s.category is None for s in plan_timeline(scan, prefs_visual, 100.0))
+
+
+def test_language_level_override_applies_to_mutes():
+    identity = make_identity(100.0)
+    # Scanned HIGH (mild) — skipped at the med threshold...
+    ld = LanguageDetection(
+        start=70.0, end=70.3, utterance_start=69.0, utterance_end=71.0,
+        word="damn", transcript_source="whisper", llm_confirmed=True,
+        level=SeverityLevel.HIGH, override="low",
+    )
+    scan = ScanResult(schema_version=1, identity=identity, visual_detections=[],
+                      language_detections=[ld])
+    prefs = Preferences(foul_language_audio=AudioAction.MUTE_WORD,
+                        foul_language_level=SeverityLevel.MED)
+    ranges = _language_mute_ranges_within(scan, prefs, make_seg(60.0, 100.0))
+    assert len(ranges) == 1
+    assert abs(ranges[0][0] - 9.5) < 1e-6
+    assert _muted_words_within(scan, prefs, make_seg(60.0, 100.0)) == ["damn"]

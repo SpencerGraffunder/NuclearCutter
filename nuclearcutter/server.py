@@ -38,7 +38,7 @@ from nuclearcutter.render.renderer import (
 )
 from nuclearcutter.scan.scanner import ScanStopped, scan as scan_pass
 from nuclearcutter.schema import (
-    AudioAction, Preferences, ScanResult, SeverityLevel, VisualAction,
+    AudioAction, OVERRIDE_VALUES, Preferences, ScanResult, SeverityLevel, VisualAction,
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 from nuclearcutter.utils.model_server import (
@@ -76,6 +76,12 @@ _LEVEL_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
 
 def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _fmt_window(d) -> str:
+    """Human-readable [start–end] window for a visual or language detection
+    (used in override log lines)."""
+    return f"[{d.start:g}–{d.end:g}]"
 
 
 def _thumbnail_data_uri(data_uri: str, max_height: int = 16) -> str:
@@ -1050,6 +1056,47 @@ class AppState:
         return {"removed": removed}
 
     # ------------------------------------------------------------------
+    # Per-detection classification override (timeline popup)
+    # ------------------------------------------------------------------
+
+    def apply_detection_override(self, kind: str, index: int, override: str) -> dict:
+        """Apply a user classification override to one loaded detection.
+
+        `kind` selects the timeline list ("visual" or "language"), `index` the
+        detection's position in it (the timeline order is stable per scan
+        file). `override` is "low"/"med"/"high"/"exhigh" (reclassify) or
+        "remove" (keep flagged on the timeline but NEVER render any change
+        for that section, no matter the render settings). The change is
+        written back into the scan file so it survives restarts and applies
+        to CLI renders of the same file.
+        """
+        if self.scan.thread is not None and self.scan.thread.is_alive():
+            raise HTTPException(409, "scan is running — stop it before overriding")
+        if self.scan_result is None or not self.scan_result_path:
+            raise HTTPException(400, "no completed scan loaded — scan the movie first")
+        if override not in OVERRIDE_VALUES:
+            raise ValueError(f"override must be one of {OVERRIDE_VALUES}, got {override!r}")
+        if kind == "visual":
+            detections = self.scan_result.visual_detections
+        elif kind == "language":
+            detections = self.scan_result.language_detections
+        else:
+            raise ValueError(f"kind must be 'visual' or 'language', got {kind!r}")
+        if not 0 <= index < len(detections):
+            raise ValueError(f"{kind} detection index {index} out of range "
+                             f"(0..{len(detections) - 1})")
+        detections[index].override = override
+        try:
+            self.scan_result.save(Path(self.scan_result_path))
+        except OSError as exc:
+            self.scan_result = ScanResult.load(Path(self.scan_result_path))  # undo in memory
+            raise HTTPException(500, f"could not save the scan file: {exc}") from exc
+        label = "removed from render" if override == "remove" else f"level {override}"
+        self._log(self.scan, f"[override] {kind} detection #{index} @ "
+                             f"{_fmt_window(detections[index])} -> {label}")
+        return self.timeline_dict()
+
+    # ------------------------------------------------------------------
     # Render
     # ------------------------------------------------------------------
 
@@ -1305,13 +1352,14 @@ class AppState:
                 "visual_detections": [
                     {"category": d.category.value, "start": d.start, "end": d.end,
                      "level": d.level.value, "confidence": d.confidence,
-                     "description": d.description}
+                     "override": d.override, "description": d.description}
                     for d in self.scan_result.visual_detections
                 ],
                 "language_detections": [
                     {"category": "foul_language", "start": d.start, "end": d.end,
                      "utterance_start": d.utterance_start, "utterance_end": d.utterance_end,
-                     "word": d.word, "level": d.level.value, "llm_confirmed": d.llm_confirmed}
+                     "word": d.word, "level": d.level.value, "llm_confirmed": d.llm_confirmed,
+                     "override": d.override}
                     for d in self.scan_result.language_detections
                 ],
             }
@@ -1393,6 +1441,12 @@ class LogBody(BaseModel):
 
 class ClearScanBody(BaseModel):
     section: str = "scan_verify"  # "transcribe" | "scan_verify"
+
+
+class DetectionOverrideBody(BaseModel):
+    kind: str   # "visual" | "language"
+    index: int  # position in the timeline's detection list
+    override: str  # "low"/"med"/"high"/"exhigh"/"remove"
 
 
 def create_app(state: AppState | None = None) -> FastAPI:
@@ -1488,6 +1542,18 @@ def create_app(state: AppState | None = None) -> FastAPI:
         if section in ("scan", "verify", "scan_verify"):
             return st.clear_scan_progress()
         raise HTTPException(400, f"unknown clear section: {section!r}")
+
+    @app.post("/api/detection/override")
+    def api_detection_override(body: DetectionOverrideBody):
+        """Apply a per-detection classification override from the timeline
+        popup: reclassify to low/med/high/exhigh, or "remove" to keep the
+        mark on the timeline but never render any change for that section.
+        Persists into the scan file; returns the refreshed timeline."""
+        try:
+            timeline = st.apply_detection_override(body.kind, body.index, body.override)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"timeline": timeline}
 
     @app.post("/api/render/start")
     def api_render_start():

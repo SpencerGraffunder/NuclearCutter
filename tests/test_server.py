@@ -705,3 +705,74 @@ def test_frame_extraction_failure_is_500(tmp_path):
         r = c.get("/api/frame", params={"t": 1.0})
     assert r.status_code == 500
     assert "frame extraction failed" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Per-detection classification override (issue #10)
+# ---------------------------------------------------------------------------
+
+def test_detection_override_applies_and_persists(tmp_path):
+    """The popup's Apply endpoint reclassifies a detection, writes it into
+    the scan file, and echoes the refreshed timeline with the override."""
+    movie = _write_full_scan(tmp_path)  # one visual detection (nudity, HIGH)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    _, c = make_client(st)
+
+    r = c.post("/api/detection/override", json={"kind": "visual", "index": 0, "override": "remove"})
+    assert r.status_code == 200
+    dets = r.json()["timeline"]["visual_detections"]
+    assert dets[0]["override"] == "remove"
+
+    # Persisted to the scan file — a fresh state sees it too.
+    reloaded = AppState()
+    reloaded.update_settings({"video_path": str(movie)})
+    assert reloaded.scan_result.visual_detections[0].override == "remove"
+
+    # Reclassify works as well (and is reflected in the timeline).
+    r2 = c.post("/api/detection/override", json={"kind": "visual", "index": 0, "override": "low"})
+    assert r2.status_code == 200
+    assert r2.json()["timeline"]["visual_detections"][0]["override"] == "low"
+
+
+def test_detection_override_language_detections(tmp_path):
+    from nuclearcutter.schema import (
+        FilmIdentity as FI, LanguageDetection as LD, ScanResult as SR,
+    )
+    movie = tmp_path / "L.mkv"
+    movie.write_bytes(b"x")
+    scan = SR(schema_version=1,
+              identity=FI(title="L", year=None, duration_seconds=100.0, phash_samples=[]),
+              visual_detections=[],
+              language_detections=[
+                  LD(start=5.0, end=5.3, utterance_start=4.0, utterance_end=6.0,
+                     word="damn", transcript_source="whisper", llm_confirmed=True),
+              ])
+    scan.save(tmp_path / "L.nuclearcutter.json")
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    _, c = make_client(st)
+
+    r = c.post("/api/detection/override", json={"kind": "language", "index": 0, "override": "exhigh"})
+    assert r.status_code == 200
+    assert r.json()["timeline"]["language_detections"][0]["override"] == "exhigh"
+
+
+def test_detection_override_validation(tmp_path):
+    movie = _write_full_scan(tmp_path)
+    st = AppState()
+    st.update_settings({"video_path": str(movie)})
+    _, c = make_client(st)
+
+    bad = c.post("/api/detection/override", json={"kind": "visual", "index": 0, "override": "bogus"})
+    assert bad.status_code == 400
+    bad_kind = c.post("/api/detection/override", json={"kind": "video", "index": 0, "override": "low"})
+    assert bad_kind.status_code == 400
+    oob = c.post("/api/detection/override", json={"kind": "visual", "index": 9, "override": "low"})
+    assert oob.status_code == 400
+
+    # No completed scan loaded -> 400.
+    st2, c2 = make_client()
+    none = c2.post("/api/detection/override", json={"kind": "visual", "index": 0, "override": "low"})
+    assert none.status_code == 400
+    assert "no completed scan" in none.json()["detail"]

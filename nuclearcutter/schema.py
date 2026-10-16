@@ -139,6 +139,13 @@ class SeverityLevel(str, Enum):
 # into a member). Used for ordering comparisons.
 _SEVERITY_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
 
+# Per-detection classification override values (the timeline popup's
+# dropdown): the four severity levels, or the sentinel "remove" which keeps
+# the detection flagged on the timeline but EXCLUDES it from every render
+# action (no blur/black/mute) no matter the render settings.
+LEVEL_OVERRIDE_VALUES = ("low", "med", "high", "exhigh")
+OVERRIDE_VALUES = LEVEL_OVERRIDE_VALUES + ("remove",)
+
 
 @dataclass
 class VisualDetection:
@@ -151,6 +158,22 @@ class VisualDetection:
     confidence: float  # 0-1, from the VLM confirmation stage
     level: SeverityLevel = SeverityLevel.MED  # how severe (low/med/high/exhigh)
     stage_a_score: Optional[float] = None  # retained for backward-compat; always None with the VLM sweep
+    # User classification override from the timeline popup: one of
+    # OVERRIDE_VALUES ("low"/"med"/"high"/"exhigh"/"remove") or None (no
+    # override — the scan's own classification stands).
+    override: Optional[str] = None
+
+    @property
+    def is_removed(self) -> bool:
+        """True when the user removed this detection from the render."""
+        return self.override == "remove"
+
+    def effective_level(self) -> SeverityLevel:
+        """The level the render should apply: the override when present,
+        else the scan's own classification."""
+        if self.override in LEVEL_OVERRIDE_VALUES:
+            return SeverityLevel(self.override)
+        return self.level
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -163,6 +186,8 @@ class VisualDetection:
         d = dict(d)
         d["category"] = Category.from_legacy(d["category"])
         d["level"] = SeverityLevel.from_any(d.get("level"))
+        ov = d.get("override")
+        d["override"] = ov if ov in OVERRIDE_VALUES else None
         return VisualDetection(**d)
 
 
@@ -179,6 +204,21 @@ class LanguageDetection:
     llm_confirmed: bool  # result of the always-on LLM context check
     llm_reasoning: Optional[str] = None
     level: SeverityLevel = SeverityLevel.MED  # severity of this word (low/med/high/exhigh)
+    # User classification override from the timeline popup (see
+    # VisualDetection.override).
+    override: Optional[str] = None
+
+    @property
+    def is_removed(self) -> bool:
+        """True when the user removed this detection from the render."""
+        return self.override == "remove"
+
+    def effective_level(self) -> SeverityLevel:
+        """The level the render should apply: the override when present,
+        else the scan's own classification."""
+        if self.override in LEVEL_OVERRIDE_VALUES:
+            return SeverityLevel(self.override)
+        return self.level
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -189,6 +229,8 @@ class LanguageDetection:
     def from_dict(d: dict) -> "LanguageDetection":
         d = dict(d)
         d["level"] = SeverityLevel.from_any(d.get("level"))
+        ov = d.get("override")
+        d["override"] = ov if ov in OVERRIDE_VALUES else None
         return LanguageDetection(**d)
 
 

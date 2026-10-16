@@ -110,8 +110,10 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
     blur_pad = max(0.0, float(getattr(prefs, "blur_padding", 0.0)))
 
     for d in scan.visual_detections:
+        if d.is_removed:
+            continue  # user override: this section must be left untouched
         va = prefs.visual_for(d.category)
-        if va != VisualAction.NONE and d.level.is_corrected_by(prefs.level_for(d.category)):
+        if va != VisualAction.NONE and d.effective_level().is_corrected_by(prefs.level_for(d.category)):
             events.append((
                 max(0.0, d.start - blur_pad),
                 min(duration, d.end + blur_pad), d.category, va,
@@ -122,7 +124,9 @@ def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list
     lang_threshold = prefs.level_for(Category.FOUL_LANGUAGE)
     if lang_va != VisualAction.NONE:
         for d in scan.language_detections:
-            if not d.llm_confirmed or not d.level.is_corrected_by(lang_threshold):
+            if d.is_removed:  # user override: never touch this section
+                continue
+            if not d.llm_confirmed or not d.effective_level().is_corrected_by(lang_threshold):
                 continue
             events.append((
                 max(0.0, d.utterance_start - blur_pad),
@@ -577,7 +581,9 @@ def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg: Time
     threshold = prefs.level_for(Category.FOUL_LANGUAGE)
     ranges: list[tuple[float, float]] = []
     for d in scan.language_detections:
-        if not d.llm_confirmed or not d.level.is_corrected_by(threshold):
+        if d.is_removed:  # user override: never touch this section
+            continue
+        if not d.llm_confirmed or not d.effective_level().is_corrected_by(threshold):
             continue
         if phrase_scope:
             m_start, m_end = d.utterance_start, d.utterance_end
@@ -600,7 +606,9 @@ def _muted_words_within(scan: ScanResult, prefs: Preferences, seg: TimelineSegme
     threshold = prefs.level_for(Category.FOUL_LANGUAGE)
     words: list[str] = []
     for d in scan.language_detections:
-        if not d.llm_confirmed or not d.level.is_corrected_by(threshold):
+        if d.is_removed:  # user override: this section is never muted
+            continue
+        if not d.llm_confirmed or not d.effective_level().is_corrected_by(threshold):
             continue
         m_start, m_end = (d.utterance_start, d.utterance_end) if phrase_scope else (d.start, d.end)
         # Overlap check against the segment (no padding needed for the word list).
