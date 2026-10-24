@@ -86,7 +86,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     base_url = args.base_url or DEFAULT_BASE_URL
     print(f"Connecting to model server: {base_url} ...")
     try:
-        require_server_up(base_url)
+        require_server_up(base_url, api_key=args.api_key)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -98,7 +98,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    llm_config = LLMConfig(base_url=base_url, vlm_model=vlm_model, text_model=text_model)
+    llm_config = LLMConfig(base_url=base_url, vlm_model=vlm_model, text_model=text_model,
+                           api_key=args.api_key or "not-needed")
 
     def progress(stage: str, detail):
         if detail is None:
@@ -222,6 +223,7 @@ def cmd_render(args: argparse.Namespace) -> int:
                 summary_model=args.summary_model,
                 summary_frames=args.summary_frames,
                 summary_max_context=args.summary_max_context,
+                api_key=args.api_key or "not-needed",
             )
             client = LLMClient(cfg)
             transcript_path = video_path.with_suffix(".nuclearcutter.transcript.json")
@@ -287,6 +289,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--year", type=int, help="Release year, stored in the scan file for reference")
     p_scan.add_argument("--base-url", default=None,
                         help=f"OpenAI-compatible /v1 model server (default: {DEFAULT_BASE_URL})")
+    p_scan.add_argument("--api-key", default="",
+                        help="Bearer token if the model server requires one (Strata does).")
     p_scan.add_argument("--vlm-model", required=True,
                         help="VLM model id served by --base-url (required)")
     p_scan.add_argument("--text-model", default=None,
@@ -345,6 +349,8 @@ def build_parser() -> argparse.ArgumentParser:
                                "reports none (default: 30000)")
     p_render.add_argument("--base-url", default=DEFAULT_BASE_URL,
                           help=f"OpenAI-compatible /v1 model server for the summary model (default: {DEFAULT_BASE_URL})")
+    p_render.add_argument("--api-key", default="",
+                          help="Bearer token if the summary model's server requires one (Strata does).")
     p_render.set_defaults(func=cmd_render)
 
     return parser

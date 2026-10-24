@@ -99,6 +99,43 @@ class TestRequireServerUp:
         require_server_up("http://localhost:9999/v1")  # must not raise
 
 
+class TestApiKeyHeader:
+    """Key-protected servers (Strata and other authenticated OpenAI-compatible
+    backends) answer 401 to unauthenticated /v1/models — the probes must send
+    the configured Bearer key, and send NO Authorization header when no key is
+    configured (keyless servers must not get a bogus value)."""
+
+    @patch("nuclearcutter.utils.model_server.requests.get")
+    def test_is_server_up_sends_bearer_key(self, mock_get):
+        mock_get.return_value.ok = True
+        assert is_server_up("http://x/v1", api_key="k123") is True
+        assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer k123"}
+
+    @patch("nuclearcutter.utils.model_server.requests.get")
+    def test_is_server_up_no_key_sends_no_auth_header(self, mock_get):
+        mock_get.return_value.ok = True
+        assert is_server_up("http://x/v1") is True
+        assert mock_get.call_args.kwargs["headers"] == {}
+
+    @patch("nuclearcutter.utils.model_server.requests.get")
+    def test_list_models_sends_bearer_key(self, mock_get):
+        mock_get.return_value.ok = True
+        mock_get.return_value.json.return_value = {"data": [{"id": "m1"}]}
+        assert list_models("http://x/v1", api_key="k123") == ["m1"]
+        assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer k123"}
+
+    @patch("nuclearcutter.utils.model_server.is_server_up", return_value=False)
+    def test_require_server_up_mentions_key_hint_when_no_key(self, _mock):
+        with pytest.raises(ModelServerError, match="API key"):
+            require_server_up("http://x/v1")  # no key -> the error hints at auth
+
+    @patch("nuclearcutter.utils.model_server.is_server_up", return_value=False)
+    def test_require_server_up_passes_key(self, _mock):
+        with pytest.raises(ModelServerError):
+            require_server_up("http://x/v1", api_key="k123")
+        _mock.assert_called_once_with("http://x/v1", "k123")
+
+
 class TestWaitForServer:
     @patch("nuclearcutter.utils.model_server.is_server_up")
     def test_returns_false_on_timeout(self, mock_up):

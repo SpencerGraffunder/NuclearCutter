@@ -337,6 +337,40 @@ def test_models_endpoint_lists_remote_models(monkeypatch):
     assert d["base_url"] == "http://192.168.1.5:1234/v1"
 
 
+def test_api_key_setting_roundtrip():
+    """The GUI's API key box persists in settings and comes back in state."""
+    st, c = make_client()
+    r = c.post("/api/settings", json={"settings": {"api_key": "sekrit"}})
+    assert r.status_code == 200
+    assert r.json()["settings"]["api_key"] == "sekrit"
+    assert c.get("/api/state").json()["settings"]["api_key"] == "sekrit"
+    assert st.api_key == "sekrit"
+    # Blank clears it (a keyless server).
+    c.post("/api/settings", json={"settings": {"api_key": "  "}})
+    assert st.api_key == ""
+
+
+def test_models_endpoint_uses_key_override_then_saved_key(monkeypatch):
+    """/api/models probes with the query override (fresh paste in the GUI)
+    and falls back to the saved setting when no override is given."""
+    st, c = make_client()
+    st.api_key = "saved-key"
+    seen = {}
+
+    def fake_list_models(self):
+        seen["api_key"] = self.config.api_key
+        return ["m"]
+
+    monkeypatch.setattr("nuclearcutter.server.LLMClient.list_models", fake_list_models)
+    c.get("/api/models", params={"api_key": "box-key"})
+    assert seen["api_key"] == "box-key"
+    c.get("/api/models")
+    assert seen["api_key"] == "saved-key"
+    st.api_key = ""
+    c.get("/api/models")
+    assert seen["api_key"] == "not-needed"  # keyless default keeps old behavior
+
+
 def test_definitions_endpoint():
     """The render hover tooltips come from here: all 4 levels for every category."""
     _, c = make_client()

@@ -69,19 +69,29 @@ class ModelServerError(RuntimeError):
 
 # ------------------------------------------------------------------ OpenAI /v1
 
-def is_server_up(base_url: str) -> bool:
+def _auth_headers(api_key: str = "") -> dict[str, str]:
+    """Authorization header for a key-protected server.
+
+    Returns {} when no key is set — keyless servers must not receive a bogus
+    Bearer value, and servers that DO check (Strata and other authenticated
+    OpenAI-compatible backends) reject anything but their configured key.
+    """
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def is_server_up(base_url: str, api_key: str = "") -> bool:
     """Return True if an OpenAI-compatible server is answering on base_url."""
     try:
-        r = requests.get(f"{base_url}/models", timeout=3)
+        r = requests.get(f"{base_url}/models", headers=_auth_headers(api_key), timeout=3)
         return r.ok
     except requests.RequestException:
         return False
 
 
-def list_models(base_url: str) -> list[str]:
+def list_models(base_url: str, api_key: str = "") -> list[str]:
     """Model ids advertised by base_url's /v1/models ([] when unreachable)."""
     try:
-        r = requests.get(f"{base_url}/models", timeout=5)
+        r = requests.get(f"{base_url}/models", headers=_auth_headers(api_key), timeout=5)
         r.raise_for_status()
     except requests.RequestException:
         return []
@@ -92,27 +102,32 @@ def list_models(base_url: str) -> list[str]:
         return []
 
 
-def wait_for_server(base_url: str, timeout: float = 120.0, interval: float = 1.0) -> bool:
+def wait_for_server(base_url: str, timeout: float = 120.0, interval: float = 1.0,
+                    api_key: str = "") -> bool:
     """Poll base_url until the server answers or timeout elapses."""
     import time
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if is_server_up(base_url):
+        if is_server_up(base_url, api_key):
             return True
         time.sleep(interval)
     return False
 
 
-def require_server_up(base_url: str, label: str = "model server") -> None:
+def require_server_up(base_url: str, label: str = "model server",
+                      api_key: str = "") -> None:
     """Raise a clear error when the configured OpenAI-compatible server is
     unreachable — the one preflight check NuclearCutter does instead of
     starting the server itself."""
-    if not is_server_up(base_url):
+    if not is_server_up(base_url, api_key):
         raise ModelServerError(
             f"No {label} answering at {base_url} (expected an OpenAI-compatible "
             f"/v1 server — llama.cpp, LM Studio, Ollama, vLLM, ...). "
-            f"Start it or fix the base URL."
+            f"Start it or fix the base URL"
+            + (" (a wrong or missing API key also looks like this: the server "
+               "answers 401 and the model list comes back empty)." if api_key == "" else "")
+            + "."
         )
 
 

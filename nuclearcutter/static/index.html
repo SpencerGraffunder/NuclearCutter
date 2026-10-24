@@ -210,6 +210,9 @@
         <input type="text" id="server_address" value="http://127.0.0.1" placeholder="http://HOST">
         <button id="btn-scan-models" title="Refresh the model lists: LLM/VLM models from the llama server, whisper models from the whisper server">Scan for models</button></div>
       <div class="row" style="margin:0 0 7px;"><span class="hint" id="derived-urls" style="width:auto;min-width:0;">LLM :8080 · whisper :8081</span></div>
+      <div class="row"><label>API key</label>
+        <input type="password" id="api_key" placeholder="(blank = server needs no key)" autocomplete="off" spellcheck="false">
+        <span class="hint" style="width:auto;">Bearer token for the model server (Strata and other key-protected backends reject unauthenticated scans). Saved with your settings.</span></div>
       <div class="row"><label>VLM model</label><select id="vlm_model"></select></div>
       <div class="row"><label>Text model</label><select id="text_model"></select></div>
       <div class="row"><label>Whisper model</label><select id="whisper_model"></select>
@@ -475,7 +478,7 @@ function fillModelDropdownWithNone(sel, models) {
 function setDisabled(ids, disabled) {
   ids.forEach(id => { const el = $(id); if (el) el.disabled = disabled; });
 }
-const SCAN_SETTING_IDS = ["video_path","server_address","vlm_model","text_model",
+const SCAN_SETTING_IDS = ["video_path","server_address","api_key","vlm_model","text_model",
   "whisper_model","scale","sweep_interval",
   "summary_model","summary_frames","summary_max_context"];
 const RENDER_SETTING_IDS = ["output_name","scan_path","blur_strength","mute_padding","blur_padding"];
@@ -509,6 +512,7 @@ function collectSettings() {
     video_path: $("video_path").value,
     show_prompts: $("show_prompts").checked,
     server_address: $("server_address").value,
+    api_key: $("api_key").value.trim(),
     vlm_model: $("vlm_model").value,
     text_model: $("text_model").value,
     whisper_model: $("whisper_model").value,
@@ -549,6 +553,7 @@ function applySettingsToUI(s, skipSave) {
   $("video_path").value = s.video_path || "";
   $("show_prompts").checked = !!s.show_prompts;
   $("server_address").value = s.server_address || "http://127.0.0.1";
+  $("api_key").value = s.api_key || "";
   $("derived-urls").textContent = derivedUrlHint(s.server_address);
   setSelectValue($("vlm_model"), s.vlm_model);
   setSelectValue($("text_model"), s.text_model);
@@ -1208,7 +1213,11 @@ function wire() {
 // Defined at TOP-LEVEL scope so both the "Scan for models" button and the
 // first-poll auto-populate (in poll()) can call it.
 async function scanForModels() {
-  const d = await (await fetch("/api/models")).json();
+  // Pass the key box's CURRENT value (not just the saved setting) so a freshly
+  // pasted key works on the first click, before the autosave debounce fires.
+  const keyParam = $("api_key").value.trim()
+    ? "&api_key=" + encodeURIComponent($("api_key").value.trim()) : "";
+  const d = await (await fetch("/api/models?1=1" + keyParam)).json();
   if (!d.models.length) {
     fillModelDropdown($("vlm_model"), []);
     fillModelDropdown($("text_model"), []);
@@ -1248,7 +1257,7 @@ async function scanWhisperModels() {
     (d.up ? "" : " — whisper server is DOWN"));
 }
 function attachInputListeners() {
-  ["video_path","server_address","vlm_model","text_model","whisper_model",
+  ["video_path","server_address","api_key","vlm_model","text_model","whisper_model",
    "scale","sweep_interval","output_name","scan_path","blur_strength","mute_padding","blur_padding",
    "summary_model","summary_frames","summary_max_context"
   ].forEach(id => $(id).addEventListener("input", settingsChanged));

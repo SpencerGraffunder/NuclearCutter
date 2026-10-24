@@ -203,6 +203,10 @@ class AppState:
         # address. NuclearCutter never spawns a server; the two URLs are
         # derived from this one field (see derive_server_urls).
         self.server_address = "http://127.0.0.1"
+        # Bearer token for the model server (Strata and other authenticated
+        # OpenAI-compatible backends reject unauthenticated /v1/models, which
+        # would otherwise show up as "no models found"). Empty = no auth.
+        self.api_key = ""
         self.vlm_model = ""
         self.text_model = ""
         # Whisper transcription: the model to use (dropdown id / file stem,
@@ -445,6 +449,7 @@ class AppState:
             "video_path": self.video_path,
             "show_prompts": self.show_prompts,
             "server_address": self.server_address,
+            "api_key": self.api_key,
             "vlm_model": self.vlm_model,
             "text_model": self.text_model,
             "whisper_model": self.whisper_model,
@@ -484,6 +489,8 @@ class AppState:
 
                 host = urlsplit(legacy).netloc or legacy
                 self.server_address = normalize_server_address(host) or self.server_address
+        if "api_key" in payload:
+            self.api_key = str(payload["api_key"] or "").strip()
         if "vlm_model" in payload:
             self.vlm_model = str(payload["vlm_model"] or "").strip()
         if "text_model" in payload:
@@ -577,9 +584,12 @@ class AppState:
             base_url=self.llm_base_url,
             vlm_model=self.vlm_model,
             text_model=self.text_model,
+            # Empty key keeps the "not-needed" default: keyless local servers
+            # ignore the header, so old behavior is unchanged for them.
+            api_key=self.api_key or "not-needed",
         )
         llm_config.vision_max_pixels = vision_max_pixels_for_scale(self.scale)
-        require_server_up(self.llm_base_url)
+        require_server_up(self.llm_base_url, api_key=self.api_key)
         return llm_config
 
     def _whisper_cfg(self) -> WhisperConfig:
@@ -834,7 +844,7 @@ class AppState:
 
     def _validate_model_backend(self) -> None:
         """The model server must be reachable before a job that needs it starts."""
-        require_server_up(self.llm_base_url)
+        require_server_up(self.llm_base_url, api_key=self.api_key)
 
     def _run_scan(self) -> None:
         job = self.scan
@@ -1421,7 +1431,7 @@ class AppState:
         now = time.monotonic()
         if now - self._backend_up_at >= 5.0:
             self._backend_up_at = now
-            self._backend_up = is_server_up(self.llm_base_url)
+            self._backend_up = is_server_up(self.llm_base_url, api_key=self.api_key)
         if now - self._whisper_up_at >= 5.0:
             self._whisper_up_at = now
             self._whisper_up = whisper_is_up(self.whisper_base_url)
@@ -1519,13 +1529,17 @@ def create_app(state: AppState | None = None) -> FastAPI:
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/api/models")
-    def api_models(base_url: str = "", vlm: str = ""):
+    def api_models(base_url: str = "", vlm: str = "", api_key: str | None = None):
         """List models advertised by the LLM server (the 'scan for models' flow).
 
         `base_url` (optional) overrides the derived LLM URL for a one-off probe.
+        `api_key` (optional) overrides the saved key for a one-off probe — the
+        GUI passes the key box's current value so a freshly pasted key scans
+        without waiting for the settings autosave.
         """
         url = (base_url or st.llm_base_url).strip()
-        client = LLMClient(LLMConfig(base_url=url))
+        key = st.api_key if api_key is None else api_key.strip()
+        client = LLMClient(LLMConfig(base_url=url, api_key=key or "not-needed"))
         models = client.list_models()
         return {"base_url": url, "reachable": bool(models), "models": models}
 
