@@ -216,7 +216,9 @@
     header .sub { flex: 1 1 100%; text-align: center; }
     header .gh-link { position: static; transform: none; flex: 1 1 100%;
       text-align: center; padding-top: 2px; }
-    main { grid-template-columns: 1fr; padding: 10px; }
+    main { grid-template-columns: minmax(0, 1fr); padding: 10px; }
+    section { min-width: 0; } /* 1fr's default min-width:auto let wide children
+                                 stretch the grid past the viewport */
     #sec-scan { order: 1; }
     #sec-status { order: 2; }
     #sec-terminal { order: 3; }
