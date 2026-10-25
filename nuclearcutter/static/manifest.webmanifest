@@ -1,0 +1,13 @@
+{
+  "name": "NuclearCutter",
+  "short_name": "NuclearCutter",
+  "description": "Cut flagged content out of your media, locally.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

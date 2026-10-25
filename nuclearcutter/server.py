@@ -1525,6 +1525,33 @@ def create_app(state: AppState | None = None) -> FastAPI:
         return FileResponse(path, media_type="image/svg+xml",
                             headers={"Cache-Control": "no-cache"})
 
+    # Fixed allow-list: the icon route must never path-join user input, and
+    # the manifest deliberately carries NO theme_color/background_color —
+    # the page's own dark look stays the single source of truth.
+    _PWA_ICONS = {"apple-touch-icon.png", "icon-192.png", "icon-512.png",
+                  "icon-maskable-512.png"}
+
+    @app.get("/manifest.webmanifest")
+    def pwa_manifest():
+        """Installability manifest (Home Screen on Android; iOS uses the
+        apple-touch-icon link in the page head)."""
+        path = STATIC_DIR / "manifest.webmanifest"
+        if not path.exists():
+            raise HTTPException(404, "manifest missing")
+        return FileResponse(path, media_type="application/manifest+json",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/icons/{name}")
+    def pwa_icon(name: str):
+        """Home-screen icons from static/icons/, allow-list only."""
+        if name not in _PWA_ICONS:
+            raise HTTPException(404, "no such icon")
+        path = STATIC_DIR / "icons" / name
+        if not path.exists():
+            raise HTTPException(404, "icon missing")
+        return FileResponse(path, media_type="image/png",
+                            headers={"Cache-Control": "public, max-age=86400"})
+
     @app.get("/api/state")
     def api_state():
         return st.state_dict()

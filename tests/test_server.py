@@ -864,3 +864,33 @@ def test_unrelated_settings_tweak_keeps_render_display(tmp_path):
     assert st.render.steps["render"] == 1.0
     # The scan display is untouched too (the movie still has its scan).
     assert st.scan.status == "done"
+
+
+def test_pwa_manifest_served_without_theme_keys():
+    """The manifest must parse, offer the 512 icon for installability, and
+    carry NO theme_color/background_color (Spec: no theme change)."""
+    _, c = make_client()
+    r = c.get("/manifest.webmanifest")
+    assert r.status_code == 200
+    assert "manifest+json" in r.headers["content-type"]
+    m = json.loads(r.text)
+    assert m["display"] == "standalone"
+    assert "theme_color" not in m and "background_color" not in m
+    assert any(i["sizes"] == "512x512" for i in m["icons"])
+
+
+def test_pwa_icons_served_as_png():
+    _, c = make_client()
+    for name in ("apple-touch-icon.png", "icon-192.png", "icon-512.png",
+                 "icon-maskable-512.png"):
+        r = c.get(f"/icons/{name}")
+        assert r.status_code == 200, name
+        assert r.content[:4] == b"\x89PNG", name
+
+
+def test_pwa_icon_allowlist_blocks_anything_else():
+    """Allow-list first, join second: odd names and traversal must 404."""
+    _, c = make_client()
+    assert c.get("/icons/index.html").status_code == 404
+    assert c.get("/icons/..%2f..%2fsettings.json").status_code == 404
+    assert c.get("/icons/settings.json").status_code == 404
