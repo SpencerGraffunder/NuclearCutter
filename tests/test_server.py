@@ -23,6 +23,16 @@ def test_index_serves_ui():
     assert "matrix" in r.text.lower() or "--green" in r.text
 
 
+def test_number_fields_can_be_cleared_mid_edit():
+    """Clearing a number box (e.g. the scan interval) must not pop the old
+    value back: applySettingsToUI skips whichever field is focused, and the
+    number boxes resync from the server on blur."""
+    _, c = make_client()
+    page = c.get("/").text
+    assert "document.activeElement !== el" in page  # focused field is left alone
+    assert '.addEventListener("blur", settingsChanged)' in page  # blur resyncs
+
+
 def test_favicon_served_and_linked():
     """Issue #14: the UI must ship a favicon — the SVG is served at
     /favicon.svg and the page links it in <head>."""

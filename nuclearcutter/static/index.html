@@ -549,25 +549,35 @@ function derivedUrlHint(address) {
   const wsp = port ? m[2] + ":" + (parseInt(port, 10) + 1) : m[2] + ":8081";
   return m[1] + llm + "/v1" + "  ·  " + m[1] + wsp;
 }
+// Write a settings value into a text/number input — UNLESS the user is
+// editing that exact field. Without this, clearing a number box (e.g. the
+// scan interval) fires the debounced autosave, whose echo — or any settings
+// change from elsewhere — yanks the old value back into the empty box
+// mid-edit. Focused fields hold the user's draft; the value resyncs from the
+// server on blur (attachInputListeners) or the next poll that finds a change.
+function setInputValue(id, val) {
+  const el = $(id);
+  if (el && document.activeElement !== el) el.value = val;
+}
 function applySettingsToUI(s, skipSave) {
-  $("video_path").value = s.video_path || "";
+  setInputValue("video_path", s.video_path || "");
   $("show_prompts").checked = !!s.show_prompts;
-  $("server_address").value = s.server_address || "http://127.0.0.1";
-  $("api_key").value = s.api_key || "";
+  setInputValue("server_address", s.server_address || "http://127.0.0.1");
+  setInputValue("api_key", s.api_key || "");
   $("derived-urls").textContent = derivedUrlHint(s.server_address);
   setSelectValue($("vlm_model"), s.vlm_model);
   setSelectValue($("text_model"), s.text_model);
   setSelectValue($("whisper_model"), s.whisper_model);
   $("scale").value = s.scale || "480p";
-  $("sweep_interval").value = s.sweep_interval || 2;
-  $("output_name").value = s.output_name || "";
-  $("scan_path").value = s.scan_path || "";
-  $("blur_strength").value = s.blur_strength ?? 1;
-  $("mute_padding").value = s.mute_padding ?? 0.5;
-  $("blur_padding").value = s.blur_padding ?? 0;
+  setInputValue("sweep_interval", s.sweep_interval || 2);
+  setInputValue("output_name", s.output_name || "");
+  setInputValue("scan_path", s.scan_path || "");
+  setInputValue("blur_strength", s.blur_strength ?? 1);
+  setInputValue("mute_padding", s.mute_padding ?? 0.5);
+  setInputValue("blur_padding", s.blur_padding ?? 0);
   setSelectValue($("summary_model"), s.summary_model || "");
-  $("summary_frames").value = s.summary_frames ?? 12;
-  $("summary_max_context").value = s.summary_max_context ?? 30000;
+  setInputValue("summary_frames", s.summary_frames ?? 12);
+  setInputValue("summary_max_context", s.summary_max_context ?? 30000);
   const maps = {
     level: s.levels || {},
     visual: s.visual_actions || {},
@@ -1261,6 +1271,13 @@ function attachInputListeners() {
    "scale","sweep_interval","output_name","scan_path","blur_strength","mute_padding","blur_padding",
    "summary_model","summary_frames","summary_max_context"
   ].forEach(id => $(id).addEventListener("input", settingsChanged));
+  // Number boxes normalize (empty -> default) inside collectSettings; the
+  // autosave echo must not refill them mid-edit (setInputValue), so nudge a
+  // resync on blur: the POST response lands while nothing is focused and the
+  // box snaps to the real saved value (an emptied box shows the default).
+  ["sweep_interval","summary_frames","summary_max_context",
+   "blur_strength","mute_padding","blur_padding"]
+    .forEach(id => $(id).addEventListener("blur", settingsChanged));
   $("show_prompts").addEventListener("change", settingsChanged);
   document.querySelectorAll("#matrix select").forEach(s => s.addEventListener("change", () => { settingsChanged(); renderTimeline(); }));
 }
