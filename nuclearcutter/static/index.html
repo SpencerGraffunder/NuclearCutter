@@ -99,13 +99,21 @@
   .tl-override select { background: #101810; color: var(--green);
     border: 1px solid var(--green-dim); border-radius: 3px; padding: 3px 5px;
     font-size: 10px; font-family: inherit; }
-  /* Floating hover tooltip for timeline marks (shows the summary text). Fixed
-     position so it isn't clipped by #tl-bar's overflow:hidden. */
+  /* Timeline mark popup: opens on CLICK/TAP (never on hover — hover doesn't
+     exist on touch, and an accidental sweep of the mouse over the timeline
+     shouldn't mask content descriptions on desktop). Close via the ✕ inside
+     or a click/tap anywhere outside. Fixed position so it isn't clipped by
+     #tl-bar's overflow:hidden. */
   #tl-tooltip { display: none; position: fixed; z-index: 80; background: #0d0d0d;
     border: 1px solid var(--green-dim); color: var(--text); padding: 10px 12px;
-    white-space: pre-wrap; max-width: 420px; box-shadow: 0 0 16px rgba(0,255,65,.25);
+    white-space: pre-wrap; max-width: min(420px, calc(100vw - 20px));
+    box-shadow: 0 0 16px rgba(0,255,65,.25);
     font-size: 11px; line-height: 1.5; border-radius: 4px; pointer-events: auto; }
   .tl-tip-text { display: block; }
+  /* ✕ in the popup's top-right corner (floats so the text wraps beside it). */
+  .tl-tip-close { float: right; margin: -4px -6px 2px 10px; padding: 0 7px;
+    color: var(--red); border-color: #7a3030; background: #230c0c; font-size: 11px; }
+  .tl-tip-close:hover { background: #3a1414; }
   /* Hold-to-preview button inside the tooltip (the tooltip is
      pointer-events:auto so the button is reachable). You HOLD it to reveal a
      frame in a separate popup at the cursor; release to hide — the frame is
@@ -188,6 +196,29 @@
      spacer matching the SCAN/VERIFY clear button width. */
   .pct { color: var(--green); min-width: 44px; text-align: right; }
   .hidden { display: none !important; }
+  /* ---- mobile / narrow window: ONE column, ordered scan → status →
+     terminal → render (the render settings are set-and-forget, so they go
+     last; the live status + terminal are what you actually watch). ---- */
+  @media (max-width: 900px) {
+    header { flex-wrap: wrap; row-gap: 3px; padding: 10px 12px; }
+    header h1 { font-size: 16px; letter-spacing: 2px; }
+    header .sub { flex: 1 1 100%; text-align: center; }
+    header .gh-link { position: static; transform: none; flex: 1 1 100%;
+      text-align: center; padding-top: 2px; }
+    main { grid-template-columns: 1fr; padding: 10px; }
+    #sec-scan { order: 1; }
+    #sec-status { order: 2; }
+    #sec-terminal { order: 3; }
+    #sec-render { order: 4; }
+    /* Stacked fields: the label gets its own line, the control fills below
+       (min-width:0 so they stop forcing horizontal squeeze). */
+    .row label { flex: 1 1 100%; min-width: 0; }
+    input[type=text], input[type=number], select, textarea { min-width: 0; }
+    /* Wide tables scroll instead of crushing the columns. */
+    .matrix, #bench-results table { display: block; overflow-x: auto; }
+    #status-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+    #terminal { height: 200px; }
+  }
 </style>
 </head>
 <body>
@@ -199,7 +230,7 @@
 </header>
 <main>
   <!-- ================= SCAN ================= -->
-  <section>
+  <section id="sec-scan">
     <h2>▚ SCAN</h2>
     <div class="row"><label>Source file location</label>
       <input type="text" id="video_path" placeholder="/path/to/Movie.mkv">
@@ -255,7 +286,7 @@
   </section>
 
   <!-- ================= RENDER ================= -->
-  <section>
+  <section id="sec-render">
     <h2>▚ RENDER</h2>
     <div class="hint">Per-category censorship level (what gets corrected) + corrections matrix. Hover a category for the full level definitions.</div>
     <table class="matrix" id="matrix">
@@ -328,7 +359,7 @@
   </section>
 
   <!-- ================= STATUS ================= -->
-  <section class="full">
+  <section class="full" id="sec-status">
     <h2>▚ STATUS</h2>
     <div id="status-grid">
       <div class="stat"><div class="k">RAM used by NuclearCutter</div><div class="v" id="st-ram">—</div></div>
@@ -398,7 +429,7 @@
   </section>
 
   <!-- ================= TERMINAL ================= -->
-  <section class="full">
+  <section class="full" id="sec-terminal">
     <h2>▚ TERMINAL <label style="min-width:0;font-size:11px;cursor:pointer;color:var(--text-dim)">
       <input type="checkbox" id="show_prompts"> show prompts and responses</label></h2>
     <div class="row">
@@ -631,33 +662,27 @@ let tlPreviewBtn = null;   // the hold-to-reveal button inside the tooltip
 let tlPreviewTs = 0;       // timestamp (s) the current tooltip's button previews
 let tlOverride = null;     // the level-override dropdown row in the tooltip
 let overrideSelectActive = false; // a level-override select is being interacted
-                           // with — the tooltip must not hide (the native
-                           // dropdown steals the pointer, firing mouseleave)
+                           // with — the native dropdown steals the pointer and
+                           // can "click" outside the popup; must not close it
 let framePopEl = null;     // the separate at-cursor frame popup
 let framePopBusy = false;
-let tlTipHideTimer = null; // deferred hide: lets the mouse cross the 10px gap
-                           // from the mark to the tooltip (to reach the button)
 function ensureTlTooltip() {
   if (!tlTipEl) {
     tlTipEl = document.createElement("div");
     tlTipEl.id = "tl-tooltip";
-    // Moving onto the tooltip cancels a pending hide; leaving it re-arms one.
-    tlTipEl.addEventListener("mouseenter", () => clearTimeout(tlTipHideTimer));
-    tlTipEl.addEventListener("mouseleave", scheduleTipHide);
+    // CLICK/TAP-OPENED popup (no hover anywhere): a tap on a mark opens it,
+    // the ✕ or a click/tap OUTSIDE closes it. Hover-open was unreachable on
+    // touch and fired on every stray mouse pass over the timeline.
+    document.addEventListener("click", (e) => {
+      if (!tlTipEl || tlTipEl.style.display !== "block") return;
+      if (tlTipEl.contains(e.target)) return;
+      if (e.target instanceof Element && e.target.closest(".tl-mark")) return; // reopens on the new mark
+      if (overrideSelectActive) return; // native select popup clicks "outside"
+      hideTlTooltip();
+    });
     document.body.appendChild(tlTipEl);
   }
   return tlTipEl;
-}
-function scheduleTipHide() {
-  clearTimeout(tlTipHideTimer);
-  // Never hide while the preview button is held (the pointer is captured by
-  // the button and its pointerup will clean up).
-  if (tlPreviewBtn && tlPreviewBtn.classList.contains("holding")) return;
-  // Never hide while a level-override dropdown is open/focused: the native
-  // select popup takes the pointer out of the tooltip, firing mouseleave, and
-  // the choice must still be reachable to pick (issue #21).
-  if (overrideSelectActive) return;
-  tlTipHideTimer = setTimeout(hideTlTooltip, 150);
 }
 // The level-override dropdown row inside the tooltip. One shared element,
 // re-pointed at each mark via mark.dataset (oType/oIndex). `current` is the
@@ -678,14 +703,11 @@ function ensureTlOverride() {
     o.value = v; o.textContent = v === "removed" ? "remove" : "level: " + v;
     sel.appendChild(o);
   });
-  // While the select is open/focused, the tooltip must stay put (see
-  // scheduleTipHide); leaving it via blur re-arms the normal auto-hide.
+  // The native select popup takes the pointer out of the tooltip; while it is
+  // open the outside-click handler must not close the popup (see above).
   sel.addEventListener("mousedown", () => { overrideSelectActive = true; });
-  sel.addEventListener("focus", () => {
-    overrideSelectActive = true;
-    clearTimeout(tlTipHideTimer);
-  });
-  sel.addEventListener("blur", () => { overrideSelectActive = false; scheduleTipHide(); });
+  sel.addEventListener("focus", () => { overrideSelectActive = true; });
+  sel.addEventListener("blur", () => { overrideSelectActive = false; });
   sel.addEventListener("change", async () => {
     const m = tlOverride && tlOverride._mark;
     if (!m || !m.dataset.oType) return;
@@ -707,13 +729,19 @@ function ensureTlOverride() {
   return tlOverride;
 }
 function showTlTooltip(ev) {
-  clearTimeout(tlTipHideTimer);
   const mark = ev.currentTarget;
   const tip = mark.dataset.tip;
   if (!tip) return;
   const tl = ensureTlTooltip();
-  // Text block + (for marks with a timestamp) a hold-to-preview button.
+  // Text block + ✕ close + (for marks with a timestamp) a hold-to-preview button.
   tl.innerHTML = "";
+  const xbtn = document.createElement("button");
+  xbtn.type = "button";
+  xbtn.className = "tl-tip-close";
+  xbtn.title = "Close";
+  xbtn.textContent = "✕";
+  xbtn.addEventListener("click", (e) => { e.stopPropagation(); hideTlTooltip(); });
+  tl.appendChild(xbtn);
   const text = document.createElement("span");
   text.className = "tl-tip-text";
   text.textContent = tip;
@@ -768,17 +796,23 @@ function showTlTooltip(ev) {
   }
   tl.style.display = "block";
   const r = mark.getBoundingClientRect();
-  const w = tl.offsetWidth;
+  const w = tl.offsetWidth, h = tl.offsetHeight;
   let x = r.left + r.width / 2;
   x = Math.max(w / 2 + 8, Math.min(x, window.innerWidth - w / 2 - 8));
   tl.style.left = x + "px";
-  tl.style.top = (r.top - 10) + "px";
-  tl.style.transform = "translate(-50%, -100%)";
+  // Open above the mark, unless there is no room (marks near the top of the
+  // viewport on a short phone screen) — then open below it.
+  if (r.top - h - 12 < 0) {
+    tl.style.top = (r.bottom + 10) + "px";
+    tl.style.transform = "translate(-50%, 0)";
+  } else {
+    tl.style.top = (r.top - 10) + "px";
+    tl.style.transform = "translate(-50%, -100%)";
+  }
 }
 function hideTlTooltip() {
-  clearTimeout(tlTipHideTimer);
   if (tlTipEl) tlTipEl.style.display = "none";
-  hideFramePopup(); // releasing the mouse also hides any held preview
+  hideFramePopup(); // closing the popup also hides any held preview
 }
 // ---------------------------------------------------------------- frame preview
 function ensureFramePopup() {
@@ -837,8 +871,8 @@ function renderTimeline() {
   (tlInfo.visual_candidates || []).forEach(c => marks.push({start:c.start, end:c.end, cat:"candidate", tip:null, caught:false}));
   // ALL confirmed detections are flagged on the timeline — not just the ones
   // the current render settings would catch. Marks the render WOULD catch are
-  // full opacity; the rest are dimmed. Every mark has a hover tooltip showing
-  // its summary text (the description written by the summary model).
+  // full opacity; the rest are dimmed. Tapping/clicking a mark opens a popup
+  // showing its summary text (the description written by the summary model).
   (tlInfo.visual_detections || []).forEach((d, i) => {
     marks.push({
       start: d.start, end: d.end, cat: d.category, caught: detectionCaught(d),
@@ -870,8 +904,10 @@ function renderTimeline() {
         el.dataset.oIndex = String(m.oIndex);
         el.dataset.oOverride = m.oOverride;
       }
-      el.addEventListener("mouseenter", showTlTooltip);
-      el.addEventListener("mouseleave", scheduleTipHide);
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();          // the outside-click handler must not close it
+        showTlTooltip(e);
+      });
     }
     tl.appendChild(el);
   });
