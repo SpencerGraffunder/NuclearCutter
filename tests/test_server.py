@@ -621,6 +621,31 @@ def test_thumbnail_scales_down():
     assert img.width < 640
 
 
+def test_terminal_thumbs_use_triple_res_source():
+    """Hover popups render the same data URI at CSS-pinned sizes; the source
+    got 3x headroom (48px, q72) for crisp popups without layout changes."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    from nuclearcutter.server import _thumbnail_data_uri
+
+    buf = io.BytesIO()
+    Image.new("RGB", (640, 360), (10, 20, 30)).save(buf, format="JPEG")
+    uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    thumb = _thumbnail_data_uri(uri, max_height=48, quality=72)
+    img = Image.open(io.BytesIO(base64.b64decode(thumb.partition(",")[2])))
+    assert img.height == 48 and img.width == 85  # aspect preserved at the new cap
+
+    # the terminal's vision-log call site must actually request the bigger box
+    import inspect
+
+    import nuclearcutter.server as srv
+
+    assert "max_height=48" in inspect.getsource(srv)
+
+
 def test_scan_requires_vlm_model(tmp_path):
     st, c = make_client()
     # No VLM model configured -> 400 at scan start (before any server check).

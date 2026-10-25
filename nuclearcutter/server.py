@@ -80,8 +80,8 @@ def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def _thumbnail_data_uri(data_uri: str, max_height: int = 16) -> str:
-    """Downscale a base64 image data URI to a tiny JPEG thumbnail (for the
+def _thumbnail_data_uri(data_uri: str, max_height: int = 16, quality: int = 50) -> str:
+    """Downscale a base64 image data URI to a small JPEG thumbnail (for the
     terminal's inline image display). Returns the original URI on any failure."""
     try:
         import base64 as _b64
@@ -95,7 +95,7 @@ def _thumbnail_data_uri(data_uri: str, max_height: int = 16) -> str:
             ratio = max_height / img.height
             img = img.resize((max(1, int(img.width * ratio)), max_height), Image.LANCZOS)
         buf = _io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=50)
+        img.convert("RGB").save(buf, format="JPEG", quality=quality)
         return "data:image/jpeg;base64," + _b64.b64encode(buf.getvalue()).decode()
     except Exception:
         return data_uri
@@ -720,7 +720,11 @@ class AppState:
                     elif part.get("type") == "image_url":
                         url = part.get("image_url", {}).get("url", "")
                         if url:
-                            imgs.append(_thumbnail_data_uri(url, max_height=16))
+                            # 3x the inline-display height: the terminal pins
+                            # the thumbnail to 14px CSS and the hover popup to
+                            # half the panel height, so a bigger source only
+                            # sharpens the popup — no size/layout change.
+                            imgs.append(_thumbnail_data_uri(url, max_height=48, quality=72))
             else:
                 text_parts.append(str(content))
             response = ""
