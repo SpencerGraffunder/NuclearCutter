@@ -74,8 +74,9 @@
   #timeline { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
   #tl-bar { position: relative; height: 34px; background: #0d0d0d; border: 1px solid var(--border);
     border-radius: 3px; flex: 1; overflow: hidden; }
-  #tl-pos { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff;
-    box-shadow: 0 0 6px #fff; z-index: 3; }
+  #tl-pos { position: absolute; top: 0; bottom: 0; width: 2px;
+            background: #fff; box-shadow: 0 0 6px #fff; z-index: 3;
+            pointer-events: none; } /* never steal mark taps */
   .tl-mark { position: absolute; top: 0; bottom: 0; min-width: 3px; opacity: .85; z-index: 2; }
   .tl-mark.nudity { background: var(--red); }
   .tl-mark.gore { background: var(--orange); }
@@ -91,6 +92,13 @@
      flagged on the timeline but in dark grey, and the render leaves it alone.
      This wins over the category color and the not-caught dimming. */
   .tl-mark.removed { background: #3a3a3a; opacity: 1; }
+  /* Invisible tap-extension: marks can be a couple of pixels wide, which is
+     unusable on touch. The pseudo-element grows the CLICKABLE box without
+       changing the visible width (which encodes the detection's duration). */
+  .tl-mark::after { content: ""; position: absolute;
+    top: -6px; bottom: -6px; left: -7px; right: -7px; }
+  /* Prev/next-detection buttons flanking the timeline (popup follows). */
+  .tl-nav { padding: 4px 10px; font-size: 12px; line-height: 1; }
   /* Override controls inside the timeline popup: a level dropdown that applies
      on selection (no Apply button — see issue #21). pointer-events:auto so
      they're reachable (the tooltip allows them). */
@@ -214,6 +222,9 @@
        (min-width:0 so they stop forcing horizontal squeeze). */
     .row label { flex: 1 1 100%; min-width: 0; }
     input[type=text], input[type=number], select, textarea { min-width: 0; }
+    /* iOS Safari zooms the whole page when a focused field is under 16px. */
+    input[type=text], input[type=password], input[type=number], select, textarea {
+      font-size: 16px; }
     /* Wide tables scroll instead of crushing the columns. */
     .matrix, #bench-results table { display: block; overflow-x: auto; }
     #status-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
@@ -372,7 +383,9 @@
 
     <div id="timeline">
       <span class="hint" style="width:auto; white-space:nowrap;">TIMELINE</span>
+      <button id="tl-prev" class="tl-nav" title="Previous detection" disabled>◀</button>
       <div id="tl-bar"><div id="tl-pos"></div></div>
+      <button id="tl-next" class="tl-nav" title="Next detection" disabled>▶</button>
       <span class="hint" id="tl-info"></span>
     </div>
     <div class="legend">
@@ -666,6 +679,31 @@ let overrideSelectActive = false; // a level-override select is being interacted
                            // can "click" outside the popup; must not close it
 let framePopEl = null;     // the separate at-cursor frame popup
 let framePopBusy = false;
+let tlNavMarks = [];       // mark elements that have a popup, sorted by time
+let tlTipKey = null;       // key of the detection the popup is open on
+                           // (elements are rebuilt every poll; the key survives)
+function tlMarkKey(el) {
+  return el.dataset.oType ? el.dataset.oType + ":" + el.dataset.oIndex
+                          : "t" + el.dataset.t;
+}
+function updateTlNav() {
+  const prev = $("tl-prev"), next = $("tl-next");
+  if (!prev || !next) return;
+  const i = tlTipKey === null ? -1
+          : tlNavMarks.findIndex(el => tlMarkKey(el) === tlTipKey);
+  prev.disabled = !tlNavMarks.length || i === 0;
+  next.disabled = !tlNavMarks.length || i === tlNavMarks.length - 1;
+}
+// Jump the popup to the prev/next detection. With no popup open, next starts
+// at the first detection and prev at the last; at the ends the button disables
+// (no wrap — silently teleporting 30 minutes would be worse than a gray button).
+function tlNavStep(dir) {
+  if (!tlNavMarks.length) return;
+  const i = tlNavMarks.findIndex(el => tlMarkKey(el) === tlTipKey);
+  const idx = i < 0 ? (dir > 0 ? 0 : tlNavMarks.length - 1)
+                    : Math.max(0, Math.min(tlNavMarks.length - 1, i + dir));
+  showTlTooltip(tlNavMarks[idx]);
+}
 function ensureTlTooltip() {
   if (!tlTipEl) {
     tlTipEl = document.createElement("div");
@@ -728,10 +766,13 @@ function ensureTlOverride() {
   tlOverride._sel = sel; tlOverride._mark = null;
   return tlOverride;
 }
-function showTlTooltip(ev) {
-  const mark = ev.currentTarget;
+// `mark` is the .tl-mark element (a click on the mark itself, or a prev/next
+// jump) — not the event.
+function showTlTooltip(mark) {
   const tip = mark.dataset.tip;
-  if (!tip) return;
+  if (!tip) { hideTlTooltip(); return; }   // candidate mark: never leave a
+                                           // stale popup anchored elsewhere
+  tlTipKey = tlMarkKey(mark);
   const tl = ensureTlTooltip();
   // Text block + ✕ close + (for marks with a timestamp) a hold-to-preview button.
   tl.innerHTML = "";
@@ -809,11 +850,17 @@ function showTlTooltip(ev) {
     tl.style.top = (r.top - 10) + "px";
     tl.style.transform = "translate(-50%, -100%)";
   }
+  updateTlNav();
 }
 function hideTlTooltip() {
+  tlTipKey = null;
   if (tlTipEl) tlTipEl.style.display = "none";
   hideFramePopup(); // closing the popup also hides any held preview
+  updateTlNav();
 }
+$("tl-prev").addEventListener("click", (e) => { e.stopPropagation(); tlNavStep(-1); });
+$("tl-next").addEventListener("click", (e) => { e.stopPropagation(); tlNavStep(1); });
+
 // ---------------------------------------------------------------- frame preview
 function ensureFramePopup() {
   if (!framePopEl) {
@@ -862,6 +909,9 @@ function renderTimeline() {
     $("tl-count").textContent = busy ? "scan in progress…" : "";
     $("tl-info").textContent = "";
     pos.style.display = "none";
+    tlNavMarks = [];
+    hideTlTooltip();
+    updateTlNav();
     return;
   }
   const dur = tlInfo.duration;
@@ -906,11 +956,24 @@ function renderTimeline() {
       }
       el.addEventListener("click", (e) => {
         e.stopPropagation();          // the outside-click handler must not close it
-        showTlTooltip(e);
+        showTlTooltip(el);
       });
     }
     tl.appendChild(el);
   });
+  // Marks are recreated on every poll: rebuild the prev/next navigation set
+  // (only marks with a popup, in time order) and re-anchor an open popup to
+  // its NEW element (re-showing it also keeps its override row in sync).
+  tlNavMarks = [...tl.querySelectorAll(".tl-mark")].filter(el => el.dataset.tip)
+    .sort((a, b) => parseFloat(a.dataset.t) - parseFloat(b.dataset.t));
+  if (tlTipKey) {
+    const cur = tlNavMarks.find(el => tlMarkKey(el) === tlTipKey);
+    // Skip the re-show while the native override dropdown is open: re-parenting
+    // the select mid-choice is exactly the issue-#21 bug. The stale popup is
+    // harmless — the change handler hides it, and the next poll re-anchors.
+    if (cur && !overrideSelectActive) showTlTooltip(cur); else if (!cur) hideTlTooltip();
+  }
+  updateTlNav();
   const caught = marks.filter(m => m.cat !== "candidate" && m.caught).length;
   $("tl-count").textContent =
     (marks.length ? `${marks.length} mark(s)` : "") +
