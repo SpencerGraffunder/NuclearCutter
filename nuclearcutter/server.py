@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from nuclearcutter.bench import attach_usage_hook, run_benchmark
 from nuclearcutter.detection.profanity import DEFAULT_FOUL_LANGUAGE_SCALE
 from nuclearcutter.detection.vlm_confirm import (
-    DEFAULT_LEVEL_SCALES, _LEVELS_IN_ORDER, vision_max_pixels_for_scale,
+    DEFAULT_LEVEL_SCALES, SWEEP_QUALITY_PIXELS, _LEVELS_IN_ORDER, vision_max_pixels_for_scale,
 )
 from nuclearcutter.render.renderer import (
     RenderStopped, build_output_path, full_video_suffix, render as render_pass,
@@ -216,6 +216,7 @@ class AppState:
         # (transcribe.ensure_whisper_model_loaded hot-swaps if needed).
         self.whisper_model = ""
         self.scale = "480p"
+        self.sweep_resolution = "full"  # sweep-pass pixel preset (vlm_confirm.SWEEP_QUALITY_PIXELS)
         self.sweep_interval = 2.0
         # --- Render settings ----------------------------------------------
         self.output_name = ""  # empty -> <stem>_cleaned
@@ -454,6 +455,7 @@ class AppState:
             "text_model": self.text_model,
             "whisper_model": self.whisper_model,
             "scale": self.scale,
+            "sweep_resolution": self.sweep_resolution,
             "sweep_interval": self.sweep_interval,
             "output_name": self.output_name,
             "scan_path": self.scan_path,
@@ -502,6 +504,11 @@ class AppState:
             if scale not in ("360p", "480p", "720p", "1080p"):
                 raise ValueError(f"scale must be 360p/480p/720p/1080p, got {scale!r}")
             self.scale = scale
+        if "sweep_resolution" in payload:
+            res = str(payload["sweep_resolution"] or "full").strip().lower()
+            if res not in SWEEP_QUALITY_PIXELS:
+                raise ValueError("sweep_resolution must be full/360p/240p")
+            self.sweep_resolution = res
         if "sweep_interval" in payload:
             self.sweep_interval = float(payload["sweep_interval"])
             if self.sweep_interval <= 0:
@@ -971,6 +978,7 @@ class AppState:
                 progress_callback=_progress,
                 whisper_cfg=self._whisper_cfg(),
                 sweep_interval=self.sweep_interval,
+                sweep_resolution=self.sweep_resolution,
                 status_path=status_path,
                 partial_result_path=partial_path,
                 scale=self.scale,
@@ -1340,6 +1348,7 @@ class AppState:
             self._log(job, "[benchmark] extracting 12 frames and running sweep + confirm prompts")
             result = run_benchmark(
                 video, client, scan=scan_result, scale=self.scale,
+                sweep_resolution=self.sweep_resolution,
                 stop_event=job.stop_event,
             )
             job.results = [result["summary"], result["batches"], result["confirms"]]

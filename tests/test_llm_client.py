@@ -229,6 +229,46 @@ class TestModelContextLength:
         assert mock_post.call_args[0][0] == "http://localhost:11434/api/show"
 
 
+class TestVisionMaxPixelsOverride:
+    """The sweep path sends a per-call pixel cap (max_pixels); the configured
+    cap must remain the ceiling for every call, sweep included."""
+
+    def _client(self) -> LLMClient:
+        return LLMClient(LLMConfig(
+            base_url="http://localhost:9999/v1", vlm_model="m", text_model="m",
+            vision_max_pixels=40_000,
+        ))
+
+    def _image(self, tmp_path, w: int = 400, h: int = 400):
+        from PIL import Image
+        p = tmp_path / "frame.jpg"
+        Image.new("RGB", (w, h), "white").save(p)
+        return p
+
+    def _pixels(self, encoded_b64: str) -> int:
+        import base64
+        import io
+
+        from PIL import Image
+        img = Image.open(io.BytesIO(base64.b64decode(encoded_b64)))
+        return img.size[0] * img.size[1]
+
+    def test_per_call_cap_lowers_resolution(self, tmp_path):
+        client = self._client()
+        px = self._pixels(client._encode_image(self._image(tmp_path), max_pixels=10_000))
+        assert px <= 10_000
+
+    def test_per_call_cap_never_exceeds_configured_cap(self, tmp_path):
+        client = self._client()
+        px = self._pixels(client._encode_image(self._image(tmp_path), max_pixels=10_000_000))
+        assert px <= 40_000
+
+    def test_default_uses_configured_cap(self, tmp_path):
+        client = self._client()
+        px = self._pixels(client._encode_image(self._image(tmp_path)))
+        assert px <= 40_000
+
+
 class TestSummaryQuery:
     """summary_query tries the frame-based vision path first and retries
     text-only on failure — so a text-only summary model still yields text."""

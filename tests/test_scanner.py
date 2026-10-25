@@ -94,7 +94,7 @@ def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FakeDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -136,7 +136,7 @@ def test_scan_forwards_custom_sweep_interval(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FakeDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -175,7 +175,7 @@ def test_scan_raises_when_all_confirmations_fail(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FailingDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FailingDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -220,7 +220,7 @@ def test_scan_skips_transcription_when_cache_valid(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FakeDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -255,7 +255,7 @@ def test_scan_forwards_sweep_progress(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FakeDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -287,7 +287,7 @@ def test_scan_reports_transcribe_100_when_done(monkeypatch, mock_video):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FakeDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -360,7 +360,7 @@ def test_scan_resumes_from_prior_status(monkeypatch, mock_video, tmp_path):
 
     monkeypatch.setattr(
         "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None: FakeDetector(client),
+        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
     )
 
     from nuclearcutter.scan.scanner import scan
@@ -381,6 +381,50 @@ def test_scan_resumes_from_prior_status(monkeypatch, mock_video, tmp_path):
     assert len(result.visual_detections) == 2
     cats = {d.category for d in result.visual_detections}
     assert cats == {Category.NUDITY, Category.GORE}
+
+
+def test_scan_resume_rescales_frames_when_interval_changed(monkeypatch, mock_video, tmp_path):
+    """Resuming with a CHANGED sweep_interval preserves the swept POSITION
+    (seconds), not the sample count: a run interrupted at 8 frames @ 2.0s
+    (16s swept) must resume at frame 4 when restarted at 4.0s — resuming at
+    frame 8 would silently skip 16s of un-swept footage."""
+    _fake_identity_patches(monkeypatch)
+    _mock_transcription(monkeypatch)
+    _mock_profanity(monkeypatch)
+    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
+
+    status_path = tmp_path / "test_movie.nuclearcutter.status.json"
+    prior = {
+        "schema": 1, "video": mock_video.name, "duration_seconds": 100.0,
+        "sweep_interval": 2.0, "pid": 1, "started_at": "2026-01-01T00:00:00",
+        "phase": "visual_confirm", "frames_done": 8, "frames_total": 50,
+        "position_seconds": 16.0,
+        "visual_candidates": [], "visual_detections": [], "language_detections": [],
+    }
+    import json as _json
+    status_path.write_text(_json.dumps(prior))
+
+    captured = {}
+
+    class FakeDetector:
+        def __init__(self, client, prompts=None, scale=None, sweep_resolution=None):
+            pass
+
+        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None,
+                  on_progress=None, resume_from=0, existing_windows=None, stop_event=None):
+            captured["resume_from"] = resume_from
+            return []
+
+    monkeypatch.setattr("nuclearcutter.scan.scanner.VisualSweepDetector", FakeDetector)
+
+    from nuclearcutter.scan.scanner import scan
+    from nuclearcutter.utils.llm_client import LLMConfig
+
+    llm_config = LLMConfig(
+        base_url="http://localhost:9999/v1", vlm_model="test-model", text_model="test-model",
+    )
+    scan(mock_video, llm_config=llm_config, status_path=status_path, sweep_interval=4.0)
+    assert captured["resume_from"] == 4, "8 frames @2.0s must become 4 frames @4.0s on resume"
 
 
 def test_resume_state_loads_completed_scan(mock_video, tmp_path):

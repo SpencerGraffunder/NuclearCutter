@@ -274,29 +274,41 @@ class LLMClient:
                     + hint
                 )
 
-    def _encode_image(self, image_path: Path) -> str:
+    def _encode_image(self, image_path: Path, max_pixels: int | None = None) -> str:
         """Read an image, downscale if needed, and return as a base64 JPEG data URI.
 
         Downscaling to ~480px is the biggest speed lever for local VLM inference
         (see `vision_max_pixels`): it cuts HTTP body size and prefill cost ~6x
         without meaningfully impacting scene-classification accuracy.
+
+        `max_pixels` overrides (never exceeds) the configured per-image cap for
+        THIS call — the sweep pass uses it to send fewer pixels than the
+        confirm pass, because the server's vision preprocessing cost scales
+        with per-image pixels (see vlm_confirm.SWEEP_QUALITY_PIXELS).
         """
-        max_pixels = self.config.vision_max_pixels
+        max_pixels_limit = self.config.vision_max_pixels
+        if max_pixels is not None:
+            max_pixels_limit = min(int(max_pixels), max_pixels_limit)
         img = Image.open(image_path)
         # Resize if the image is larger than max_pixels (keeping aspect ratio).
-        if img.size[0] * img.size[1] > max_pixels:
-            ratio = (max_pixels / (img.size[0] * img.size[1])) ** 0.5
+        if img.size[0] * img.size[1] > max_pixels_limit:
+            ratio = (max_pixels_limit / (img.size[0] * img.size[1])) ** 0.5
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85, optimize=True)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    def vision_query(self, prompt: str, image_paths: list[Path], json_mode: bool = False) -> str:
-        """Send a prompt + one or more images to the configured VLM. Returns raw text response."""
+    def vision_query(self, prompt: str, image_paths: list[Path], json_mode: bool = False,
+                     max_pixels: int | None = None) -> str:
+        """Send a prompt + one or more images to the configured VLM. Returns raw text response.
+
+        `max_pixels` optionally lowers the per-image resolution cap for this
+        call only (never above the configured cap).
+        """
         content = [{"type": "text", "text": prompt}]
         for img_path in image_paths:
-            b64 = self._encode_image(img_path)
+            b64 = self._encode_image(img_path, max_pixels=max_pixels)
             content.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{b64}"},
@@ -371,8 +383,9 @@ class LLMClient:
         result = self._post(payload)
         return _content_of(result)
 
-    def vision_query_json(self, prompt: str, image_paths: list[Path]) -> dict:
-        raw = self.vision_query(prompt, image_paths, json_mode=True)
+    def vision_query_json(self, prompt: str, image_paths: list[Path],
+                          max_pixels: int | None = None) -> dict:
+        raw = self.vision_query(prompt, image_paths, json_mode=True, max_pixels=max_pixels)
         return _parse_json_loose(raw)
 
     def text_query_json(self, prompt: str) -> dict:

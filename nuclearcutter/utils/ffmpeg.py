@@ -118,6 +118,59 @@ def extract_frame_at(video_path: Path, timestamp_seconds: float, scale_height: i
     return out_path
 
 
+def extract_frames_chunk(
+    video_path: Path,
+    timestamps: list[float],
+    out_dir: Path,
+    scale_height: int | None = None,
+    prefix: str = "chunk_%05d.jpg",
+) -> dict[float, Path]:
+    """Extract a run of evenly-spaced frames with ONE ffmpeg decode pass.
+
+    `timestamps` must be sorted and evenly spaced (the sweep's samples).
+    Instead of one seek+decode per frame — which re-pays keyframe seeking and
+    codec startup for EVERY sample (~1-4s each on 1080p HEVC, the dominant
+    cost of a full-film sweep, ~3x the VLM call itself) — a single
+    `ffmpeg -ss <first> -vf fps=1/step` pass seeks once and decodes forward,
+    emitting one frame per step. Frames are written as JPEG (the VLM request
+    re-encodes JPEG anyway, so PNG encode+decode per sample is pure waste).
+
+    Returns {timestamp: Path} for the frames ffmpeg actually produced, in
+    order — if it stops early (end of file), the trailing timestamps are
+    simply absent and the caller can fall back to per-frame extraction for
+    those. Never raises on an ffmpeg error: an empty dict means "use the
+    per-frame path", which carries the retry/diagnostics.
+    """
+    ts = sorted(timestamps)
+    if not ts:
+        return {}
+    step = ts[1] - ts[0] if len(ts) > 1 else 1.0
+    if step <= 0:
+        raise ValueError("timestamps must be strictly increasing")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vf = f"fps={1.0 / step:.6f}" + (f",scale=-2:{scale_height}" if scale_height else "")
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{ts[0]:.3f}",
+            "-i", str(video_path),
+            "-frames:v", str(len(ts)),
+            "-vf", vf,
+            "-q:v", "3",
+            str(out_dir / prefix),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    frames = sorted(out_dir.glob(prefix.replace("%05d", "*")))
+    if not frames and result.returncode != 0:
+        # Total failure (corrupt range, codec error, tail past EOF) — the
+        # per-frame fallback path retries and raises with full stderr.
+        return {}
+    return dict(zip(ts, frames))
+
+
 def extract_audio_track(video_path: Path, out_path: Path, start: float = None, end: float = None) -> Path:
     """Extract audio (as 16kHz mono WAV, suitable for Whisper) optionally trimmed to [start, end]."""
     cmd = ["ffmpeg", "-y"]

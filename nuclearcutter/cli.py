@@ -138,6 +138,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         progress_callback=progress,
         whisper_cfg=whisper_cfg,
         sweep_interval=args.sweep_interval,
+        sweep_resolution=args.sweep_resolution,
         status_path=status_path,
         partial_result_path=out_path,
         scale=args.scale or DEFAULT_SCALE,
@@ -305,6 +306,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"Scale frames before VLM (default: {DEFAULT_SCALE})")
     p_scan.add_argument("--sweep-interval", type=float, default=2.0,
                         help="Seconds between sampled frames in the VLM sweep (default: 2.0)")
+    p_scan.add_argument("--sweep-resolution", choices=["full", "360p", "240p"], default="full",
+                        help="Per-image pixel cap for the sweep pass only — lower is much faster "
+                             "(the vision server's preprocessing cost scales with pixels); "
+                             "confirm/summary passes always run at full --scale (default: full)")
     p_scan.add_argument("--summary-model", default=None,
                         help="Model id for the summary pass — rewrites every visual detection's description "
                              "(frames + transcript) right after the scan. Empty = disabled.")

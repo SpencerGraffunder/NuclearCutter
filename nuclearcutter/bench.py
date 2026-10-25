@@ -70,13 +70,20 @@ def run_benchmark(
     client,
     scan: ScanResult | None = None,
     scale: str = "480p",
+    sweep_resolution: str | None = None,
     n_total: int = N_TOTAL_FRAMES,
     stop_event=None,
 ) -> dict:
     """Run the benchmark and return {summary, batches, confirms}."""
-    from nuclearcutter.detection.vlm_confirm import scale_height_for
+    from nuclearcutter.detection.vlm_confirm import (
+        SWEEP_QUALITY_PIXELS, scale_height_for,
+    )
 
     scale_height = scale_height_for(scale)
+    # Same sweep-only pixel cap the real sweep will use (confirms stay full).
+    sweep_max_pixels = SWEEP_QUALITY_PIXELS.get(
+        (sweep_resolution or "full").strip().lower()
+    )
     duration = scan.identity.duration_seconds if scan else _probe_duration(video_path)
 
     flagged_windows: list[tuple[float, float, str]] = []
@@ -118,7 +125,7 @@ def run_benchmark(
                 continue
             prompt = build_sweep_prompt(defs, len(batch))
             t0 = time.monotonic()
-            data = _query_with_usage(client, prompt, batch)
+            data = _query_with_usage(client, prompt, batch, max_pixels=sweep_max_pixels)
             elapsed = time.monotonic() - t0
             parsed = data.get("parsed", {})
             usage = data.get("usage", {})
@@ -196,13 +203,17 @@ def _probe_duration(video_path: Path) -> float:
     return probe_duration(video_path)
 
 
-def _query_with_usage(client, prompt: str, frames) -> dict:
+def _query_with_usage(client, prompt: str, frames, max_pixels: int | None = None) -> dict:
     """Run a vision query through the SAME entry point a real scan uses
     (`LLMClient.vision_query_json`), so the benchmark's requests are identical
     to an actual sweep/confirm call — same thinking-off flags, same prompt
-    plumbing, same image encoding.
+    plumbing, same image encoding. `max_pixels` mirrors the sweep-resolution
+    cap so benchmark sweep timings reflect the configured sweep pass.
     """
-    parsed = client.vision_query_json(prompt, frames)
+    if max_pixels:
+        parsed = client.vision_query_json(prompt, frames, max_pixels=max_pixels)
+    else:
+        parsed = client.vision_query_json(prompt, frames)
     return {
         "parsed": parsed,
         "usage": getattr(client, "_last_usage", {}) or {},

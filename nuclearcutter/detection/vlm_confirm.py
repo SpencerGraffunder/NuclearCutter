@@ -30,12 +30,15 @@ import logging
 import shutil
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from nuclearcutter.prompts import get_prompt
 from nuclearcutter.schema import Category, SeverityLevel, VisualDetection
-from nuclearcutter.utils.ffmpeg import extract_frame_at, extract_frames_in_range, probe_duration
+from nuclearcutter.utils.ffmpeg import (
+    extract_frame_at, extract_frames_chunk, extract_frames_in_range, probe_duration,
+)
 from nuclearcutter.utils.llm_client import LLMClient
 
 # How many frames to sample across a candidate range for the confirm/describe pass.
@@ -87,6 +90,36 @@ DEFAULT_SWEEP_INTERVAL = DEFAULT_SWEEP_INTERVAL_SECONDS
 # How many sampled frames go into a single batched VLM review call. Kept at 4:
 # this is the batch size that proved reliable and accurate with local VLMs.
 SWEEP_FRAMES_PER_CALL = 4
+
+# How many batches' frames one chunked ffmpeg pass extracts. Frames are
+# grabbed in chunks (one decode pass per SWEEP_CHUNK_BATCHES batches — seek
+# once, decode forward) instead of one seek+decode PER FRAME: per-frame
+# seeking re-pays keyframe search + codec startup for every sample (~1-4s
+# each on 1080p HEVC), which dominated full-film scan time — ~30s of
+# extraction per 39s batch while the VLM call itself was only ~9s. The chunk
+# pass costs ~0.2-0.3s/frame AND the NEXT chunk is extracted on a background
+# thread while the VLM chews the current batch, so extraction disappears
+# almost entirely from the critical path. 32 frames per chunk keeps the
+# per-chunk seek overhead amortized while staying fully hidden behind the
+# ~35s of VLM time the chunk feeds.
+SWEEP_CHUNK_BATCHES = 8
+
+# Per-image pixel caps for the SWEEP pass, keyed by the GUI's
+# "sweep_resolution" setting. The sweep is the hot path (2000+ vision calls
+# per movie vs dozens of confirms), and the server's vision PREPROCESSING
+# cost — not model prefill — dominates each call: measured on Strata
+# (Qwen3.8-35B + strata-vision sidecar, 4 images/call), 4x410k px images
+# take ~27s round-trip vs ~7s at 4x102k px, and the server's own text-prefill
+# log only counts the ~9s portion. The sweep answers only "any flaggable
+# content in these 4 frames?", a much coarser question than the confirm pass
+# grades, so it can look at fewer pixels; confirms/summaries always use the
+# full configured cap. "full" = same cap as the chosen scale (pre-2026-10
+# behaviour — accuracy unchanged).
+SWEEP_QUALITY_PIXELS = {
+    "full": None,
+    "360p": 230_400,   # 640x360 per image
+    "240p": 102_400,   # 426x240 per image (~2x faster sweep calls)
+}
 
 # Padding and merge distance are DERIVED from the sweep interval, not hardcoded:
 # frames are sampled every `interval` seconds, and any sampled frame that was
@@ -333,11 +366,16 @@ class VisualSweepDetector:
     """Unified full-film VLM sweep + confirm. Replaces NudeNet and both old sweeps."""
 
     def __init__(self, client: LLMClient, prompts: dict | None = None,
-                 scale: str | None = None):
+                 scale: str | None = None, sweep_resolution: str | None = None):
         self.client = client
         # Per-category definitions (user overrides merged over defaults).
         self.category_defs = _category_definitions(prompts)
         self.scale_height = scale_height_for(scale)
+        # Sweep-only per-image pixel cap (see SWEEP_QUALITY_PIXELS). None =
+        # use the client's configured cap for sweep calls too ("full").
+        self.sweep_max_pixels = SWEEP_QUALITY_PIXELS.get(
+            (sweep_resolution or "full").strip().lower()
+        )
 
     def sweep(
         self,
@@ -383,90 +421,95 @@ class VisualSweepDetector:
         try:
             timestamps = [t for t in _arange(0.0, duration - 0.5, sample_interval)]
             start = min(max(resume_from, 0), len(timestamps))
-            for i in range(start, len(timestamps), SWEEP_FRAMES_PER_CALL):
-                if stop_event is not None and stop_event.is_set():
-                    stopped = True
-                    break
-                batch_ts = timestamps[i:i + SWEEP_FRAMES_PER_CALL]
-                frame_paths = []
-                for ts in batch_ts:
-                    try:
-                        frame_paths.append(extract_frame_at(video_path, ts, scale_height=self.scale_height))
-                    except Exception as exc:
-                        logging.warning("Sweep: frame extraction failed at %.1fs — %s", ts, exc)
+            # Chunked + prefetched extraction: frames for the NEXT chunk are
+            # extracted on a background thread while the VLM chews the current
+            # batch (see _iter_prefetched_batches). Batches are yielded as
+            # (absolute_index, batch_timestamps, frame_paths).
+            batch_iter = self._iter_prefetched_batches(
+                video_path, timestamps, start, tmp_dir, stop_event,
+            )
+            try:
+                for i, batch_ts, frame_paths in batch_iter:
+                    if stop_event is not None and stop_event.is_set():
+                        stopped = True
+                        break
 
-                if frame_paths:
-                    queried_batches += 1
-                    try:
-                        result = self._query_sweep_batch(frame_paths)
-                    finally:
-                        for p in frame_paths:
-                            p.unlink(missing_ok=True)
+                    if frame_paths:
+                        queried_batches += 1
+                        try:
+                            result = self._query_sweep_batch(frame_paths)
+                        finally:
+                            for p in frame_paths:
+                                p.unlink(missing_ok=True)
 
-                    if result is None:
-                        # NOT verified clean — count it and say so (this is the
-                        # difference between "nothing found" and "couldn't
-                        # look").
-                        failed_batches += 1
-                        logging.warning(
-                            "Sweep: batch at %.1fs–%.1fs FAILED after %d attempts "
-                            "(%d failed batch(es) so far) — these frames are NOT "
-                            "verified clean.",
-                            batch_ts[0], batch_ts[-1], MAX_VLM_RETRIES, failed_batches,
-                        )
-                        continue
+                        if result is None:
+                            # NOT verified clean — count it and say so (this is the
+                            # difference between "nothing found" and "couldn't
+                            # look").
+                            failed_batches += 1
+                            logging.warning(
+                                "Sweep: batch at %.1fs–%.1fs FAILED after %d attempts "
+                                "(%d failed batch(es) so far) — these frames are NOT "
+                                "verified clean.",
+                                batch_ts[0], batch_ts[-1], MAX_VLM_RETRIES, failed_batches,
+                            )
+                            continue
 
-                    if result and result.get("contains_flagged_content"):
-                        category = _category_from_str(result.get("category"))
-                        confidence = float(result.get("confidence", 0.5))
-                        # The sweep only needs "is there flagged content, roughly
-                        # what category" — severity is graded by the focused confirm
-                        # pass. LOW is the never-miss placeholder used only if
-                        # confirm later fails outright.
-                        level = SeverityLevel.LOW
-                        desc = result.get("description", "")
-                        # Frame-level localization: the VLM tells us WHICH frame(s)
-                        # in this batch are flagged, so we blur only around those
-                        # frames instead of the whole batch (a single flagged frame
-                        # in a 4-frame batch shouldn't blur all four sample
-                        # intervals).
-                        flagged_ts = _flagged_timestamps(batch_ts, result.get("flagged_frames"))
-                        if flagged_ts:
-                            frame_granularity = True
-                            for ts in flagged_ts:
-                                flagged_windows.append((ts, ts, category, desc, confidence, level))
+                        if result and result.get("contains_flagged_content"):
+                            category = _category_from_str(result.get("category"))
+                            confidence = float(result.get("confidence", 0.5))
+                            # The sweep only needs "is there flagged content, roughly
+                            # what category" — severity is graded by the focused confirm
+                            # pass. LOW is the never-miss placeholder used only if
+                            # confirm later fails outright.
+                            level = SeverityLevel.LOW
+                            desc = result.get("description", "")
+                            # Frame-level localization: the VLM tells us WHICH frame(s)
+                            # in this batch are flagged, so we blur only around those
+                            # frames instead of the whole batch (a single flagged frame
+                            # in a 4-frame batch shouldn't blur all four sample
+                            # intervals).
+                            flagged_ts = _flagged_timestamps(batch_ts, result.get("flagged_frames"))
+                            if flagged_ts:
+                                frame_granularity = True
+                                for ts in flagged_ts:
+                                    flagged_windows.append((ts, ts, category, desc, confidence, level))
+                                    if on_flagged_window:
+                                        on_flagged_window(
+                                            start=ts, end=ts,
+                                            category=category.value,
+                                            confidence=confidence,
+                                            level=level.value,
+                                        )
+                            else:
+                                # Model didn't localize — keep the whole batch window so
+                                # nothing is missed (never LESS coverage than before).
+                                flagged_windows.append((batch_ts[0], batch_ts[-1], category, desc, confidence, level))
                                 if on_flagged_window:
                                     on_flagged_window(
-                                        start=ts, end=ts,
+                                        start=batch_ts[0],
+                                        end=batch_ts[-1],
                                         category=category.value,
                                         confidence=confidence,
                                         level=level.value,
                                     )
-                        else:
-                            # Model didn't localize — keep the whole batch window so
-                            # nothing is missed (never LESS coverage than before).
-                            flagged_windows.append((batch_ts[0], batch_ts[-1], category, desc, confidence, level))
-                            if on_flagged_window:
-                                on_flagged_window(
-                                    start=batch_ts[0],
-                                    end=batch_ts[-1],
-                                    category=category.value,
-                                    confidence=confidence,
-                                    level=level.value,
-                                )
 
-                # Progress is reported for EVERY batch, even when frame
-                # extraction failed (the tail of a file is the usual culprit)
-                # or nothing remained to sweep after a resume — otherwise the
-                # scan bar would stall short of 100% while the run continues.
-                done = i + len(batch_ts)
-                if on_progress:
-                    on_progress(done, len(timestamps))
-                if done % 100 == 0 or done >= len(timestamps):
-                    print(
-                        f"[sweep] {done} / {len(timestamps)} frames",
-                        file=sys.stderr,
-                    )
+                    # Progress is reported for EVERY batch, even when frame
+                    # extraction failed (the tail of a file is the usual culprit)
+                    # or nothing remained to sweep after a resume — otherwise the
+                    # scan bar would stall short of 100% while the run continues.
+                    done = i + len(batch_ts)
+                    if on_progress:
+                        on_progress(done, len(timestamps))
+                    if done % 100 == 0 or done >= len(timestamps):
+                        print(
+                            f"[sweep] {done} / {len(timestamps)} frames",
+                            file=sys.stderr,
+                        )
+            finally:
+                # Close the generator so its prefetch thread finishes (and its
+                # in-flight ffmpeg exits) before we remove tmp_dir below.
+                batch_iter.close()
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -505,11 +548,90 @@ class VisualSweepDetector:
                    else _padding_for_interval(sample_interval))
         return _merge_flagged_windows(flagged_windows, duration, padding=padding, merge_gap=merge_gap)
 
+    def _iter_prefetched_batches(self, video_path, timestamps, start, tmp_dir, stop_event):
+        """Yield (absolute_index, batch_ts, frame_paths) with extraction OVERLAPPING the VLM query.
+
+        How it works: one ffmpeg decode pass per chunk of
+        SWEEP_CHUNK_BATCHES batches (seek once, decode forward — vs one seek
+        per frame, which dominated scan time at ~30s/batch on 1080p HEVC),
+        with a one-thread prefetcher extracting the NEXT chunk while the
+        caller's VLM query chews the current chunk's batches (the generator
+        is suspended at `yield` during the query, so the prefetch runs
+        exactly during the model's time).
+
+        Stop semantics: the generator never stops itself — the CALLER checks
+        stop_event at the top of its loop and breaks (so a stopped sweep
+        still reports partial progress, never 100%). The generator merely
+        stops prefetching further chunks once a stop is visible, so hitting
+        Stop doesn't keep decoding the film. Closing the generator joins the
+        prefetcher, letting an in-flight ffmpeg finish before the caller
+        removes tmp_dir.
+
+        Frames the chunk pass didn't produce (ffmpeg fell short of the
+        requested count, corrupt range, past EOF) fall back to the per-frame
+        extract_frame_at path — same behavior and same warning as before.
+        """
+        chunk_frames = SWEEP_CHUNK_BATCHES * SWEEP_FRAMES_PER_CALL
+
+        def _extract_chunk(ci: int) -> dict:
+            chunk_ts = timestamps[ci:ci + chunk_frames]
+            try:
+                return extract_frames_chunk(
+                    video_path, chunk_ts, tmp_dir,
+                    scale_height=self.scale_height,
+                    prefix=f"c{ci:06d}_%05d.jpg",
+                )
+            except Exception as exc:
+                logging.warning(
+                    "Sweep: chunk extraction at %.1fs failed — falling back "
+                    "to per-frame extraction: %s", chunk_ts[0], exc,
+                )
+                return {}
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sweep_prefetch") as prefetch:
+            fut = (None if start >= len(timestamps)
+                   else prefetch.submit(_extract_chunk, start))
+            ci = start
+            while fut is not None:
+                got = fut.result()
+                ci_next = ci + chunk_frames
+                # Don't decode another chunk once the user hit Stop.
+                fut = (
+                    prefetch.submit(_extract_chunk, ci_next)
+                    if ci_next < len(timestamps)
+                    and not (stop_event is not None and stop_event.is_set())
+                    else None
+                )
+                chunk_ts = timestamps[ci:ci_next]
+                for bi in range(0, len(chunk_ts), SWEEP_FRAMES_PER_CALL):
+                    batch_ts = chunk_ts[bi:bi + SWEEP_FRAMES_PER_CALL]
+                    frame_paths = []
+                    for ts in batch_ts:
+                        try:
+                            p = got.get(ts)
+                            if p is None or not p.exists() or p.stat().st_size == 0:
+                                # Chunk pass fell short at this sample —
+                                # per-frame fallback carries the retry.
+                                p = extract_frame_at(video_path, ts, scale_height=self.scale_height)
+                            frame_paths.append(p)
+                        except Exception as exc:
+                            logging.warning(
+                                "Sweep: frame extraction failed at %.1fs — %s", ts, exc,
+                            )
+                    yield ci + bi, batch_ts, frame_paths
+                ci = ci_next
+
     def _query_sweep_batch(self, frame_paths: list[Path]) -> dict | None:
         """Ask the VLM whether a batch contains ANY flagged content (single verdict)."""
         prompt = build_sweep_prompt(self.category_defs, len(frame_paths))
         for attempt in range(1, MAX_VLM_RETRIES + 1):
             try:
+                if self.sweep_max_pixels:
+                    # Coarse sweep verdict at reduced resolution — hides the
+                    # vision-preprocessing cost that dominates sweep calls
+                    # (see SWEEP_QUALITY_PIXELS). Confirms keep full pixels.
+                    return self.client.vision_query_json(
+                        prompt, frame_paths, max_pixels=self.sweep_max_pixels)
                 return self.client.vision_query_json(prompt, frame_paths)
             except Exception as exc:
                 logging.warning(

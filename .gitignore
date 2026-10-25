@@ -13,3 +13,4 @@ timestamps/
 __pycache__/
 .cache/
 .venv/
+.worktrees/

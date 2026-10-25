@@ -7,6 +7,7 @@ was stopped. These guard the "stuck at 98%" and "scan bar 0% on resume" bugs.
 
 import subprocess
 import threading
+from pathlib import Path
 
 from nuclearcutter.detection.vlm_confirm import VisualSweepDetector
 
@@ -36,6 +37,9 @@ def _fail_extraction(monkeypatch):
         raise RuntimeError("frame extraction failed")
 
     monkeypatch.setattr("nuclearcutter.detection.vlm_confirm.extract_frame_at", _boom)
+    # Chunked extraction is the primary path now; when it fails the sweep
+    # falls back to per-frame extraction — fail BOTH so "no frames at all".
+    monkeypatch.setattr("nuclearcutter.detection.vlm_confirm.extract_frames_chunk", _boom)
 
 
 def test_sweep_reports_100_even_when_frames_fail(tmp_path, monkeypatch):
@@ -137,3 +141,127 @@ def test_sweep_localized_frame_blurs_less_than_batch(tmp_path):
     wide = det2.sweep(video, sample_interval=2.0)
     assert wide
     assert (wide[0].end - wide[0].start) >= (tight[0].end - tight[0].start)
+
+
+# ---------------------------------------------------------------------------
+# Chunked + prefetched extraction: the sweep grabs one ffmpeg decode pass per
+# chunk (frames for the next chunk extracted while the VLM chews the current
+# batch). Per-frame seeking dominated full-film scan time (~30s/batch vs
+# ~9s/batch VLM), so the chunk path must be the primary source of frames,
+# with per-frame extraction kept only as the fallback for missing samples.
+# ---------------------------------------------------------------------------
+
+
+class _CleanClient:
+    def vision_query_json(self, prompt, frames):
+        return {"contains_flagged_content": False}
+
+
+def test_sweep_uses_chunked_extraction(tmp_path, monkeypatch):
+    """The sweep asks for one chunk covering the whole film, and every
+    sample timestamp is delivered (fallback covers what ffmpeg fell short of)."""
+    from nuclearcutter.detection import vlm_confirm
+
+    video = _tiny_video(tmp_path)  # 3s -> sample timestamps [0, 1, 2] at 1s interval
+    chunk_calls = []
+    delivered = []
+
+    def fake_chunk(vp, tss, out_dir, scale_height=None, prefix="chunk_%05d.jpg"):
+        chunk_calls.append(list(tss))
+        return {}  # pretend ffmpeg produced nothing -> per-frame fallback fills in
+
+    def fake_frame(vp, ts, scale_height=None):
+        p = tmp_path / f"f_{ts:.3f}.jpg"
+        p.write_bytes(b"jpegbytes")
+        delivered.append(round(ts, 3))
+        return p
+
+    monkeypatch.setattr(vlm_confirm, "extract_frames_chunk", fake_chunk)
+    monkeypatch.setattr(vlm_confirm, "extract_frame_at", fake_frame)
+
+    det = vlm_confirm.VisualSweepDetector(_CleanClient())
+    det.sweep(video, sample_interval=1.0)
+
+    assert chunk_calls == [[0.0, 1.0, 2.0]]  # ONE chunk (8 batches > all frames)
+    assert delivered == [0.0, 1.0, 2.0]      # fallback filled every missing sample
+
+
+def test_chunk_frames_used_and_only_missing_fall_back(tmp_path, monkeypatch):
+    """Samples the chunk pass produced are used as-is; only samples it did
+    NOT produce get a per-frame seek."""
+    from nuclearcutter.detection import vlm_confirm
+
+    video = _tiny_video(tmp_path)  # ts [0, 1, 2]
+    fallback_ts = []
+
+    def fake_chunk(vp, tss, out_dir, scale_height=None, prefix="chunk_%05d.jpg"):
+        out = {}
+        for t in tss:
+            if t % 2 == 0:  # produce 0.0 and 2.0, fall short on 1.0
+                p = tmp_path / f"c_{t:.3f}.jpg"
+                p.write_bytes(b"x")
+                out[t] = p
+        return out
+
+    def fake_frame(vp, ts, scale_height=None):
+        fallback_ts.append(ts)
+        p = tmp_path / f"f_{ts:.3f}.jpg"
+        p.write_bytes(b"y")
+        return p
+
+    monkeypatch.setattr(vlm_confirm, "extract_frames_chunk", fake_chunk)
+    monkeypatch.setattr(vlm_confirm, "extract_frame_at", fake_frame)
+
+    det = vlm_confirm.VisualSweepDetector(_CleanClient())
+    det.sweep(video, sample_interval=1.0)
+    assert fallback_ts == [1.0]
+
+
+def test_extract_frames_chunk_real_ffmpeg(tmp_path):
+    """extract_frames_chunk runs ffmpeg once and maps produced frames to the
+    requested timestamps in order — including when ffmpeg falls short of the
+    requested count at the end of the file (trailing timestamps absent)."""
+    from nuclearcutter.utils.ffmpeg import extract_frames_chunk
+
+    video = _tiny_video(tmp_path)  # 3s long
+    out_dir = tmp_path / "chunked"
+
+    got = extract_frames_chunk(Path(video), [0.0, 1.0, 2.0], out_dir, scale_height=120)
+    assert sorted(got.keys()) == [0.0, 1.0, 2.0]
+    for ts, p in got.items():
+        assert p.exists() and p.stat().st_size > 0
+
+    # Past the end of the 3s video ffmpeg can only produce the first couple
+    # of samples — the rest must be ABSENT from the mapping (not an error),
+    # so the sweep's per-frame fallback picks them up.
+    got2 = extract_frames_chunk(Path(video), [2.0, 3.0, 4.0, 5.0], out_dir,
+                                scale_height=120, prefix="tail_%05d.jpg")
+    assert 2.0 in got2
+    assert 5.0 not in got2
+
+
+def test_sweep_resolution_applies_pixel_cap_to_sweep_queries(monkeypatch, tmp_path):
+    """A reduced sweep_resolution sends a per-image pixel cap with sweep
+    queries; the default "full" omits the kwarg so the client's configured
+    cap applies (and fake/stub clients predating the kwarg keep working)."""
+    from nuclearcutter.detection import vlm_confirm
+
+    captured = []
+
+    class _CapClient:
+        def vision_query_json(self, prompt, frames, max_pixels=None):
+            captured.append(max_pixels)
+            return {"contains_flagged_content": False}
+
+    def fake_chunk(vp, timestamps, out_dir, **kw):
+        return {ts: (tmp_path / f"c_{ts:.3f}.jpg") for ts in timestamps}
+
+    monkeypatch.setattr(vlm_confirm, "extract_frames_chunk", fake_chunk)
+
+    video = _tiny_video(tmp_path)  # 3s -> one 3-frame batch at a 1s interval
+    vlm_confirm.VisualSweepDetector(_CapClient(), sweep_resolution="240p").sweep(
+        video, sample_interval=1.0)
+    vlm_confirm.VisualSweepDetector(_CapClient()).sweep(video, sample_interval=1.0)
+    # One sweep batch each: the 240p preset caps images at 102,400 px;
+    # "full" sends no cap.
+    assert captured == [102_400, None]

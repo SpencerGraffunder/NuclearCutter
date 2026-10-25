@@ -21,7 +21,9 @@ from pathlib import Path
 
 from nuclearcutter.detection.profanity import detect_foul_language, load_wordlist
 from nuclearcutter.detection.transcribe import find_subtitle_file, parse_subtitles, transcribe
-from nuclearcutter.detection.vlm_confirm import DEFAULT_SWEEP_INTERVAL, VisualSweepDetector
+from nuclearcutter.detection.vlm_confirm import (
+    DEFAULT_SWEEP_INTERVAL, VisualSweepDetector,
+)
 from nuclearcutter.fingerprint.fingerprint import cache_fingerprint, compute_fingerprint, load_cached_fingerprint
 from nuclearcutter.schema import (
     Category, FilmIdentity, LanguageDetection, ScanResult, SeverityLevel, VisualDetection,
@@ -78,6 +80,7 @@ def scan(
     progress_callback=None,
     whisper_cfg: WhisperConfig | None = None,
     sweep_interval: float | None = None,
+    sweep_resolution: str | None = None,
     status_path: Path | str | None = None,
     category_prompts: dict | None = None,
     partial_result_path: Path | str | None = None,
@@ -103,6 +106,20 @@ def scan(
     resume_language: list[LanguageDetection] = []
     if resume is not None:
         resume_from = resume.frames_done or 0
+        # frames_done counts SAMPLES at the interval the interrupted run used.
+        # Resuming at a DIFFERENT interval must preserve the swept POSITION in
+        # seconds, not the sample count — otherwise doubling the sweep
+        # interval between runs (a common speed-up move) would resume twice
+        # as deep and silently skip un-swept footage.
+        eff_interval = (sweep_interval if sweep_interval is not None
+                        else DEFAULT_SWEEP_INTERVAL)
+        saved_interval = resume.sweep_interval or 0.0
+        if resume_from and saved_interval and abs(saved_interval - eff_interval) > 1e-6:
+            rescaled = int(round(resume_from * saved_interval / eff_interval))
+            print(f"  sweep interval changed ({saved_interval:g}s -> {eff_interval:g}s): "
+                  f"resuming at frame {rescaled} to keep position "
+                  f"~{resume_from * saved_interval:.0f}s swept")
+            resume_from = rescaled
         # Raw sweep windows already found (category/start/end/confidence/level),
         # fed back into the merge so candidate ranges stay complete.
         for c in resume.visual_candidates:
@@ -320,7 +337,8 @@ def scan(
     if progress_callback:
         progress_callback("visual_sweep", None)
     _phase("visual_sweep")
-    sweep_detector = VisualSweepDetector(client, prompts=category_prompts, scale=scale)
+    sweep_detector = VisualSweepDetector(client, prompts=category_prompts, scale=scale,
+                                         sweep_resolution=sweep_resolution)
 
     def _on_flagged_window(start, end, category, confidence, level="low"):
         if status is not None:
