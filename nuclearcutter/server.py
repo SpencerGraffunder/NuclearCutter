@@ -1088,8 +1088,14 @@ class AppState:
                     job.steps["identify"] = (i / total) if total else 0.0
                     job.message = f"Classifying range {i:,} of {total:,}"
                     if i == 0:
-                        self._identify_started_at = time.monotonic()
                         self._log(job, f"[identify] classifying {total} candidate range(s)")
+                    # Clock started lazily. The scanner announces this phase with a
+                    # None detail and then jumps straight to (1, total), so keying the
+                    # clock off `i == 0` never fired and the ETA stayed permanently
+                    # unset -- discovered on the first live run, which is the argument
+                    # for checking the number on screen rather than only in a test.
+                    if self._identify_started_at is None and i > 0:
+                        self._identify_started_at = time.monotonic()
                     # ETA for this phase. It was only ever computed for the sweep, so
                     # during identify the ETA field sat on whatever the sweep left
                     # behind — 0 on a resumed scan, i.e. "nearly finished" when 395 of
