@@ -357,6 +357,7 @@ class AppState:
         }
         self._usage_lock = threading.Lock()
         self._sweep_started_at: float | None = None
+        self._identify_started_at: float | None = None
         # Frame-preview cache: the timeline's hold-to-preview button extracts
         # a frame on demand. Extraction is a real ffmpeg seek (slow), so we
         # memoize by (video identity, rounded timestamp, height) and drop
@@ -1087,7 +1088,18 @@ class AppState:
                     job.steps["identify"] = (i / total) if total else 0.0
                     job.message = f"Classifying range {i:,} of {total:,}"
                     if i == 0:
+                        self._identify_started_at = time.monotonic()
                         self._log(job, f"[identify] classifying {total} candidate range(s)")
+                    # ETA for this phase. It was only ever computed for the sweep, so
+                    # during identify the ETA field sat on whatever the sweep left
+                    # behind — 0 on a resumed scan, i.e. "nearly finished" when 395 of
+                    # 411 ranges were still to come. A number that is wrong is worse
+                    # than no number, because a wrong ETA is a reason to hit STOP.
+                    if self._identify_started_at is not None and i > 0:
+                        elapsed = time.monotonic() - self._identify_started_at
+                        if elapsed > 3:
+                            job.eta = (total - i) * (elapsed / i)
+                            job.frames_done, job.frames_total = int(i), int(total)
                 elif stage == "candidate" and isinstance(detail, dict):
                     # Raw sweep hit — an unconfirmed mark. It carries TRIGGER
                     # names, not tags: the sweep decided where to look, not what
@@ -1106,6 +1118,12 @@ class AppState:
                     job.phase = "language"
                     job.steps["language"] = (done / total) if total else 0.0
                     job.message = f"Reading dialogue {done:,} of {total:,} passages"
+                    # Whisper batches are near-instant compared with a VLM call and the
+                    # pass is a fraction of a scan, so an ETA here would be noise. What
+                    # must NOT happen is leaving the sweep's leftover ETA on screen:
+                    # the number then belongs to a phase that already finished, which
+                    # is the wrong-ETA problem in a different costume.
+                    job.eta = None
                 elif stage == "language_detections" and isinstance(detail, list):
                     self.live_timeline["language_detections"] = detail
                     job.steps["language"] = 1.0
@@ -1175,6 +1193,7 @@ class AppState:
         finally:
             job.finished_at = _now_iso()
             self._sweep_started_at = None
+            self._identify_started_at = None
 
     def stop_scan(self) -> JobInfo:
         if self.scan.thread is not None and self.scan.thread.is_alive():

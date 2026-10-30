@@ -1369,3 +1369,42 @@ def test_a_running_scan_shows_its_own_timeline_not_the_loaded_one(tmp_path):
     # And once the scan ends, the finished result is authoritative again.
     st.scan.status = "done"
     assert len(st.timeline_dict()["visual_candidates"]) == 0
+
+
+def test_scan_phases_that_know_their_total_also_offer_an_eta():
+    """A phase that reports `i of total` and has been running long enough can produce
+    an ETA, so leaving it out is a choice to make the GUI less informative.
+
+    Only the sweep computed one, so during identify the ETA field carried the sweep's
+    leftover value. On a resumed scan that read 0 — "almost done" — with 395 of 411
+    ranges still to classify, and the natural response to a wrong ETA is to stop the
+    job. Checked structurally for the same reason as the message rule: behavioural
+    coverage would need a whole fake scan, and that machinery is what people end up
+    maintaining instead of the feature.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent
+           / "nuclearcutter" / "server.py").read_text()
+    body = src[src.index("def _progress(stage, detail):"):]
+    body = body[:body.index("result = scan_pass(")]
+
+    counting = [m for m in re.finditer(
+        r'(?:elif|if) stage == "([a-z_]+)"', body)]
+    assert len(counting) > 4
+    missing = []
+    for i, m in enumerate(counting):
+        stage = m.group(1)
+        end = counting[i + 1].start() if i + 1 < len(counting) else len(body)
+        code = body[m.end():end]
+        # A phase reporting a (done, total) pair must either compute an ETA or clear
+        # the field. `job.eta = None` counts as handled: "running, no estimate" is a
+        # real state; inheriting the previous phase's number is a lie.
+        if "done, total = detail" in code or "i, total = detail" in code:
+            if "job.eta" not in code:
+                missing.append(stage)
+    assert not missing, (
+        f"phase(s) {missing} know how far along they are but give no ETA — "
+        "the ETA field then shows a previous phase's number or nothing"
+    )
