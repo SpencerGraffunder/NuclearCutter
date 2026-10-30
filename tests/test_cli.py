@@ -12,6 +12,7 @@ import pytest
 from nuclearcutter.cli import (
     _prefs_from_args, _save_result_with_fallback, cmd_tags,
 )
+from nuclearcutter.cli import main as cli_main
 from nuclearcutter.schema import AudioAction, VisualAction
 from nuclearcutter.schema import (
     SCHEMA_VERSION,
@@ -252,3 +253,25 @@ class _Args2:
         self.visual = False
         self.json = False
         self.presets = False
+
+
+def test_a_v1_scan_file_fails_cleanly_not_with_a_traceback(tmp_path, capsys):
+    """An old scan file is a normal user situation, and the sentence explaining it
+    is the product. Verify both halves: the message is the useful one, and no
+    traceback leaks. Exit code must be non-zero or a script cannot tell failure
+    from success.
+    """
+    old = tmp_path / "Movie.nuclearcutter.json"
+    old.write_text('{"schema_version": 1, "detections": []}')
+    video = tmp_path / "Movie.mkv"
+    video.write_bytes(b"\0")  # never opened: the scan file is refused first
+
+    # main() parses sys.argv, so drive it the way the console script does.
+    import sys
+    argv = ["nuclearcutter", "render", str(video), "--preset", "nudity"]
+    with patch.object(sys, "argv", argv):
+        rc = cli_main()
+    err = capsys.readouterr().err
+    assert rc == 1, f"expected exit 1, got {rc}"
+    assert "Traceback" not in err, "a foreseeable error printed a traceback"
+    assert "schema v1" in err and "re-scan" in err, err

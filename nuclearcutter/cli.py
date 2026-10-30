@@ -33,7 +33,8 @@ from pathlib import Path
 
 from nuclearcutter.render.renderer import build_output_path, render as render_pass
 from nuclearcutter.schema import (
-    AudioAction, Preferences, ScanResult, Selection, VisualAction,
+    AudioAction, Preferences, ScanResult, Selection, UnsupportedScanVersion,
+    VisualAction,
 )
 from nuclearcutter.taxonomy import (
     PRESET_NAMES, TAGS, Family, Minors, Rendering, audio_options,
@@ -604,7 +605,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except UnsupportedScanVersion as exc:
+        # A v1 scan file is an expected condition with a complete sentence written
+        # for a person, not a bug: exit code and message are the interface. A
+        # traceback buries the one line that says what to do (re-scan) under 15
+        # frames of internals, and teaches the reader that the tool crashed rather
+        # than that the file is too old. Other exceptions keep their traceback —
+        # those ARE bugs, and hiding one would cost a debugging session.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
