@@ -210,7 +210,7 @@
   /* ---- mobile / narrow window: ONE column, ordered scan → status →
      terminal → render (the render settings are set-and-forget, so they go
      last; the live status + terminal are what you actually watch). ---- */
-  @media (max-width: 900px) {
+  @media (max-width: 900px) and (orientation: portrait) {
     header { flex-wrap: wrap; row-gap: 3px; padding: 10px 12px; }
     header h1 { font-size: 16px; letter-spacing: 2px; }
     header .sub { flex: 1 1 100%; text-align: center; }
@@ -234,6 +234,38 @@
     .matrix, #bench-results table { display: block; overflow-x: auto; }
     #status-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
     #terminal { height: 200px; }
+  }
+
+  /* ---- phone LANDSCAPE (short viewport): keep the desktop TWO-column grid
+     (side-by-side scan | render) and shrink everything else so the ~390px of
+     height shows more. Inputs stay >=16px (see hover:none block) — iOS
+     zooms on focus below 16px in ANY orientation. ---- */
+  @media (orientation: landscape) and (max-height: 520px) {
+    html, body { font-size: 12px; }
+    header { padding: 6px 12px; }
+    header h1 { font-size: 14px; letter-spacing: 2px; }
+    header .sub { display: none; }
+    header .gh-link { right: 12px; }
+    main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+           gap: 8px; padding: 8px; }
+    section { min-width: 0; padding: 7px 10px; }
+    section h2 { font-size: 12px; margin-bottom: 5px; padding-bottom: 4px; }
+    .row { margin: 4px 0; }
+    label { min-width: 110px; }
+    textarea { min-height: 40px; }
+    #timeline { margin: 6px 0; }
+    #status-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+    #terminal { height: 120px; }
+    .matrix, #bench-results table { display: block; overflow-x: auto; }
+  }
+
+  /* Touch devices: iOS Safari zooms the whole page when a focused field is
+     under 16px — and it does so in ANY orientation/width, so this must key
+     off "no hover" rather than a breakpoint (landscape Pro Max is 932px,
+     iPad landscape 1024px: both slipped past the width-based blocks). */
+  @media (hover: none) {
+    input[type=text], input[type=password], input[type=number], select, textarea {
+      font-size: 16px; }
   }
 </style>
 </head>
