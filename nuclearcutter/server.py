@@ -990,6 +990,7 @@ class AppState:
             def _progress(stage, detail):
                 if stage == "transcribing":
                     job.phase = "transcribing"
+                    job.message = "Transcribing the audio"
                     if isinstance(detail, (int, float)):
                         job.steps["transcribe"] = max(0.0, min(float(detail), 1.0))
                         pct = int(round(float(detail) * 100))
@@ -1008,6 +1009,15 @@ class AppState:
                     job.frames_done, job.frames_total = int(done), int(total)
                     job.position = done * self.sweep_interval
                     job.steps["scan"] = (done / total) if total else 0.0
+                    # The message must move with the phase. It is set once to
+                    # "Connecting to the model server..." before the scan starts,
+                    # and without this line the GUI displays that for the whole
+                    # sweep — hours later — so a scan that is visibly making
+                    # progress reads as a hung job waiting on a dead server.
+                    job.message = (
+                        f"Looking at {done:,} of {total:,} sampled frames"
+                        + (f" (~{int(job.position // 60)} min of film)" if job.position else "")
+                    )
                     if self._sweep_started_at is None:
                         self._sweep_started_at = time.monotonic()
                     elapsed = time.monotonic() - self._sweep_started_at
@@ -1019,6 +1029,7 @@ class AppState:
                     i, total = detail
                     job.phase = "identify"
                     job.steps["identify"] = (i / total) if total else 0.0
+                    job.message = f"Classifying range {i:,} of {total:,}"
                     if i == 0:
                         self._log(job, f"[identify] classifying {total} candidate range(s)")
                 elif stage == "candidate" and isinstance(detail, dict):
@@ -1038,11 +1049,13 @@ class AppState:
                     done, total = detail
                     job.phase = "language"
                     job.steps["language"] = (done / total) if total else 0.0
+                    job.message = f"Reading dialogue {done:,} of {total:,} passages"
                 elif stage == "language_detections" and isinstance(detail, list):
                     self.live_timeline["language_detections"] = detail
                     job.steps["language"] = 1.0
                 elif stage == "language_detection":
                     job.phase = "language"
+                    job.message = "Reading dialogue for words to mute"
                     self._log(job, "[language] scanning dialogue")
                 elif stage == "done":
                     job.steps = {"transcribe": 1.0, "language": 1.0, "scan": 1.0,

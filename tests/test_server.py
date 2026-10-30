@@ -1169,3 +1169,39 @@ def test_preset_buttons_follow_the_server_without_naming_families_wrongly():
     assert "self-harm" in graphic_line.lower(), "graphic tooltip should state the exclusion"
     assert "not self-harm" in graphic_line.lower(), "graphic tooltip must EXCLUDE self-harm"
     assert not any(t.startswith("harm.") for t in presets["graphic"])
+
+
+def test_every_scan_phase_that_moves_the_job_also_moves_its_message():
+    """A progress line that stops moving is worse than no progress line.
+
+    `job.message` is set once to "Connecting to the model server..." before the
+    scan starts, and each phase branch of the progress callback used to update
+    only `phase`/counters — so the GUI displayed "connecting" for the five hours
+    of a sweep that was plainly running, and the honest reading of the screen was
+    "the job is stuck on a dead backend". Pressing stop felt like the only option.
+
+    This checks the invariant structurally, per `elif stage == ...` branch: a
+    branch that assigns job.phase must also assign job.message. Testing it
+    behaviourally would need a whole fake scan_pass, which is far more machinery
+    than the bug is worth, and the machinery would be what people maintain.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent
+           / "nuclearcutter" / "server.py").read_text()
+    body = src[src.index("def _progress(stage, detail)"):]
+    body = body[:body.index("result = scan_pass(")]
+
+    # Split on BOTH `if` and `elif`, or the first phase (transcribing — the one
+    # that waits on whisper, and the first thing a viewer watches) escapes the
+    # check while every later phase is held to it.
+    branches = re.split(r"\n                (?:elif|if) stage == ", body)
+    assert len(branches) > 5, "the progress callback lost its phase branches"
+    silent = []
+    for br in branches[1:]:
+        stage = br.split('"')[1]
+        code = br.split("elif stage ==")[0].split("if stage ==")[0]
+        if "job.phase = " in code and "job.message = " not in code:
+            silent.append(stage)
+    assert not silent, f"phase(s) update without a message: {silent}"
