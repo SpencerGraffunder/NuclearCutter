@@ -392,3 +392,73 @@ def test_unclear_detection_still_gets_a_card():
     prefs = _prefs({"safety.unclassified"})
     seg = _censored(plan_timeline(_scan(visual=[det]), prefs, duration=60.0))[0]
     assert "could not name it" in seg.card_text.lower() or seg.kinds
+
+
+# --------------------------------------------------------------------------
+# Caption polish reports where it is (the SUMMARIZE bar's only data source)
+# --------------------------------------------------------------------------
+
+
+def test_polish_reports_position_across_only_the_segments_it_visits():
+    """The SUMMARIZE bar reads this callback, so `total` has to mean "segments I am
+    going to rewrite" — not "all detections in the film".
+
+    The user asked for bars that show WHERE a job is (2026-10-30). Polish runs
+    before a single segment is cut, so it is the one thing that explains a RENDER bar
+    parked at 0%; if `total` counted uncensored detections too, the bar would top out
+    at 1/50 on a film with one censored scene and be a bar that lies in a new way.
+    """
+    from pathlib import Path
+
+    from nuclearcutter.render.renderer import _polish_censored_descriptions
+
+    censored = [_vis(start=10.0, end=14.0, tags=("nudity.full_nude_female",)),
+                _vis(start=40.0, end=44.0, tags=("gore.blood_moderate",))]
+    untouched = [_vis(start=70.0, end=74.0, tags=("violence.verbal_threat",))]
+    scan = _scan(visual=censored + untouched)
+    prefs = _prefs(selected=("nudity.full_nude_female", "gore.blood_moderate"))
+
+    seen = []
+
+    class Summarizer:
+        def describe_range(self, path, start, end, original, action):
+            return f"polished {start:.0f}"
+
+    _polish_censored_descriptions(scan, prefs, Summarizer(), Path("x.mkv"),
+                                  progress_callback=lambda s, d: seen.append((s, d)))
+
+    assert [s for s, _ in seen] == ["polish"] * len(seen)
+    assert seen[0] == ("polish", (0, 2)), f"should announce the total up front: {seen[:2]}"
+    assert seen[-1] == ("polish", (2, 2)), f"must reach 100%: {seen[-1]}"
+    assert [n for _, (n, _) in seen] == [0, 1, 2]
+    # Only the two censored ranges were rewritten.
+    by_start = {d.start: d.description for d in scan.visual_detections}
+    assert by_start[10.0] == "polished 10" and by_start[40.0] == "polished 40"
+    assert by_start[70.0] == "something happens", \
+        "an uncensored range must not be rewritten"
+
+
+def test_polish_without_a_callback_or_work_does_not_report_nonsense():
+    """A render started by the CLI passes no callback, and a mostly-clean film has no
+    work: neither may emit (0, 0), which the GUI would turn into a 0%-of-0% bar."""
+    from pathlib import Path
+
+    from nuclearcutter.render.renderer import _polish_censored_descriptions
+
+    seen = []
+    clean = _scan(visual=[_vis(tags=("violence.verbal_threat",))])
+    prefs = _prefs(selected=("nudity.full_nude_female",))
+    _polish_censored_descriptions(clean, prefs, object(), Path("x.mkv"),
+                                  progress_callback=lambda s, d: seen.append((s, d)))
+    assert seen == [], f"nothing to polish must report nothing: {seen}"
+
+    # No callback at all still works (and still polishes).
+    scan = _scan(visual=[_vis(tags=("nudity.full_nude_female",))])
+    prefs2 = _prefs(selected=("nudity.full_nude_female",))
+
+    class S:
+        def describe_range(self, path, start, end, original, action):
+            return "ok"
+
+    _polish_censored_descriptions(scan, prefs2, S(), Path("x.mkv"))
+    assert scan.visual_detections[0].description == "ok"

@@ -157,6 +157,26 @@ def _thumbnail_data_uri(data_uri: str, max_height: int = 16, quality: int = 50) 
         return data_uri
 
 
+def _scan_steps(**overrides) -> dict:
+    """A COMPLETE set of scan-job step progress values.
+
+    Why a function instead of a dict literal at each of the five call sites: a
+    literal that forgets a key hands the GUI `undefined`, and the GUI used to render
+    that as the indeterminate sliding block. So "forgot to update this dict" and "the
+    step is running" looked identical on screen — the VERIFY bar moved forever and
+    showed no position (user report 2026-10-30). One helper means a new step is added
+    in exactly one place and no call site can be half-updated.
+
+    `summary` belongs to the render job (caption polish happens inside render_pass);
+    it is included here so every job's steps dict has the same shape, and the GUI can
+    read any key without a guard.
+    """
+    steps = {"transcribe": 0.0, "language": 0.0, "scan": 0.0, "identify": 0.0,
+             "summary": 0.0, "render": 0.0}
+    steps.update(overrides)
+    return steps
+
+
 @dataclass
 class JobInfo:
     kind: str
@@ -172,11 +192,18 @@ class JobInfo:
     frames_done: int = 0
     frames_total: int = 0
     eta: float | None = None
-    # Per-step progress: transcribe / scan / verify / summary / render. None =
-    # in progress (indeterminate), a float 0..1 = determinate.
-    steps: dict = field(default_factory=lambda: {
-        "transcribe": 0.0, "language": 0.0, "scan": 0.0, "identify": 0.0, "render": 0.0,
-    })
+    # Per-step progress, one float 0..1 per pipeline stage, in run order:
+    #   transcribe (whisper) -> language (dialogue word scan) -> scan (VLM sweep)
+    #   -> identify (what is in each candidate range; the GUI row is called VERIFY)
+    #   -> summary (render-time caption polish, on the RENDER job) -> render (ffmpeg).
+    # A float is a real position. `None` is deliberately unused: the GUI's
+    # indeterminate "sliding block" used to be the fallback for *any* non-number,
+    # so a key the server never sent looked like a running step and showed no
+    # position (user report 2026-10-30). Every stage now reports (done, total), so
+    # there is never a stage whose position is genuinely unknowable. Adding a stage
+    # here means adding a row in the STATUS panel; tests/test_server.py fails if the
+    # two lists disagree. Values come from _scan_steps() so the shape has one source.
+    steps: dict = field(default_factory=_scan_steps)
     results: list = field(default_factory=list)  # benchmark rows
     logs: list = field(default_factory=list)  # ring buffer of terminal output
     thread: threading.Thread | None = None
@@ -761,7 +788,7 @@ class AppState:
         job.eta = None
         job.frames_done = 0
         job.frames_total = 0
-        job.steps = {"transcribe": 0.0, "language": 0.0, "scan": 0.0, "identify": 0.0, "render": 0.0}
+        job.steps = _scan_steps()
         job.stop_event = threading.Event()
         job.results = []
         job.logs = []
@@ -906,10 +933,8 @@ class AppState:
             # Transcription is a separate section: only counts as done if the
             # whisper transcript cache still exists (it can be cleared on its
             # own via the GUI's per-section clear button).
-            self.scan.steps = {
-                "transcribe": 1.0 if has_transcript else 0.0,
-                "language": 1.0, "scan": 1.0, "identify": 1.0, "render": 0.0,
-            }
+            self.scan.steps = _scan_steps(transcribe=1.0 if has_transcript else 0.0,
+                                          language=1.0, scan=1.0, identify=1.0)
             pending = "" if has_transcript else " — transcription pending (re-transcribe on next scan)"
             self.scan.message = (
                 f"Loaded existing scan: {len(result.visual_detections)} visual, "
@@ -1089,8 +1114,8 @@ class AppState:
                     job.message = "Reading dialogue for words to mute"
                     self._log(job, "[language] scanning dialogue")
                 elif stage == "done":
-                    job.steps = {"transcribe": 1.0, "language": 1.0, "scan": 1.0,
-                                 "identify": 1.0, "render": 0.0}
+                    job.steps = _scan_steps(transcribe=1.0, language=1.0,
+                                            scan=1.0, identify=1.0)
                     job.position = job.duration
                     self._log(job, "[done]")
 
@@ -1127,8 +1152,8 @@ class AppState:
             job.duration = result.identity.duration_seconds
             job.position = job.duration
             job.progress = 1.0
-            job.steps = {"transcribe": 1.0, "language": 1.0, "scan": 1.0, "identify": 1.0,
-                         "render": 0.0}
+            job.steps = _scan_steps(transcribe=1.0, language=1.0, scan=1.0,
+                                    identify=1.0)
             job.phase = "done"
             job.status = "done"
             job.message = (f"Scan complete: {len(result.visual_detections)} visual, "
@@ -1380,6 +1405,15 @@ class AppState:
             polish = bool(self.polish_descriptions)
 
             def _progress(stage, detail):
+                if stage == "polish" and detail:
+                    # Caption polish runs before the first segment is cut, so it is
+                    # the one thing that CAN explain a render sitting at 0%: the SUMMARIZE
+                    # row carries it and the RENDER row stays at 0 until cutting starts.
+                    # (user request 2026-10-30: bars must show WHERE the job is)
+                    i, total = detail
+                    job.phase = "summarize"
+                    job.steps["summary"] = (i / total) if total else 1.0
+                    return
                 if stage == "render" and detail:
                     i, total, seg_start = detail
                     job.phase = "render"

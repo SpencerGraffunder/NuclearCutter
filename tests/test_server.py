@@ -10,7 +10,9 @@ from fastapi.testclient import TestClient
 from nuclearcutter.schema import (
     SCHEMA_VERSION, FilmIdentity, ScanResult, VisualDetection,
 )
-from nuclearcutter.server import AppState, JobInfo, _LogCapture, create_app
+from nuclearcutter.server import (
+    AppState, JobInfo, _LogCapture, _scan_steps, create_app,
+)
 from nuclearcutter.taxonomy import Minors
 
 
@@ -227,8 +229,7 @@ def test_clear_scan_verify_keeps_transcript(tmp_path):
     assert st.scan_result is None
     assert st.scan_result_path == ""
     assert st.scan.status == "idle"
-    assert st.scan.steps == {"transcribe": 1.0, "language": 0.0, "scan": 0.0,
-                          "identify": 0.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=1.0, language=0.0, scan=0.0, identify=0.0, render=0.0)
 
 
 def test_clear_transcription_keeps_scan(tmp_path):
@@ -237,8 +238,7 @@ def test_clear_transcription_keeps_scan(tmp_path):
     movie = _write_full_scan(tmp_path)
     st = AppState()
     st.update_settings({"video_path": str(movie)})
-    assert st.scan.steps == {"transcribe": 1.0, "language": 1.0, "scan": 1.0,
-                          "identify": 1.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=1.0, language=1.0, scan=1.0, identify=1.0, render=0.0)
 
     d = st.clear_transcription_progress()
     assert any(p.endswith(".nuclearcutter.transcript.json") for p in d["removed"])
@@ -262,8 +262,7 @@ def test_loaded_scan_reflects_missing_transcript(tmp_path):
     st = AppState()
     st.update_settings({"video_path": str(movie)})
     assert st.scan_result is not None
-    assert st.scan.steps == {"transcribe": 0.0, "language": 1.0, "scan": 1.0,
-                          "identify": 1.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=0.0, language=1.0, scan=1.0, identify=1.0, render=0.0)
     assert "transcription pending" in st.scan.message
 
 
@@ -305,8 +304,7 @@ def test_switching_to_movie_without_scan_resets_status(tmp_path):
     assert st.scan.status == "idle"
     assert st.scan.progress == 0.0
     assert st.scan.duration == 0.0
-    assert st.scan.steps == {"transcribe": 0.0, "language": 0.0, "scan": 0.0,
-                             "identify": 0.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=0.0, language=0.0, scan=0.0, identify=0.0, render=0.0)
     assert st.timeline_dict() is None
 
 
@@ -626,8 +624,7 @@ def test_loaded_scan_is_auto_loaded_for_saved_movie(tmp_path):
     assert len(st.scan_result.visual_detections) == 1
     # Progress bars reflect the completed work.
     assert st.scan.status == "done"
-    assert st.scan.steps == {"transcribe": 1.0, "language": 1.0, "scan": 1.0,
-                          "identify": 1.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=1.0, language=1.0, scan=1.0, identify=1.0, render=0.0)
     assert st.scan.duration == 100.0
     # Timeline now comes from the loaded scan (no generic candidates).
     tl = st.timeline_dict()
@@ -1252,3 +1249,73 @@ def test_a_stale_status_file_does_not_seed_the_live_timeline(tmp_path):
     # Unreadable file: no crash, empty timeline (the scan rebuilds it).
     status.write_text("{not json")
     assert st._seed_live_timeline(video)["visual_candidates"] == []
+
+
+def test_step_keys_the_page_reads_are_keys_the_server_sends():
+    """Every `steps.<key>` the STATUS panel reads must exist on the server.
+
+    This is the test that should have existed when the panel was written. VERIFY read
+    `scanJob.steps.verify`; no server code has ever set `verify` (the pass is called
+    `identify` in the scanner, the prompts and the phase names). The row therefore got
+    `undefined`, and setBar's old `val == null` check painted it as the indeterminate
+    sliding block — the bar moved constantly for hours and reported no position at
+    all, while a real (done, total) pair sat in steps.identify going unread. The user
+    asked for a progress bar that shows WHERE the job is; that is a contract, and this
+    checks the contract instead of the pixels.
+
+    Checks both directions:
+      - a row reading a key nobody sets  -> dead bar (this bug)
+      - a key the server reports that no row displays -> a stage with no bar, so the
+        panel claims to show where the job is while a whole pass runs invisible
+        (steps.language had no row for exactly this reason)
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    page = (root / "nuclearcutter" / "static" / "index.html").read_text()
+    srv = (root / "nuclearcutter" / "server.py").read_text()
+
+    # Keys the page reads: setBar(..., X.steps.key)
+    read = set(re.findall(r"\.steps\.([a-z_]+)", page))
+    assert read, "the panel stopped reading job.steps at all"
+
+    # Keys the server produces, from the one function that builds them.
+    helper = srv[srv.index("def _scan_steps("):]
+    helper = helper[:helper.index("return steps")]
+    emitted = set(re.findall(r'"([a-z_]+)": 0\.0', helper))
+    assert len(emitted) >= 5, f"could not read the step list from _scan_steps: {emitted}"
+
+    missing = sorted(read - emitted)
+    assert not missing, (
+        f"the panel reads steps.{missing}, which no server code sets — that row will "
+        "draw as broken/no data. Either name the right key or add it to _scan_steps()"
+    )
+
+    undisplayed = sorted(emitted - read)
+    assert not undisplayed, (
+        f"steps.{undisplayed} is reported but no bar row reads it — that stage runs "
+        "with nothing on screen showing it"
+    )
+
+
+def test_scan_job_step_dicts_always_carry_every_key():
+    """A half-updated literal at one of the five scan checkpoints used to be enough
+    to break a bar, because a dict missing a key is indistinguishable from a step that
+    has not started. _scan_steps() is now the only way to build one; assert no call
+    site has regressed to a bare literal.
+    """
+    from pathlib import Path
+    import re
+
+    srv = (Path(__file__).resolve().parent.parent
+           / "nuclearcutter" / "server.py").read_text()
+    leftovers = re.findall(r"\.steps = \{[^{}]*\}", srv)
+    bad = [b for b in leftovers if "transcribe" in b]
+    assert not bad, f"bare steps literals remain (use _scan_steps): {bad}"
+
+    # And the helper really does cover all of them.
+    st = AppState()
+    assert set(st.scan.steps) == set(_scan_steps()), "job default diverged from _scan_steps()"
+    for key, val in st.scan.steps.items():
+        assert isinstance(val, float), f"steps.{key} must be a float, got {val!r}"

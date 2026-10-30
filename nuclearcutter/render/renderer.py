@@ -112,14 +112,26 @@ def build_output_path(input_path: Path) -> Path:
 
 
 def _polish_censored_descriptions(scan: ScanResult, prefs: Preferences,
-                                 summarizer, input_path: Path) -> None:
+                                 summarizer, input_path: Path,
+                                 progress_callback=None) -> None:
     """Rewrite the description of every censored visual detection in place.
 
     Only segments the selection hits are described, and only those that will
     actually cover the picture (blur/black) — an audio-only mute has no card to
     fill. Failures are ignored: a shorter description is a cosmetic loss, and it
     would be indefensible to fail a render because a caption model was offline.
+
+    `progress_callback("polish", (i, total))` reports position because this loop is
+    one VLM call per censored segment — minutes on a film with a lot to censor — and
+    it runs before the first segment is cut, when the RENDER bar is still at 0%. With
+    nothing reporting it, that stretch of a render looked frozen. (The user asked for
+    bars that show WHERE a job is, 2026-10-30; a phase with no bar is the same
+    complaint one step later.)
+
+    `total` counts the segments that will actually be visited, not all detections, so
+    the bar reaches 100% instead of stalling at 40% on a mostly-uncensored film.
     """
+    targets = []
     for d in scan.visual_detections:
         fams, hit = _matched_families(d, prefs)
         if not fams:
@@ -128,6 +140,14 @@ def _polish_censored_descriptions(scan: ScanResult, prefs: Preferences,
             continue
         action = "blacked out" if any(prefs.visual_for(f) == VisualAction.BLACK
                                      for f in fams) else "blurred"
+        targets.append((d, action))
+
+    total = len(targets)
+    if progress_callback and total:
+        progress_callback("polish", (0, total))
+    for i, (d, action) in enumerate(targets, start=1):
+        if progress_callback:
+            progress_callback("polish", (i, total))
         try:
             polished = summarizer.describe_range(input_path, start=d.start, end=d.end,
                                                 original=d.description, action=action)
@@ -311,7 +331,8 @@ def render(
     video_encoder = _encoder_for_codec(codec_name)
 
     if summarizer is not None and polish_descriptions:
-        _polish_censored_descriptions(scan, prefs, summarizer, input_path)
+        _polish_censored_descriptions(scan, prefs, summarizer, input_path,
+                                      progress_callback=progress_callback)
 
     timeline = plan_timeline(scan, prefs, duration)
 

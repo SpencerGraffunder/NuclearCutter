@@ -331,6 +331,43 @@ piped. Both commands also stream a live status JSON (`ScanStatus`, see
 scan running elsewhere via `nuclearcutter tui --status FILE` (or `--log FILE`
 to tail an older scan's log that predates status files).
 
+### 7.2 Progress bars are a contract, not decoration
+
+The web STATUS panel draws one bar per pipeline stage, in the order the stages
+actually run:
+
+| Row | Wire key | Job | Meaning of the fill |
+|---|---|---|---|
+| TRANSCRIBE | `transcribe` | scan | whisper pass over the audio |
+| LANGUAGE | `language` | scan | dialogue passages checked for words to mute |
+| SCAN | `scan` | scan | VLM sweep samples examined (where to look) |
+| VERIFY | `identify` | scan | candidate ranges classified (what is there) |
+| SUMMARIZE | `summary` | render | censored segments whose caption is being rewritten |
+| RENDER | `render` | render | segments cut so far |
+
+Two rules, both enforced by tests in `tests/test_server.py`:
+
+1. **Every row reads a key the server actually puts in `job.steps`, and every key
+   the server reports has a row.** VERIFY used to read `steps.verify`, a key no
+   server code has ever set (the pass is `identify` everywhere else), so the row got
+   `undefined` and drew as the indeterminate sliding block — moving constantly,
+   showing no position, for the whole of a scan in which an exact
+   `(ranges_done, ranges_total)` was available unread. The row label is VERIFY
+   because that is what the ✕ clears; the wire key is `identify` because that is what
+   the pass is called. A row for `language` was simply missing, so that whole stage
+   ran with nothing on screen moving.
+2. **A missing key may never render as progress.** `setBar` distinguishes three
+   states: a number (real position), an explicit `null` (running, position genuinely
+   unknowable — the sliding block, and only reachable when asked for), and
+   `undefined` (the key does not exist, which is a bug, drawn as red hatching with a
+   `?` and one `console.warn`). Silently animating a bar is worse than a flat bar,
+   because it looks alive.
+
+Since no stage reports `None` any more, a scan or render should always show where it
+is. Stages report `(done, total)` pairs; `summary` counts only the segments polish
+will rewrite, so it reaches 100% on a mostly-uncensored film instead of crawling to
+1/50.
+
 ## 8. Non-goals / explicit exclusions
 
 - Not a live-playback filter. No Plex/Jellyfin plugin, no client-side

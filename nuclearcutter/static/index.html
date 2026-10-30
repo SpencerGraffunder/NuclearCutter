@@ -64,6 +64,14 @@
   .bar { height: 100%; background: var(--green); box-shadow: 0 0 10px rgba(0,255,65,.7); transition: width .5s; }
   .bar.indet { width: 40% !important; animation: slide 1.2s ease-in-out infinite; }
   @keyframes slide { 0% { margin-left: 0; } 100% { margin-left: 60%; } }
+  /* "The server is not telling me where this step is" — NOT the same thing as
+     "this step is running". A missing progress key used to fall into .indet, so a
+     typo'd key drew the sliding block forever: it looked like work happening and
+     told you nothing, which is the exact failure the user reported. Red hatching
+     reads as broken, which is what it is. */
+  .bar.lost { width: 100% !important; background: repeating-linear-gradient(45deg,
+      #7a2020 0 6px, #3a1010 6px 12px); box-shadow: none; }
+  .pct.lost { color: var(--red); }
   .bar-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: #062b10; font-size: 10px; font-weight: bold; letter-spacing: 1px; }
   /* Per-section clear buttons: a small ✕ on each bar row. SCAN + VERIFY share
@@ -506,6 +514,15 @@ captions shown while audio is muted — never for the scan itself.</span></div>
           <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">SCAN</span>
             <div class="bar-wrap"><div class="bar" id="bar-scan"></div></div>
             <span class="pct" id="pct-scan">0%</span></div>
+          <!-- LANGUAGE: the dialogue pass (whisper transcript -> words to mute). It
+               had no row at all even though the server reports steps.language, so
+               during that pass — minutes on a talky film — every bar on screen was
+               still. "Where is it in the process" has to include the steps that run
+               between the ones you drew. It lives in this group because its results
+               clear with SCAN + VERIFY, on the same ✕. -->
+          <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">LANGUAGE</span>
+            <div class="bar-wrap"><div class="bar" id="bar-language"></div></div>
+            <span class="pct" id="pct-language">0%</span></div>
           <div class="row" style="flex-wrap:nowrap"><span style="min-width:130px">VERIFY</span>
             <div class="bar-wrap"><div class="bar" id="bar-verify"></div></div>
             <span class="pct" id="pct-verify">0%</span></div>
@@ -888,10 +905,44 @@ function fmtBytes(b) {
   if (b >= 1e6) return (b/1e6).toFixed(0) + " MB";
   return Math.round(b) + " B";
 }
-function setBar(el, pctEl, val) { // val: null=indeterminate, 0..1
+/**
+ * Draw one step bar.
+ *
+ * `val` meanings, deliberately three-way:
+ *   number 0..1  -> a real progress bar: width = position in that step.
+ *   null         -> running with no knowable position. Indeterminate, and only
+ *                   reachable when a caller ASKS for it by passing null.
+ *   undefined    -> the progress key does not exist. That is a bug, not a state,
+ *                   so it draws as broken (red hatching + "?") instead.
+ *
+ * Why this is explicit now (user request 2026-10-30: "the verify bar is constantly
+ * moving, not a progress bar. I need a progress bar - one that shows WHERE it is in
+ * the process"): this function treated *any* non-number as "indeterminate", and the
+ * VERIFY row passed `steps.verify`, a key the server never sends. Every scan phase
+ * reports (done, total), so there was always a real number available — thrown away
+ * because a missing key and a deliberately-unknown step looked identical here. A
+ * missing key must never be able to impersonate progress: the sliding block is the
+ * one rendering that is *worse* than a flat bar, because it looks alive.
+ */
+function setBar(el, pctEl, val) {
   const bar = $(el), pct = $(pctEl);
-  bar.classList.remove("indet");
-  if (val == null || isNaN(val)) { bar.classList.add("indet"); pct.textContent = "…"; return; }
+  bar.classList.remove("indet", "lost");
+  pct.classList.remove("lost");
+  if (val === undefined) {
+    bar.classList.add("lost"); pct.classList.add("lost");
+    pct.textContent = "?";
+    // Name the offending key once per key per page load: silent otherwise, and
+    // "which step went red?" is unanswerable from the panel alone.
+    const key = el + " (step " + el.replace(/^bar-/, "") + ")";
+    if (!window.__barLost) window.__barLost = new Set();
+    if (!window.__barLost.has(key)) {
+      window.__barLost.add(key);
+      console.warn("progress bar has no progress key:", key,
+                   "— the server's job.steps does not include it");
+    }
+    return;
+  }
+  if (val === null || isNaN(val)) { bar.classList.add("indet"); pct.textContent = "…"; return; }
   const w = Math.max(0, Math.min(1, val)) * 100;
   bar.style.width = w + "%";
   pct.textContent = Math.round(w) + "%";
@@ -1457,18 +1508,38 @@ function renderState() {
   const etaJob = renderBusy2 ? jobs.render : scanJob;
   $("st-eta").textContent = etaJob.eta != null ? fmtSecs(etaJob.eta) : "—";
 
-  // step bars: transcribe/scan/verify/summary from scan job, render from render job
+  // Step bars, in the order the pipeline actually runs:
+  //   TRANSCRIBE (whisper) -> LANGUAGE (dialogue word scan) -> SCAN (VLM sweep,
+  //   where to look) -> VERIFY (identify: what is there) -> SUMMARIZE (render-time
+  //   caption polish) -> RENDER (ffmpeg).
+  //
+  // Each value below must be a key the server really puts in job.steps. VERIFY used
+  // to read `steps.verify`, which no server code has ever set: the row got
+  // undefined, setBar fell into its "unknown" branch, and the bar slid back and
+  // forth for the entire scan. The user's words: "The verify bar is constantly
+  // moving, not a progress bar. I need a progress bar - one that shows WHERE it is
+  // in the process." So the UI name is VERIFY (what the row is called and what you
+  // clear with the ✕) while the wire key is `identify` (what the phase is called in
+  // the scanner and the prompts). Two names for one pass is how the key got lost;
+  // test_step_keys_the_page_reads_are_keys_the_server_sends now pins the pairing.
   setBar("bar-transcribe", "pct-transcribe", scanJob.steps.transcribe);
+  setBar("bar-language", "pct-language", scanJob.steps.language);
   setBar("bar-scan", "pct-scan", scanJob.steps.scan);
-  setBar("bar-verify", "pct-verify", scanJob.steps.verify);
-  // The SUMMARIZE bar is a REAL progress bar (0→100% as each detection is
-  // rewritten by the summary model) — never let it fall into the indeterminate
-  // "always moving" mode; coerce a missing value to 0% instead.
-  setBar("bar-summary", "pct-summary", (typeof scanJob.steps.summary === "number") ? scanJob.steps.summary : 0);
+  setBar("bar-verify", "pct-verify", scanJob.steps.identify);
+  // Caption polish belongs to the RENDER job (it happens inside render_pass, before
+  // any segment is cut), not to the scan — which is why it reads jobs.render.
+  // `steps.summary` never existed either, so this row sat at 0% no matter what the
+  // polish pass was doing.
+  setBar("bar-summary", "pct-summary", jobs.render.steps.summary);
   setBar("bar-render", "pct-render", jobs.render.steps.render);
-  // The summary bar only means something when a summary model is configured.
+  // The summarize row only means something when a caption model is configured AND
+  // polish is switched on; otherwise it would sit at 0% forever and teach people to
+  // ignore the row that is telling the truth.
   const summaryRow = $("row-summary");
-  if (summaryRow) summaryRow.classList.toggle("hidden", !(state.settings && state.settings.summary_model));
+  if (summaryRow) {
+    const s = state.settings || {};
+    summaryRow.classList.toggle("hidden", !(s.summary_model && s.polish_descriptions));
+  }
 
   // status lines + button states + grey-out settings while running
   const scanBusy = scanJob.status === "running" || scanJob.status === "stopping";
