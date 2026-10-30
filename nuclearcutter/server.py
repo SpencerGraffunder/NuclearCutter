@@ -1581,8 +1581,17 @@ class AppState:
         During a scan it returns the LIVE timeline — raw sweep candidates
         (shown as generic/unconfirmed marks) plus confirmed visual/language
         detections as they're found — so the timeline updates in real time.
+
+        "A scan is finished" is NOT the same question as "a scan result is loaded",
+        and checking the loaded result first got it wrong: resuming a scan on a film
+        whose previous scan was loaded served that OLD result for the whole run, so
+        the timeline sat on 148 detections and zero sweep candidates while the running
+        scan was up to 156 and had 2057 candidates. The panel looked frozen at the
+        previous scan — same family of bug as a bar that never moves: the UI showing
+        something confident and stale instead of what is happening.
         """
-        if self.scan_result is not None:
+        scanning = self.scan.status in ("running", "stopping")
+        if self.scan_result is not None and not scanning:
             return {
                 "duration": self.scan_result.identity.duration_seconds,
                 "visual_candidates": [],

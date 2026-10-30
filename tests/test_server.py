@@ -1319,3 +1319,53 @@ def test_scan_job_step_dicts_always_carry_every_key():
     assert set(st.scan.steps) == set(_scan_steps()), "job default diverged from _scan_steps()"
     for key, val in st.scan.steps.items():
         assert isinstance(val, float), f"steps.{key} must be a float, got {val!r}"
+
+
+def test_a_running_scan_shows_its_own_timeline_not_the_loaded_one(tmp_path):
+    """Resuming a scan must not paint the previous scan's results over it.
+
+    The check was "is a scan result loaded", so any film with a completed scan beside
+    it served that result for the entire re-scan: 148 old detections, no sweep
+    candidates, frozen — while the live job had moved past it. Observed live on a
+    resumed Hadestown scan (156 real detections, 2057 candidates, none displayed).
+    """
+    import json
+
+    video = tmp_path / "Film.mkv"
+    video.write_bytes(b"\0")
+
+    st = AppState()
+    st.video_path = str(video)
+
+    # A completed previous scan is loaded, exactly as at server start-up.
+    st.scan_result = ScanResult(
+        schema_version=SCHEMA_VERSION,
+        identity=FilmIdentity(title="Film", year=None, duration_seconds=100.0,
+                              phash_samples=[]),
+        visual_detections=[VisualDetection(start=5.0, end=9.0, description="old scan",
+                                           confidence=0.9,
+                                           tags=["nudity.full_nude_female"])],
+    )
+    done = st.timeline_dict()
+    assert len(done["visual_detections"]) == 1, "a finished scan should show its results"
+
+    # Now the same film is being scanned again.
+    st.scan.status = "running"
+    st.scan.duration = 100.0
+    st.live_timeline = {
+        "visual_candidates": [{"triggers": ["skin"], "start": 30.0, "end": 30.0,
+                               "confidence": 0.6}],
+        "visual_detections": [{"start": 40.0, "end": 44.0, "description": "new scan",
+                               "confidence": 0.8, "tags": ["gore.blood_moderate"]}],
+        "language_detections": [],
+    }
+    live = st.timeline_dict()
+    assert len(live["visual_candidates"]) == 1, "live sweep candidates must be visible"
+    assert len(live["visual_detections"]) == 1, \
+        "the running scan's detection count, not the old scan's merged in"
+    assert not any(d.get("description") == "old scan" for d in live["visual_detections"]), \
+        "the previous scan's rows leaked into the running scan's timeline"
+
+    # And once the scan ends, the finished result is authoritative again.
+    st.scan.status = "done"
+    assert len(st.timeline_dict()["visual_candidates"]) == 0
