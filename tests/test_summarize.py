@@ -166,9 +166,12 @@ class TestCaption:
         cfg, client = _client()
         s = _summarizer(client, tmp_path)
         with patch("nuclearcutter.detection.transcribe.read_transcript_cache", return_value=[]):
-            cap = s.caption_for_segment([(70.0, 72.0)], ["damn"])
-        assert cap == "Audio muted (foul language)"
-        client.summary_query.assert_not_called()
+            cap = s.caption_for_segment([(70.0, 72.0)], ["Mild swearing"])
+        # Names what was hidden: on a mute-only segment the picture is unchanged,
+        # so a bare "Audio muted" leaves no way to tell a correct mute from a
+        # misfire.
+        assert cap == "Audio muted: mild swearing"
+        client.summary_query.assert_not_called()   # nothing to paraphrase
 
     def test_caption_falls_back_on_model_error(self, tmp_path):
         cfg, client = _client()
@@ -176,8 +179,16 @@ class TestCaption:
         s = _summarizer(client, tmp_path)
         with patch("nuclearcutter.detection.transcribe.read_transcript_cache",
                    return_value=[self._utt("hi", 0.0, 1.0)]):
-            cap = s.caption_for_segment([(0.0, 1.0)], [])
-        assert cap == "Audio muted (foul language)"
+            cap = s.caption_for_segment([(0.0, 1.0)], ["Racial slur"])
+        assert cap == "Audio muted: racial slur"
+
+    def test_generic_caption_when_kinds_unknown(self, tmp_path):
+        """"(unspecified)" is the prompt's placeholder, never caption text."""
+        cfg, client = _client()
+        s = _summarizer(client, tmp_path)
+        with patch("nuclearcutter.detection.transcribe.read_transcript_cache", return_value=[]):
+            assert s.caption_for_segment([(0.0, 1.0)], ["(unspecified)"]) == "Audio muted"
+            assert s.caption_for_segment([(0.0, 1.0)], []) == "Audio muted"
 
 
 class TestContextAwareness:
@@ -221,10 +232,15 @@ class TestRunSummaryPass:
 
     @staticmethod
     def _det(start, end, desc):
-        from nuclearcutter.schema import Category, SeverityLevel, VisualDetection
+        from nuclearcutter.schema import VisualDetection
 
-        return VisualDetection(category=Category.NUDITY, start=start, end=end,
-                               description=desc, confidence=0.9, level=SeverityLevel.MED)
+        # v2 detections carry a tag list, not a category/level verdict. The
+        # summarizer only reads .start/.end/.description, so any tag will do;
+        # this one is neutral on purpose — a scene description is a scene
+        # description whether the tag is cleavage or gore.
+        return VisualDetection(start=start, end=end,
+                               tags=["nudity.cleavage_female"],
+                               description=desc, confidence=0.9)
 
     def test_enriches_descriptions_in_place(self, tmp_path):
         from nuclearcutter.render.summarize import run_summary_pass

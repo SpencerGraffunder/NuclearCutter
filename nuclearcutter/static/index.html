@@ -23,6 +23,7 @@
     --orange: #ffb347;
     --yellow: #ffee58;
     --magenta: #ff77dd;
+    --muted: #8a8a8a;
     --mono: "Menlo", "Monaco", "Consolas", monospace;
   }
   * { box-sizing: border-box; }
@@ -84,7 +85,19 @@
   .tl-mark.nudity { background: var(--red); }
   .tl-mark.gore { background: var(--orange); }
   .tl-mark.violence { background: var(--yellow); }
-  .tl-mark.foul_language { background: var(--magenta); }
+  .tl-mark.language { background: var(--magenta); }
+  /* The other families of the tag vocabulary. A mark is coloured by its
+     STRONGEST family (see server._visual_marker's `families`), so a detection
+     that is both intimacy and gore reads as gore — the mark colour is a hint at
+     what you are looking at, not a full description of it. */
+  .tl-mark.intimacy { background: #ff7ab8; }
+  .tl-mark.harm { background: #b48cff; }
+  .tl-mark.substance { background: #8cffd0; }
+  .tl-mark.safety { background: #ff3b3b; }
+  .tl-mark.unclear { background: #9a9a9a; }
+  /* A detection whose subjects may include a child: outlined rather than filled,
+     because the child-protection rule censors it whatever you have ticked. */
+  .tl-mark.minors { box-shadow: 0 0 0 1px #fff; }
   /* Generic/unconfirmed sweep candidate — not yet classified into a category
      or severity level, so it can't be filtered by the render settings. */
   .tl-mark.candidate { background: #7fbf7f; opacity: .55; }
@@ -155,15 +168,62 @@
   #bench-results td, #bench-results th { border: 1px solid var(--border); padding: 4px 6px; text-align: left; }
   #bench-results th { color: var(--green-dim); }
   .ok { color: var(--green); } .miss { color: var(--red); }
+  /* ---- category chooser (built from /api/taxonomy) ---- */
+  .chooser-bar { display: flex; align-items: center; gap: 10px; margin: 8px 0 6px; }
+  #tag-search { flex: 1; min-width: 120px; }
+  .presets { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .presets button { padding: 4px 9px; font-size: 10px; letter-spacing: 1px; }
+  .presets button.on { background: var(--green-dark); border-color: var(--green);
+    color: var(--green); }
+  /* Rendering + minors qualifiers: filter MODIFIERS, not categories, so they
+     sit above the list rather than inside a family where they would read as
+     "another thing to hide". */
+  .qualifiers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+    margin: 6px 0 10px; padding: 7px 9px; border: 1px solid var(--border);
+    border-radius: 4px; background: #0b0f0b; }
+  .qual-label { color: var(--green-dim); font-size: 10px; letter-spacing: 1px;
+    text-transform: uppercase; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+    border: 1px solid var(--border); border-radius: 12px; font-size: 11px;
+    cursor: pointer; user-select: none; background: #101810; }
+  .chip input { accent-color: var(--green); margin: 0; cursor: pointer; }
+  .chip.on { border-color: var(--green-dim); background: var(--green-dark);
+    color: var(--green); }
+  .chip.locked { opacity: .55; cursor: not-allowed; border-style: dashed; }
+  .fam {
+    border: 1px solid var(--border); border-radius: 4px; margin-bottom: 6px;
+    background: #0b0f0b; }
+  .fam > summary { cursor: pointer; padding: 7px 10px; display: flex;
+    align-items: center; gap: 8px; flex-wrap: wrap; list-style: none; }
+  .fam > summary::-webkit-details-marker { display: none; }
+  .fam > summary .fam-name { color: var(--green); font-size: 12px;
+    letter-spacing: 1px; text-transform: uppercase; }
+  .fam > summary .fam-blurb { color: var(--muted, #8a8a8a); font-size: 10px;
+    flex: 1 1 220px; min-width: 140px; }
+  .fam > summary .fam-count { font-size: 10px; color: var(--green-dim);
+    border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px;
+    white-space: nowrap; }
+  .fam.some > summary .fam-count { border-color: var(--green-dim);
+    background: var(--green-dark); }
+  .fam-actions { display: flex; gap: 6px; align-items: center; }
+  .fam-actions select { background: #101810; color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px; padding: 2px 4px;
+    font-size: 10px; font-family: inherit; max-width: 118px; }
+  .fam-actions label { font-size: 9px; color: var(--green-dim);
+    letter-spacing: 1px; text-transform: uppercase; }
+  .tag-list { padding: 2px 10px 9px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .tag { position: relative; }
+  .tag .tag-hint { display: none; position: absolute; left: 0; top: calc(100% + 3px);
+    z-index: 70; background: #0d0d0d; border: 1px solid var(--green-dim);
+    color: var(--text); padding: 10px 12px; white-space: pre-wrap;
+    min-width: 260px; max-width: 420px; font-size: 11px; line-height: 1.5;
+    border-radius: 4px; box-shadow: 0 0 16px rgba(0,255,65,.25); }
+  .tag:hover .tag-hint, .tag:focus-within .tag-hint { display: block; }
+  .tag.hidden-by-search { display: none; }
+  .fam.hidden-by-search { display: none; }
+  .chooser-empty { padding: 10px; color: var(--orange); font-size: 11px; }
   .matrix td, .matrix th { border: 1px solid var(--border); padding: 3px 6px; }
   .matrix select { min-width: 110px; }
-  .cat-cell { position: relative; cursor: help; white-space: nowrap; }
-  .cat-cell .cat-tip { display: none; position: absolute; left: 0; top: 100%; z-index: 60;
-    background: #0d0d0d; border: 1px solid var(--green-dim); color: var(--text);
-    padding: 12px; white-space: pre-wrap; min-width: 360px; max-width: 520px;
-    max-height: 70vh; overflow-y: auto; box-shadow: 0 0 16px rgba(0,255,65,.25);
-    font-size: 11px; line-height: 1.55; border-radius: 4px; }
-  .cat-cell:hover .cat-tip { display: block; }
   /* ---- file picker modal ---- */
   #picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 100;
     display: flex; align-items: center; justify-content: center; }
@@ -310,7 +370,7 @@
         <option value="360p">360p (~1.5× faster sweep)</option>
         <option value="240p">240p (~2× faster sweep)</option>
       </select>
-      <span class="hint" style="width:auto;">The sweep is the full-film pass that dominates scan time. It answers the coarse "anything here?" question, so it can view fewer pixels than the detailed confirm pass (always full scale). Check accuracy with Benchmark before a long scan.</span></div>
+      <span class="hint" style="width:auto;">The sweep is the full-film pass that dominates scan time. It answers the coarse "anything here?" question, so it can view fewer pixels than the detailed identify pass (always full scale). Check accuracy with Benchmark before a long scan.</span></div>
     <div class="row"><label>Scan interval (s)</label>
       <input type="number" id="sweep_interval" value="2" min="0.5" step="0.5"></div>
 
@@ -318,7 +378,9 @@
       <select id="summary_model">
         <option value="">(none — use scan descriptions)</option>
       </select>
-      <span class="hint" style="width:auto;">Separate, larger model that rewrites every visual detection's on-screen text (frames + transcript) right after the scan, and flags them all on the timeline. Served by the same backend — pick it from the list via “Scan for models”.</span></div>
+      <span class="hint" style="width:auto;">Separate, larger model served by the same backend (pick it via
+“Scan for models”). Used for the optional blur/black-card text (“Better blur text”) and the
+captions shown while audio is muted — never for the scan itself.</span></div>
     <div class="row"><label>Summary frames / detection</label>
       <input type="number" id="summary_frames" value="12" min="0" max="24" step="1"></div>
     <div class="row"><label>Summary context (tokens)</label>
@@ -333,72 +395,43 @@
     <div id="bench-results"></div>
   </section>
 
-  <!-- ================= RENDER ================= -->
+  <!-- ================= CENSOR (what to hide) ================= -->
   <section id="sec-render">
-    <h2>▚ RENDER</h2>
-    <div class="hint">Per-category censorship level (what gets corrected) + corrections matrix. Hover a category for the full level definitions.</div>
-    <table class="matrix" id="matrix">
-      <tr><th>Category</th><th class="cat-cell">Level<span class="cat-tip">The level of censoring to be done in render — detections at or below this level get corrected (low = censor only the worst, exhigh = censor everything).</span></th><th>Video</th><th>Audio</th></tr>
-      <tr>
-        <td class="cat-cell" data-cat="nudity">Nudity<span class="cat-tip"></span></td>
-        <td><select data-cat="nudity" data-key="level">
-          <option value="low">low</option><option value="med" selected>med</option>
-          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
-        <td><select data-cat="nudity" data-key="visual">
-          <option value="none">none</option><option value="blur" selected>blur</option>
-          <option value="black">black</option></select></td>
-        <td><select data-cat="nudity" data-key="audio">
-          <option value="none" selected>none</option><option value="mute_scene">mute scene</option></select></td>
-      </tr>
-      <tr>
-        <td class="cat-cell" data-cat="gore">Gore<span class="cat-tip"></span></td>
-        <td><select data-cat="gore" data-key="level">
-          <option value="low">low</option><option value="med" selected>med</option>
-          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
-        <td><select data-cat="gore" data-key="visual">
-          <option value="none">none</option><option value="blur" selected>blur</option>
-          <option value="black">black</option></select></td>
-        <td><select data-cat="gore" data-key="audio">
-          <option value="none" selected>none</option><option value="mute_scene">mute scene</option></select></td>
-      </tr>
-      <tr>
-        <td class="cat-cell" data-cat="violence">Violence<span class="cat-tip"></span></td>
-        <td><select data-cat="violence" data-key="level">
-          <option value="low">low</option><option value="med" selected>med</option>
-          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
-        <td><select data-cat="violence" data-key="visual">
-          <option value="none">none</option><option value="blur" selected>blur</option>
-          <option value="black">black</option></select></td>
-        <td><select data-cat="violence" data-key="audio">
-          <option value="none" selected>none</option><option value="mute_scene">mute scene</option></select></td>
-      </tr>
-      <tr>
-        <td class="cat-cell" data-cat="foul_language">Foul language<span class="cat-tip"></span></td>
-        <td><select data-cat="foul_language" data-key="level">
-          <option value="low">low</option><option value="med" selected>med</option>
-          <option value="high">high</option><option value="exhigh">exhigh</option></select></td>
-        <td><select data-cat="foul_language" data-key="visual">
-          <option value="none" selected>none</option><option value="blur">blur</option>
-          <option value="black">black</option></select></td>
-        <td><select data-cat="foul_language" data-key="audio">
-          <option value="none">none</option>
-          <option value="mute_word">mute word</option>
-          <option value="mute_phrase" selected>mute phrase</option>
-          <option value="replace_word">replace word</option>
-          <option value="replace_phrase">replace phrase</option></select></td>
-      </tr>
-    </table>
+    <h2>▚ WHAT TO CENSOR</h2>
+    <div class="hint">The scan records <em>what is in the film</em>; this is <em>what you want
+    hidden</em>. Nothing is ticked by default — tick the categories that matter to you, per
+    movie or once for your household. Hover any category to read exactly what it means.</div>
 
-    <div class="row"><label>Output file name</label>
-      <input type="text" id="output_name" placeholder="(default: &lt;source&gt;_cleaned.&lt;ext&gt;)"></div>
-    <div class="row"><label>Scan file (optional)</label>
-      <input type="text" id="scan_path" placeholder="(default: &lt;source&gt;.nuclearcutter.json)"></div>
+    <div class="chooser-bar">
+      <input type="search" id="tag-search" placeholder="search: bikini, blood, slur, smoking…"
+             autocomplete="off" spellcheck="false">
+      <span id="chooser-count" class="hint" style="width:auto;"></span>
+    </div>
+    <div class="presets" id="presets">
+      <!-- buttons built from /api/taxonomy so a new preset is not a code change here -->
+    </div>
+    <div class="qualifiers">
+      <span class="qual-label">Picture style</span><span id="rendering-chips"></span>
+      <span class="qual-label">Include people</span><span id="minors-chips"></span>
+    </div>
+    <div id="chooser"><!-- family groups with their tag chips, built by buildChooser() --></div>
+
     <div class="row"><label>Blur amount</label>
       <input type="number" id="blur_strength" value="1" min="0.1" step="0.1"></div>
     <div class="row"><label>Mute padding (s)</label>
       <input type="number" id="mute_padding" value="0.5" min="0" step="0.1"></div>
     <div class="row"><label>Blur padding (s)</label>
       <input type="number" id="blur_padding" value="0" min="0" step="0.5"></div>
+    <div class="row"><label>Better blur text</label>
+      <input type="checkbox" id="polish_descriptions" style="width:auto;">
+      <span class="hint" style="width:auto;">Spend one call per CENSORED segment rewriting its blur/black-card
+      text with the summary model above. Off by default: the scan already stores a short
+      description of every segment, and paying for the whole film when you censor two
+      minutes of it is a bad trade.</span></div>
+    <div class="row"><label>Output file name</label>
+      <input type="text" id="output_name" placeholder="(default: &lt;source&gt;_cleaned.&lt;ext&gt;)"></div>
+    <div class="row"><label>Scan file (optional)</label>
+      <input type="text" id="scan_path" placeholder="(default: &lt;source&gt;.nuclearcutter.json)"></div>
 
     <div class="btn-group">
       <button id="btn-render-start">▶ START RENDER</button>
@@ -513,9 +546,253 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const LEVEL_RANK = {low:0, med:1, high:2, exhigh:3};
 let state = null;
+let TAX = null;          // /api/taxonomy: families, tags, renderings, presets
 let saveTimer = null;
+
+// ------------------------------------------------------ category chooser
+// Everything here is built from /api/taxonomy. The browser holds NO list of
+// categories of its own: a tag added in taxonomy.py appears in the chooser, in
+// the tooltips and in the search box without a line of JavaScript changing, and
+// a scan file from another build cannot disagree about what an id means.
+async function loadTaxonomy() {
+  let d;
+  try {
+    const r = await fetch("/api/taxonomy");
+    d = await r.json();
+  } catch (e) {
+    $("chooser").innerHTML = '<div class="chooser-empty">could not load the category '
+      + 'list (' + e.message + ') — reloading the page usually fixes it.</div>';
+    return;
+  }
+  TAX = d;
+  buildPresets();
+  buildQualifiers();
+  buildChooser();
+  if (state && state.settings) applySelectionToChooser(state.settings);
+}
+
+function buildPresets() {
+  const box = $("presets");
+  box.innerHTML = "";
+  // Labels, not the server's keys, so the button says what it hides in words a
+  // person would use. Order runs least -> most, the way the old levels did.
+  const LABELS = {
+    none: ["Nothing", "censor nothing at all — the default"],
+    nudity: ["Nudity", "nudity only"],
+    sexual: ["Sexual", "nudity and intimacy"],
+    language: ["Language", "swearing, slurs, adult talk, smoking and drinking"],
+    graphic: ["Graphic", "violence, gore and self-harm"],
+    everything: ["Everything", "every category that can be chosen"],
+  };
+  // Order comes from the server (taxonomy.PRESET_NAMES), not from a list here,
+  // so a preset added in Python shows up in the right place in the row.
+  (TAX.preset_order || Object.keys(TAX.presets)).forEach(name => {
+    if (!(name in TAX.presets)) return;
+    const [label, title] = LABELS[name] || [name, ""];
+    const b = document.createElement("button");
+    b.type = "button"; b.dataset.preset = name; b.textContent = label; b.title = title;
+    b.addEventListener("click", () => {
+      const ids = TAX.presets[name];
+      document.querySelectorAll('#chooser input[data-tag]').forEach(i => {
+        i.checked = ids.includes(i.dataset.tag);
+      });
+      chooserChanged();
+    });
+    box.appendChild(b);
+  });
+}
+
+function buildQualifiers() {
+  // Rendering styles and the minors flag are filter MODIFIERS: they narrow which
+  // detections a ticked category applies to. Both default to all-on, so a wrong
+  // guess by the model can never silently un-censor something.
+  const mk = (container, items, selected) => {
+    const box = $(container);
+    box.innerHTML = "";
+    items.forEach(it => {
+      const lab = document.createElement("label");
+      lab.className = "chip";
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.value = it.id; cb.checked = selected.includes(it.id);
+      cb.title = it.description || it.label || "";
+      const span = document.createElement("span");
+      span.textContent = it.label || it.id;
+      lab.appendChild(cb); lab.appendChild(span);
+      const sync = () => { lab.classList.toggle("on", cb.checked); };
+      cb.addEventListener("change", () => { sync(); settingsChanged(); });
+      sync();
+      box.appendChild(lab);
+    });
+  };
+  mk("rendering-chips", TAX.rendering, state && state.settings
+      ? (state.settings.rendering || []) : TAX.rendering.map(r => r.id));
+  mk("minors-chips", TAX.minors, state && state.settings
+      ? (state.settings.minors || []) : TAX.minors.map(m => m.id));
+}
+
+function buildChooser() {
+  const host = $("chooser");
+  host.innerHTML = "";
+  const byFamily = {};
+  TAX.tags.forEach(t => { (byFamily[t.family] = byFamily[t.family] || []).push(t); });
+
+  TAX.families.forEach(fam => {
+    const tags = byFamily[fam.id] || [];
+    const det = document.createElement("details");
+    det.className = "fam"; det.dataset.fam = fam.id;
+    det.open = false;
+
+    const sum = document.createElement("summary");
+    const name = document.createElement("span");
+    name.className = "fam-name"; name.textContent = fam.label;
+    const blurb = document.createElement("span");
+    blurb.className = "fam-blurb"; blurb.textContent = fam.blurb;
+    const count = document.createElement("span");
+    count.className = "fam-count"; count.dataset.countFor = fam.id;
+
+    const acts = document.createElement("span");
+    acts.className = "fam-actions";
+    const addSelect = (key, options, def, title) => {
+      if (!options.length) return;
+      const lab = document.createElement("label"); lab.textContent = key;
+      const sel = document.createElement("select");
+      sel.dataset.fam = fam.id; sel.dataset.famAction = key;
+      sel.title = title;
+      options.forEach(o => {
+        const op = document.createElement("option");
+        op.value = o; op.textContent = o === "none" ? "leave alone" : o.replace(/_/g, " ");
+        sel.appendChild(op);
+      });
+      sel.value = def;
+      sel.addEventListener("change", settingsChanged);
+      acts.appendChild(lab); acts.appendChild(sel);
+    };
+    addSelect("picture", fam.visual, fam.default_visual,
+              "How to hide the picture for this family");
+    addSelect("sound", fam.audio, fam.default_audio,
+              "What to do with this family's audio");
+
+    sum.appendChild(name); sum.appendChild(blurb); sum.appendChild(acts);
+    sum.appendChild(count);
+    det.appendChild(sum);
+
+    const list = document.createElement("div");
+    list.className = "tag-list";
+    tags.forEach(t => list.appendChild(buildTagChip(t)));
+    det.appendChild(list);
+
+    host.appendChild(det);
+  });
+  updateChooserCount();
+}
+
+function buildTagChip(t) {
+  const lab = document.createElement("label");
+  lab.className = "chip tag";
+  lab.dataset.tagId = t.id;
+  const cb = document.createElement("input");
+  cb.type = "checkbox"; cb.dataset.tag = t.id;
+  cb.checked = false;
+  const span = document.createElement("span");
+  span.textContent = t.label;
+  lab.appendChild(cb); lab.appendChild(span);
+
+  // The hint is the SAME text the VLM was given for this tag. That is not a
+  // nicety: if the checkbox tooltip and the model's definition drift, the user
+  // ticks something believing it means one thing while the scan meant another.
+  if (t.hint) {
+    const hint = document.createElement("span");
+    hint.className = "tag-hint";
+    // `audio`/`visual` are the /api/taxonomy flags for "can be heard" / "can be
+    // seen"; a language-only tag has no picture to blur, which the tooltip says
+    // because otherwise a ticked box with no visible effect looks like a bug.
+    const only = (t.audio && !t.visual) ? "\n\n(spoken or heard, not seen)"
+               : (t.visual && !t.audio) ? "\n\n(seen, nothing to mute)" : "";
+    hint.textContent = t.hint + only;
+    lab.appendChild(hint);
+  }
+  if (t.always_censor) {
+    // Not a choice: any exposure with a child present is censored whatever the
+    // viewer ticks. Shown, disabled, so the rule is visible instead of magic.
+    cb.disabled = true; cb.checked = true; cb.title = "always censored";
+    lab.classList.add("locked", "on");
+    span.textContent = t.label + " \u00b7 always on";
+  } else {
+    cb.addEventListener("change", () => { chooserChanged(); });
+  }
+  return lab;
+}
+
+function chooserChanged() {
+  // A preset is only "on" while it exactly matches the ticked set, so ticking
+  // one extra box visibly un-highlights the button instead of lying about it.
+  const now = new Set(selectedTagIds());
+  document.querySelectorAll("#presets button").forEach(b => {
+    const ids = TAX.presets[b.dataset.preset] || [];
+    b.classList.toggle("on", ids.length === now.size && ids.every(i => now.has(i)));
+  });
+  updateChooserCount();
+  renderTimeline();   // the marks light up as you tick, before any render
+  settingsChanged();
+}
+
+function updateChooserCount() {
+  const n = selectedTagIds().length;
+  const el = $("chooser-count");
+  if (el) {
+    el.textContent = n === 0
+      ? "nothing will be censored"
+      : n + " of " + TAX.tags.length + " categories ticked";
+  }
+  const fams = {};
+  document.querySelectorAll("#chooser input[data-tag]").forEach(i => {
+    const fam = i.dataset.tag.split(".")[0];
+    fams[fam] = fams[fam] || [0, 0];
+    fams[fam][1] += 1;
+    if (i.checked) fams[fam][0] += 1;
+  });
+  document.querySelectorAll("[data-count-for]").forEach(c => {
+    const pair = fams[c.dataset.countFor] || [0, 0];
+    c.textContent = pair[0] + "/" + pair[1];
+    const det = c.closest(".fam");
+    if (det) det.classList.toggle("some", pair[0] > 0);
+  });
+}
+
+// Write the server's saved selection back into the checkboxes. Called on every
+// poll, so a second device (or a `nuclearcutter render --censor` on the CLI)
+// stays in sync — but never while a chip has keyboard focus, for the same reason
+// setInputValue leaves a focused text box alone.
+function applySelectionToChooser(s) {
+  if (!TAX || !$("chooser").querySelector("input[data-tag]")) return;
+  const sel = new Set(s.selection || []);
+  document.querySelectorAll('#chooser input[data-tag]').forEach(i => {
+    if (i.disabled) { i.checked = true; return; }   // always-on rule
+    if (document.activeElement === i) return;
+    i.checked = sel.has(i.dataset.tag);
+  });
+  document.querySelectorAll("#chooser select[data-fam-action]").forEach(sel2 => {
+    const fa = (s.family_actions || {})[sel2.dataset.fam] || {};
+    const val = fa[sel2.dataset.famAction];
+    if (val != null && [...sel2.options].some(o => o.value === val)) sel2.value = val;
+  });
+  const syncChips = (id, vals) => {
+    document.querySelectorAll(`#${id} input`).forEach(i => {
+      i.checked = (vals || []).includes(i.value);
+      i.parentElement.classList.toggle("on", i.checked);
+    });
+  };
+  syncChips("rendering-chips", s.rendering);
+  syncChips("minors-chips", s.minors);
+  if ($("polish_descriptions")) $("polish_descriptions").checked = !!s.polish_descriptions;
+  updateChooserCount();
+  document.querySelectorAll("#presets button").forEach(b => {
+    const ids = TAX.presets[b.dataset.preset] || [];
+    b.classList.toggle("on", ids.length === sel.size && ids.every(i => sel.has(i)));
+  });
+}
+
 
 // ---------------------------------------------------------------- helpers
 async function post(path, body) {
@@ -576,7 +853,12 @@ function setScanSettingsDisabled(d) {
 }
 function setRenderSettingsDisabled(d) {
   setDisabled(RENDER_SETTING_IDS, d);
-  document.querySelectorAll("#matrix select").forEach(s => s.disabled = d);
+  // The chooser IS the render settings, so it locks while a render runs: changing
+  // what is ticked mid-encode would leave the output describing a choice nobody
+  // made, and the next poll would fight the user's clicks.
+  document.querySelectorAll("#chooser input, #chooser select, #presets button, "
+                              + "#rendering-chips input, #minors-chips input, #tag-search")
+    .forEach(el => { if (el.dataset.tag !== undefined && el.disabled && el.title === "always censored") return; el.disabled = d; });
 }
 
 // ---------------------------------------------------------------- settings push
@@ -615,14 +897,34 @@ function collectSettings() {
     summary_model: $("summary_model").value.trim(),
     summary_frames: parseInt($("summary_frames").value, 10) || 12,
     summary_max_context: parseInt($("summary_max_context").value, 10) || 30000,
-    levels: matrixValues("level"),
-    visual_actions: matrixValues("visual"),
-    audio_actions: matrixValues("audio"),
+    selection: selectedTagIds(),
+    family_actions: familyActionSettings(),
+    rendering: checkedValues("rendering-chips"),
+    minors: checkedValues("minors-chips"),
+    polish_descriptions: $("polish_descriptions") ? $("polish_descriptions").checked : false,
   };
 }
-function matrixValues(key) {
+// The chooser's state lives in the DOM (checkboxes), because that is what the
+// user is editing while a poll may land. Sending the WHOLE selection every time
+// means the server never has to reconcile a diff, and "nothing ticked" is a
+// value that survives the round trip instead of a missing key.
+function selectedTagIds() {
+  const out = [];
+  document.querySelectorAll('#chooser input[data-tag]:checked').forEach(i => out.push(i.dataset.tag));
+  return out;
+}
+function familyActionSettings() {
   const out = {};
-  document.querySelectorAll(`select[data-key="${key}"]`).forEach(s => out[s.dataset.cat] = s.value);
+  document.querySelectorAll("#chooser select[data-fam-action]").forEach(sel => {
+    const fam = sel.dataset.fam;
+    out[fam] = out[fam] || {};
+    out[fam][sel.dataset.famAction] = sel.value;
+  });
+  return out;
+}
+function checkedValues(containerId) {
+  const out = [];
+  document.querySelectorAll(`#${containerId} input:checked`).forEach(i => out.push(i.value));
   return out;
 }
 function derivedUrlHint(address) {
@@ -668,44 +970,55 @@ function applySettingsToUI(s, skipSave) {
   setSelectValue($("summary_model"), s.summary_model || "");
   setInputValue("summary_frames", s.summary_frames ?? 12);
   setInputValue("summary_max_context", s.summary_max_context ?? 30000);
-  const maps = {
-    level: s.levels || {},
-    visual: s.visual_actions || {},
-    audio: s.audio_actions || {},
-  };
-  ["level", "visual", "audio"].forEach(key => {
-    document.querySelectorAll(`select[data-key="${key}"]`).forEach(sel => {
-      const val = maps[key][sel.dataset.cat];
-      if (val != null && [...sel.options].some(o => o.value === val)) sel.value = val;
-    });
-  });
-  if (!skipSave) renderTimeline(); // levels changed -> refresh timeline marks
+  applySelectionToChooser(s);
+  if (!skipSave) renderTimeline(); // the ticked set decides which marks are lit
 }
 
 // ---------------------------------------------------------------- timeline
-// The severity the render gates a detection on: the user's per-detection level
-// override when set to a level (low/med/high/exhigh), else the scanned level.
-// A "removed" override is handled by the caller (the render skips it outright).
-function effectiveLevelOf(d) {
-  if (d.level_override && d.level_override !== "removed" && LEVEL_RANK[d.level_override] != null) {
-    return d.level_override;
-  }
-  return d.level;
-}
+// Which marks the current choices would catch. This mirrors
+// schema.Detection.censorable() on the server — the same three rules, in the
+// same order — because a timeline that disagrees with the render is worse than
+// no timeline: the user reads dim marks as "safe" and encodes anyway.
+//   1. a dismissed detection ("removed") is never censored;
+//   2. `rendering` and `minors` may only NARROW a match, never widen it, and an
+//      unrecognised value matches everything (a bad guess cannot un-censor);
+//   3. any ticked tag on the detection catches it — there is no threshold.
 function detectionCaught(d) {
   const s = state.settings;
-  const cat = d.category;
-  // A user-removed detection is never rendered, regardless of settings.
-  if (d.level_override === "removed") return false;
-  if (cat === "foul_language") {
-    const lvl = s.levels["foul_language"], va = s.visual_actions["foul_language"], aa = s.audio_actions["foul_language"];
-    if (va === "none" && aa === "none") return false;
-    if (d.llm_confirmed === false) return false;
-    return LEVEL_RANK[effectiveLevelOf(d)] <= LEVEL_RANK[lvl];
+  if (d.removed) return false;                  // dismissed in the popup
+  if (d.llm_confirmed === false) return false;  // language the model was unsure about
+  return catchesDetection(d, s);
+}
+
+// True if this detection would be hidden under settings `s`. The `minors` rule
+// runs BEFORE the ticked-tag test, and both narrowing filters (rendering style
+// and the viewer's own minor setting) can only take things away.
+function catchesDetection(d, s) {
+  const sel = new Set(s.selection || []);
+  const minors = d.minors || "no";
+  const exposure = (d.tags || []).some(t => (t.startsWith("nudity.") || t.startsWith("intimacy."))
+                                            && !t.endsWith(".unclear"));
+  if (minors === "yes" && exposure) return true;   // never negotiable
+  if (!rendersAllowed(d.rendering, s)) return false;
+  if (!minorsIncluded(minors, s)) return false;
+  return (d.tags || []).some(t => sel.has(t));
+}
+
+// A detection whose rendering the model could not place ("unclear", or a value
+// from a newer build) is treated as matching: the viewer's checkbox list is
+// about content, not about the model's confidence in a style label.
+function rendersAllowed(rendering, s) {
+  const allowed = s.rendering || [];
+  if (!rendering || !allowed.includes(rendering) && rendering !== "unclear") {
+    return allowed.length === 0;   // nothing ticked at all = no filter
   }
-  const lvl = s.levels[cat], va = s.visual_actions[cat], aa = s.audio_actions[cat];
-  if (va === "none" && aa === "none") return false;
-  return LEVEL_RANK[effectiveLevelOf(d)] <= LEVEL_RANK[lvl];
+  return true;
+}
+
+function minorsIncluded(minors, s) {
+  const allowed = s.minors || [];
+  if (!allowed.length) return true;
+  return allowed.includes(minors);
 }
 let tlTipEl = null;
 let tlPreviewBtn = null;   // the hold-to-reveal button inside the tooltip
@@ -759,48 +1072,44 @@ function ensureTlTooltip() {
   }
   return tlTipEl;
 }
-// The level-override dropdown row inside the tooltip. One shared element,
-// re-pointed at each mark via mark.dataset (oType/oIndex). `current` is the
-// mark's stored override (or null). The override is applied the moment a
-// level is selected — no Apply button (issue #21): it was unreachable, since
-// the popup closed before it could be pressed.
-const OVERRIDE_OPTIONS = ["low", "med", "high", "exhigh", "removed"];
+// The per-detection row inside the tooltip. One shared element, re-pointed at
+// each mark via mark.dataset (oType/oIndex). Applied on the press — no Apply
+// button (issue #21): the popup closed before it could be reached.
+//
+// There is no longer a per-detection SEVERITY choice, because a detection no
+// longer has a severity. What a viewer may still want on a single mark is the
+// opposite of a global tick: "I know it is there, leave this one alone" (or put
+// it back). That is the detection's `removed` flag, which the render honours and
+// which survives rescans — it is a statement about this moment of this film, not
+// about the category.
 function ensureTlOverride() {
   if (tlOverride) return tlOverride;
   tlOverride = document.createElement("div");
   tlOverride.className = "tl-override";
-  const sel = document.createElement("select");
-  const def = document.createElement("option");
-  def.value = ""; def.textContent = "level: (scan default)";
-  sel.appendChild(def);
-  OVERRIDE_OPTIONS.forEach(v => {
-    const o = document.createElement("option");
-    o.value = v; o.textContent = v === "removed" ? "remove" : "level: " + v;
-    sel.appendChild(o);
-  });
-  // The native select popup takes the pointer out of the tooltip; while it is
-  // open the outside-click handler must not close the popup (see above).
-  sel.addEventListener("mousedown", () => { overrideSelectActive = true; });
-  sel.addEventListener("focus", () => { overrideSelectActive = true; });
-  sel.addEventListener("blur", () => { overrideSelectActive = false; });
-  sel.addEventListener("change", async () => {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  // A press inside the row must not count as "clicked outside the popup".
+  btn.addEventListener("mousedown", () => { overrideSelectActive = true; });
+  btn.addEventListener("focus", () => { overrideSelectActive = true; });
+  btn.addEventListener("blur", () => { overrideSelectActive = false; });
+  btn.addEventListener("click", async () => {
     const m = tlOverride && tlOverride._mark;
     if (!m || !m.dataset.oType) return;
-    const level = sel.value === "" ? null : sel.value;
-    sel.disabled = true; // in-flight guard — ALWAYS cleared below (success or not)
+    const next = m.dataset.oRemoved !== "1";
+    btn.disabled = true;   // in-flight guard — ALWAYS cleared below
     overrideSelectActive = false;
     try {
-      await post("/api/detection/override",
-        {type: m.dataset.oType, index: parseInt(m.dataset.oIndex, 10), level});
-      hideTlTooltip(); // the marks rebuild from the refreshed state anyway
+      await post("/api/detection/edit",
+        {type: m.dataset.oType, index: parseInt(m.dataset.oIndex, 10), removed: next});
+      hideTlTooltip();     // marks rebuild from the refreshed state anyway
       poll();
     } catch (err) {
-      log("override failed: " + err);
+      log("could not change this detection: " + err);
+      btn.disabled = false;
     }
-    sel.disabled = false; // the row is shared between all popups — never leave it disabled
   });
-  tlOverride.appendChild(sel);
-  tlOverride._sel = sel; tlOverride._mark = null;
+  tlOverride.appendChild(btn);
+  tlOverride._btn = btn; tlOverride._mark = null;
   return tlOverride;
 }
 // `mark` is the .tl-mark element (a click on the mark itself, or a prev/next
@@ -867,9 +1176,14 @@ function showTlTooltip(mark) {
   if (mark.dataset.oType) {
     const ov = ensureTlOverride();
     ov._mark = mark;
-    ov._sel.disabled = false; // belt-and-braces: a previous apply must never
-                              // leave the shared dropdown disabled
-    ov._sel.value = mark.dataset.oOverride || "";
+    ov._btn.disabled = false; // belt-and-braces: a previous apply must never
+                              // leave the shared row disabled
+    const dismissed = mark.dataset.oRemoved === "1";
+    ov._btn.textContent = dismissed ? "hide this one again" : "leave this one alone";
+    ov._btn.title = dismissed
+      ? "Put it back: this detection is censored again if its category is ticked."
+      : "Keep this one moment of this film, even though its category is ticked."
+        + " The category itself is unchanged.";
     tl.appendChild(ov);
   }
   tl.style.display = "block";
@@ -955,41 +1269,62 @@ function renderTimeline() {
   const marks = [];
   // Unconfirmed sweep candidates: generic marks, always shown (they have no
   // category/level yet, so render settings can't filter them).
-  (tlInfo.visual_candidates || []).forEach(c => marks.push({start:c.start, end:c.end, cat:"candidate", tip:null, caught:false}));
-  // ALL confirmed detections are flagged on the timeline — not just the ones
-  // the current render settings would catch. Marks the render WOULD catch are
-  // full opacity; the rest are dimmed. Tapping/clicking a mark opens a popup
-  // showing its summary text (the description written by the summary model).
+  // Unconfirmed sweep candidates: the sweep only said "something near here might
+  // matter", so they get a neutral mark with no popup — offering a checkbox for a
+  // range nothing has classified yet would imply a classification that has not
+  // happened.
+  (tlInfo.visual_candidates || []).forEach(c => marks.push(
+    {start: c.start, end: c.end, cat: "candidate", tip: null, caught: false}));
+  // ALL detections are flagged, not just the ticked ones: seeing what you chose
+  // NOT to hide is the point of a per-category tool. Ticked = full opacity.
   (tlInfo.visual_detections || []).forEach((d, i) => {
+    const fams = d.families || [];
+    // Coloured by the strongest family present; gore/violence outrank nudity so a
+    // bloody undressing does not read as "just nudity".
+    const PRIORITY = ["safety", "gore", "violence", "harm", "nudity", "intimacy",
+                      "substance", "language"];
+    const cat = PRIORITY.find(f => fams.includes(f)) || (fams[0] || "unclear");
+    const kinds = (d.kinds || []).join(", ") || (d.tags || []).join(", ") || "(untagged)";
+    const notes = [];
+    if (d.minors && d.minors !== "no") notes.push("may include a minor (" + d.minors + ")");
+    if (d.rendering && d.rendering !== "live_action") notes.push(d.rendering.replace(/_/g, " "));
+    if ((d.uncertain_tags || []).length) notes.push("unsure: " + d.uncertain_tags.join(", "));
+    if ((d.triggers || []).length) notes.push("found by: " + d.triggers.join(", "));
     marks.push({
-      start: d.start, end: d.end, cat: d.category, caught: detectionCaught(d),
-      removed: d.level_override === "removed",
-      oType: "visual", oIndex: i, oOverride: d.level_override || "",
-      tip: `${d.category} @ ${fmtSecs(d.start)}–${fmtSecs(d.end)} · level ${d.level}\n${d.description || "(no description)"}`,
+      start: d.start, end: d.end, cat: cat, caught: detectionCaught(d),
+      removed: !!d.removed, minors: d.minors && d.minors !== "no",
+      oType: "visual", oIndex: i, oRemoved: !!d.removed,
+      tip: `${kinds} @ ${fmtSecs(d.start)}–${fmtSecs(d.end)}`
+         + (notes.length ? "\n" + notes.join(" · ") : "")
+         + `\n${d.description || "(no description)"}`,
     });
   });
   (tlInfo.language_detections || []).forEach((d, i) => {
+    const kinds = (d.kinds || []).join(", ") || (d.tags || []).join(", ") || "(untagged)";
     marks.push({
-      start: d.utterance_start, end: d.utterance_end, cat: "foul_language", caught: detectionCaught(d),
-      removed: d.level_override === "removed",
-      oType: "language", oIndex: i, oOverride: d.level_override || "",
-      tip: `foul language @ ${fmtSecs(d.utterance_start)}–${fmtSecs(d.utterance_end)} · level ${d.level}\n“${d.word || ""}”`,
+      start: d.utterance_start, end: d.utterance_end, cat: "language",
+      caught: detectionCaught(d), removed: !!d.removed,
+      oType: "language", oIndex: i, oRemoved: !!d.removed,
+      tip: `${kinds} @ ${fmtSecs(d.utterance_start)}–${fmtSecs(d.utterance_end)}`
+         + (d.llm_confirmed === false ? "\nnot confirmed by the model (not muted)" : "")
+         + `\n“${d.text || ""}”`,
     });
   });
   marks.forEach(m => {
     const el = document.createElement("div");
-    el.className = "tl-mark " + m.cat + (m.caught ? "" : " not-caught") + (m.removed ? " removed" : "");
+    el.className = "tl-mark " + m.cat + (m.caught ? "" : " not-caught")
+      + (m.removed ? " removed" : "") + (m.minors ? " minors" : "");
     const x0 = Math.max(0, m.start / dur * 100), x1 = Math.min(100, m.end / dur * 100);
     el.style.left = x0 + "%"; el.style.width = Math.max(0.4, x1 - x0) + "%";
     if (m.tip) {
       el.dataset.tip = m.tip;
       el.dataset.t = String(m.start); // hold-to-preview frame timestamp
       if (m.oType) {
-        // Classified detection: expose its type/index/override so the timeline
-        // popup can offer a level override (low/med/high/exhigh/remove).
+        // Classified detection: the popup offers "don't hide this one" (and puts
+        // it back), which needs its type + index in the scan's lists.
         el.dataset.oType = m.oType;
         el.dataset.oIndex = String(m.oIndex);
-        el.dataset.oOverride = m.oOverride;
+        el.dataset.oRemoved = m.removed ? "1" : "";
       }
       el.addEventListener("click", (e) => {
         e.stopPropagation();          // the outside-click handler must not close it
@@ -1168,8 +1503,15 @@ function renderTerminal() {
 
 function renderBenchResults(job) {
   if (!job.results || job.results.length < 3) return;
-  const [summary, batches, confirms] = job.results;
-  let html = `<div class="hint">Benchmark: ${summary.frames} frames · accuracy ${summary.accuracy} · mean sweep ${summary.mean_sweep_s}s · confirm ${summary.confirm_count}</div>`;
+  const [summary, batches, identifies] = job.results;
+  let html = `<div class="hint">Benchmark: ${summary.frames} frames · sweep accuracy ${summary.accuracy}`
+    + ` · mean sweep ${summary.mean_sweep_s}s · ${summary.identify_count} range(s) identified`
+    + (summary.mean_tag_recall != null
+        ? ` · <b>tag recall ${Math.round(summary.mean_tag_recall * 100)}%</b> against the last scan`
+          + `<br>(under ~0.7 means this model names too few of the categories to be used for a scan `
+          + `at the current scale — raise “Scale frames before VLM” and test again)`
+        : ` · no existing scan to compare tags against`)
+    + `</div>`;
   html += "<table><tr><th>batch</th><th>s</th><th>ptok</th><th>ctok</th><th>pp t/s</th><th>gen t/s</th><th>result</th></tr>";
   (batches || []).forEach(b => {
     const res = b.expected != null ? (b.correct ? `<span class="ok">OK</span>` : `<span class="miss">MISS</span>`) : (b.flagged ? "flagged" : "clean");
@@ -1177,8 +1519,18 @@ function renderBenchResults(job) {
       <td>${b.pp_tok_s ?? "—"}</td><td>${b.gen_tok_s ?? "—"}</td><td>${res}</td></tr>`;
   });
   html += "</table>";
-  (confirms || []).forEach(c => {
-    html += `<div class="hint">confirm ${c.category} [${fmtSecs(c.window[0])}–${fmtSecs(c.window[1])}]: ${c.flagged ? "flagged" : "clean"} levels=[${(c.levels||[]).join(",")}] ${c.elapsed}s</div>`;
+  (identifies || []).forEach(c => {
+    // Stage 2 of the benchmark answers "could THIS model have found what the last
+    // scan found?" — tag recall, not a pass/fail flag. Recall 0 with a non-empty
+    // tag list usually means the frames were too small to tell one category from
+    // another, which is exactly what the accuracy column above cannot show.
+    const got = (c.tags || []).length;
+    const known = (c.known || []).length;
+    const r = c.recall == null ? "—" : Math.round(c.recall * 100) + "%";
+    html += `<div class="hint">identify [${fmtSecs(c.window[0])}–${fmtSecs(c.window[1])}]: `
+         + `${got} tag(s), recall ${r} of ${known} known`
+         + (c.overlap && c.overlap.length ? ` — ${c.overlap.join(", ")}` : "")
+         + ` · ${c.elapsed}s</div>`;
   });
   $("bench-results").innerHTML = html;
 }
@@ -1424,28 +1776,49 @@ function attachInputListeners() {
    "blur_strength","mute_padding","blur_padding"]
     .forEach(id => $(id).addEventListener("blur", settingsChanged));
   $("show_prompts").addEventListener("change", settingsChanged);
-  document.querySelectorAll("#matrix select").forEach(s => s.addEventListener("change", () => { settingsChanged(); renderTimeline(); }));
+  // The chooser builds its own listeners (chips, family selects, presets), so
+  // nothing to wire here except the search box, which filters without saving.
+  $("tag-search").addEventListener("input", filterChooser);
 }
-async function loadDefinitions() {
-  try {
-    const r = await fetch("/api/definitions"); const d = await r.json();
-    document.querySelectorAll(".cat-cell").forEach(cell => {
-      const def = d[cell.dataset.cat];
-      if (!def) return;
-      let text;
-      if (typeof def === "string") {
-        text = def; // foul language: already a full 4-level scale text
-      } else {
-        text = Object.entries(def)
-          .map(([lv, desc]) => lv + ":\n" + desc)
-          .join("\n\n");
-      }
-      cell.querySelector(".cat-tip").textContent = text;
+// Filter the chooser by typing. Matching the hint as well as the label is the
+// point: someone searching "surgery" should find gore.open_wound_* even though
+// the word never appears in the label, because that is what the hint says.
+function filterChooser() {
+  const q = $("tag-search").value.trim().toLowerCase();
+  const rx = q ? new RegExp(q.split(/\s+/).join("|"), "i") : null;
+  let anyVisible = false;
+  document.querySelectorAll("#chooser .fam").forEach(det => {
+    let famHas = false;
+    det.querySelectorAll(".tag").forEach(chip => {
+      const id = chip.dataset.tagId || "";
+      const tag = TAX.tags.find(t => t.id === id);
+      const hay = id + " " + (tag ? tag.label + " " + tag.hint : "");
+      const hit = !rx || rx.test(hay);
+      chip.classList.toggle("hidden-by-search", !hit);
+      if (hit) famHas = true;
     });
-  } catch (e) { log("load definitions failed: " + e.message); }
+    const fam = TAX.families.find(f => f.id === det.dataset.fam);
+    const famHit = !rx || (fam && rx.test(fam.label + " " + fam.blurb));
+    det.classList.toggle("hidden-by-search", !famHas && !famHit);
+    if (rx && (famHas || famHit)) det.open = true;   // show what matched
+    if (det.classList.contains("hidden-by-search")) return;
+    anyVisible = true;
+  });
+  let empty = document.querySelector(".chooser-empty");
+  if (!anyVisible && rx) {
+    if (!empty) {
+      empty = document.createElement("div");
+      empty.className = "chooser-empty";
+      $("chooser").appendChild(empty);
+    }
+    empty.textContent = 'nothing matches "' + q + '". The categories are fixed '
+      + 'vocabulary, not free text — try a simpler word.';
+  } else if (empty && !rx) {
+    empty.remove();
+  }
 }
 
-wire(); loadDefinitions(); poll();
+wire(); loadTaxonomy(); poll();
 setInterval(poll, 1000);
 </script>
 </body>

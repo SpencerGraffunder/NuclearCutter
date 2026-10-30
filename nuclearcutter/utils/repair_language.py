@@ -3,9 +3,13 @@ Repair a scan JSON that was produced with the broken json_object handling
 (empty `{}` from text_query_json → all language detections dropped).
 
 The scan's visual detections are kept; only the language pass is redone:
-re-transcribe the film (via the whisper.cpp server), then run
-detect_foul_language with the remote VLM client, and write the updated
-ScanResult back to the same path.
+re-transcribe the film (via the whisper.cpp server), then run the tag-based
+language detector with the remote VLM client, and write the updated ScanResult
+back to the same path.
+
+A v1 scan file (category/level records) is REFUSED rather than half-converted:
+its language rows name a severity level, not what was said, and there is no
+honest mapping from "foul_language / med" to a tag id. Re-scan those films.
 
 All model calls go to already-running remote servers (no local spawning):
 
@@ -21,7 +25,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from nuclearcutter.detection.profanity import detect_foul_language, load_wordlist
+from nuclearcutter.detection.language import detect_language, load_wordlist
 from nuclearcutter.detection.transcribe import find_subtitle_file, parse_subtitles, transcribe
 from nuclearcutter.schema import ScanResult
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
@@ -34,8 +38,8 @@ from nuclearcutter.utils.model_server import (
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="repair_language",
-        description="Re-run the language (foul) pass of a scan JSON against a "
-                    "remote VLM + whisper server.",
+        description="Re-run the language pass of a scan JSON against a "
+                    "remote VLM + whisper server, replacing its tag rows.",
     )
     parser.add_argument("scan_json", help="Path to the scan JSON to repair")
     parser.add_argument("movie", help="Path to the source movie file")
@@ -57,7 +61,7 @@ def main() -> int:
         print(f"error: movie not found: {video_path}", file=sys.stderr)
         return 1
 
-    result = ScanResult.load(scan_path)
+    result = ScanResult.load(scan_path)  # raises ValueError on a v1 file
     print(f"Loaded scan: {len(result.visual_detections)} visual detections, "
           f"{len(result.language_detections)} language detections.")
 
@@ -80,12 +84,15 @@ def main() -> int:
     subtitle_path = find_subtitle_file(video_path)
     subtitle_utterances = parse_subtitles(subtitle_path) if subtitle_path else []
 
-    print("Running language detection...")
-    wordlist = load_wordlist()
-    language_detections = detect_foul_language(utterances, client, wordlist, subtitle_utterances)
-    print(f"  {len(language_detections)} detections")
+    print("Running language detection (wordlist pass + dialogue sweep)...")
+    language_detections = detect_language(
+        utterances, client, load_wordlist(), subtitle_utterances,
+        on_progress=lambda done, total: print(
+            f"\r  dialogue sweep {done}/{total}", end="", flush=True) if total else None)
+    print(f"\r  {len(language_detections)} detections          ")
     for d in language_detections:
-        print(f"    [{d.start:.1f}-{d.end:.1f}] {d.word} (llm_confirmed={d.llm_confirmed})")
+        print(f"    [{d.start:.1f}-{d.end:.1f}] {d.text!r} -> {', '.join(d.tags)}"
+              f"{'' if d.llm_confirmed else ' (unconfirmed)'}")
 
     result.language_detections = language_detections
     result.save(scan_path)

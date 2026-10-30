@@ -22,178 +22,208 @@ re-encoding of untouched material).
 
 ## 2. Two-pass architecture
 
-**Pass 1 — Scan.** Analyze the movie, produce a JSON file recording every
-detected instance of every content category, with timestamps and (for
-nudity/intimate categories) an AI-generated scene description. This pass does
+**Pass 1 — Scan.** Analyze the movie and produce a JSON file recording every
+detected moment: its time range, the **tag ids** describing what is in the frame,
+and (for moments being censored) an AI-generated scene description. This pass does
 **not** know or care what the user wants done about any of it — it is a neutral
-record of "what is in this movie and when."
+record of "what is in this movie and when". "Neutral" is load-bearing, and it is
+why the scan records facts rather than a verdict: see [TAXONOMY.md](TAXONOMY.md) §1.
 
-**Pass 2 — Render.** Read the scan JSON + a user preferences file (what action to
-take per category), and produce the final `_cleaned` output file via ffmpeg.
+**Pass 2 — Render.** Read the scan JSON + the viewer's `Selection` (which tag ids
+to censor, and what each family's tags should do), and produce the final `_cleaned`
+output file via ffmpeg.
 
 This separation is deliberate: it's what makes the scan JSON shareable in the repo
 (see §6) — two users with different censorship preferences can use the exact same
 scan data.
 
-## 3. Content categories and actions
+## 3. What is detected, and what gets done about it
 
-Four categories. Each category has **two independent corrections**: a *visual*
-action (what to do to the video) and an *audio* action (what to do to the
-audio). Both are configurable per category (defaults in `config.toml`,
-overridable per-run by CLI flags or a saved `Preferences` file).
+Detection answers **one factual question** — *what is in this frame?* — and
+records the answer as a set of tag ids. Deciding what deserves censorship is a
+separate, local, revisitable act performed against that record. The full
+vocabulary and the reasoning behind it live in **[TAXONOMY.md](TAXONOMY.md)**;
+this section is the interface summary.
 
-**Categories and severity levels:**
+**8 families, 121 tags** (`nuclearcutter/taxonomy.py` is the single source of
+truth: prompts, scan files, the render plan, the GUI and the CLI's presets are all
+generated from it):
 
-Every detection is classified into a **fixed severity level** — `low` / `med` /
-`high` / `exhigh` — using a standardized, built-in scale per category (NOT
-user-editable). This level is recorded in the scan JSON, which is what makes
-scan files **shareable**: the scan records *how bad* a scene is, and each
-person picks their own cutoff. A per-category `*_level` setting in
-`config.toml` is the user's threshold.
+| Family | Tags | Default | Covers |
+|---|---|---|---|
+| `nudity` | 35 | blur picture | How much of a body, or what clothing, is visible |
+| `intimacy` | 11 | blur picture | Kissing, undressing, sex — with or without nudity |
+| `violence` | 26 | blur picture | One person hurting, or threatening to hurt, another |
+| `gore` | 21 | blur picture | Wounds, blood and damaged bodies |
+| `harm` | 5 | blur picture | Self-harm and suicide, and how it is depicted |
+| `language` | 16 | mute phrase | Swearing, slurs, insults, explicit talk |
+| `substance` | 4 | blur picture | Smoking, heavy drinking, drug use |
+| `safety` | 3 | blur picture | The scan flagged the moment but could not name it |
 
-**The level is the amount of censorship** (not the severity of the scene on its
-own): `low` = least censorship (only the worst content is caught), `exhigh` =
-max censorship (basically everything is caught). A detection is corrected when
-its level rank is at or above the threshold rank — i.e. the same scene gets
-corrected by a stricter (higher) threshold and left alone by a laxer (lower)
-one. A `low` threshold corrects only the most extreme content; an `exhigh`
-threshold corrects essentially everything (the film "plays like a
-documentary", which is safe because every blur/black segment shows a clean
-text summary of the scene).
+**There is no severity scale anymore, anywhere.** v0.1.0 classified each
+detection as `low`/`med`/`high`/`exhigh` on a per-category scale of *how much
+censorship it needs*, and gated the render on a threshold comparison. That
+question is unanswerable — "bad" is a property of the frame *plus the viewer* —
+and it froze a guess into the scan file, so people who disagreed could not share
+one. `SeverityLevel` is deleted; planning is set membership:
 
-| Category | Built-in level scale (low = WORST → exhigh = mildest-flagged) |
-|---|---|
-| `nudity` | bare genitals/breasts/buttocks, full nudity → + underwear/swimwear/lingerie, partly covered → + revealing clothing, shirtless men, bikinis → + any immodesty (bare shoulders/legs, towels, pajamas, kissing, any romantic/intimate situation) |
-| `gore` | extreme graphic content (organs, dismemberment, mass casualties) → + visible blood/open wounds/surgery → + any blood/wound however small → + anything medical/bloody (bandages, bruises, hospitals, illness) |
-| `violence` | graphic/brutal acts (murder, torture, weapons) → + fighting/punching/attacks → + any physical aggression (slap, shove, threat) → + any aggression/hostility (yelling, arguing, intimidation) |
-| `foul_language` | severe slurs, most offensive expletives → + common profanity (fuck, shit, bitch) → + mild words (crap, darn, sucks) → + anything rude/mean/disrespectful ("omg", "I hate you", sarcasm, mockery) |
+```python
+det.censorable(selection.tags)   # any overlap → the segment is censored
+```
 
-The level scale is the ONLY definition of what counts: the same scan JSON
-classifies a scene identically for every user. An OPTIONAL custom prompt
-(`nudity_prompt`, `gore_prompt`, `violence_prompt`, `foul_language_prompt`) in
-`config.toml` replaces the built-in scale for that category entirely (empty =
-built-in), for users who really want a custom definition.
+**A `Selection` is a set of tag ids and nothing else.** No rank, no threshold, no
+comparison in the planner. Because it is a set it is shareable the way a threshold
+never was, and it is *revisitable*: change the set and re-render in minutes, with
+no rescan. This is what makes §6 worth having.
 
-**Visual actions:**
+**Visual actions** (per family, all overridable):
 
 | Action | Effect |
 |---|---|
-| `none` | leave the video untouched |
-| `blur` | intense box blur over the flagged range + a short, clean VLM summary overlaid |
-| `black` | replace the flagged range entirely with a black screen + the clean summary |
+| `none` | leave untouched |
+| `blur` | intense box blur over the range + a short clean summary overlaid |
+| `black` | replace the range with a black screen + the summary |
 
-**Audio actions:**
+Only these three exist (`schema.VisualAction`). A "freeze on the last clean frame"
+action was considered and not built: it needs a reliable keyframe outside the
+censored range, and getting that wrong freezes on a frame *of* the scene being
+hidden — a failure too quiet to notice.
 
-Visual categories (nudity/gore/violence) have no per-sound recognition, so their
-only audio options are `none` / `mute_scene` (silence the whole flagged scene).
+**Audio actions:** visual families only recognise a *time range*, not a sound, so
+their options are `none` / `mute_scene`. `language` has word-level timestamps and
+keeps the fine-grained set: `none` / `mute_word` / `mute_phrase` /
+`replace_word` / `replace_phrase` (phrase replacement is the default, because a
+slur's meaning survives cutting one syllable; `replace_*` currently fall back to
+the equivalent mute with a warning).
 
-| Action (visual categories) | Effect |
-|---|---|
-| `none` | leave audio untouched |
-| `mute_scene` | silence the whole flagged scene |
+`blur` preserves scene flow and avoids the jolt of a skip card; `black` shows
+nothing but the summary. When one range matches families asking for different
+actions, the **strongest** ask wins (a range that is both gore→blur and
+violence→black goes black) — leaving one of the viewer's asks unfulfilled is worse
+than over-censoring. Audio-only language detections never create a segment
+boundary; their windows are layered inside whichever segment contains them.
 
-Foul language has word-level timestamps, so it keeps the finer-grained set:
+Runtime is always preserved (subtitles and chapter markers stay in sync). Blur
+strength: `blur_strength` (1.0 standard, 2.0 twice as extreme).
 
-| Action (foul language) | Effect |
-|---|---|
-| `none` | leave audio untouched |
-| `mute_word` | silence just the flagged word |
-| `mute_phrase` | silence the whole utterance/phrase |
-| `replace_word` / `replace_phrase` | (upcoming) AI voice replacement; currently falls back to the equivalent mute with a warning |
+**Three things are enforced rather than chosen**, because leaving them optional
+would put the burden of a safety decision on the person least able to audit it:
 
-**Default corrections per category:** nudity `blur`/`none`/`med`, gore
-`blur`/`none`/`med`, violence `blur`/`none`/`med`, foul language
-`none`/`mute_phrase`/`med`.
-
-**`blur`** obscures the flagged content while preserving scene flow and avoiding
-the abrupt disruption of a skip card; **`black`** shows nothing but the clean
-summary text. For a visual category with `mute_scene`, the audio of
-the **whole flagged segment** is silenced (the segment *is* the event). Foul
-language is audio-only: its windows are layered on top of whichever segment(s)
-they fall within. Runtime is always preserved, which matters for sync with
-subtitles, chapter markers, etc. Blur intensity is tunable via `blur_strength`
-(1.0 = standard, 2.0 = twice as extreme).
+1. `safety.exposure_with_minor` — the taxonomy's single `always_censor` tag,
+   applied whenever a detection reports a minor present. The GUI shows it disabled
+   and labelled *always on*: a rule the user cannot see looks like a bug and gets
+   worked around. `assert_vocabulary_sane()` asserts exactly one such tag exists —
+   a second would mean the tool started making moral decisions again.
+2. Uncertainty is a tag, never silence. Unknown model output folds into the
+   family's `unclear` residual (or `safety.unclassified`), so a misspelt or
+   invented tag cannot silently delete a finding. (`harm` and `substance` opt out
+   of having residuals — see TAXONOMY §3.3 for why inferring those from a blurry
+   frame does more harm than the gap it closes.)
+3. v1 scan files are rejected with a non-zero exit, never coerced. There is no
+   honest way to turn "how bad was this" back into "what was in the frame", and a
+   lossy auto-conversion would produce a scan file that looks authoritative while
+   inventing tags.
 
 ## 4. Detection pipeline
 
-### 4.1 Nudity / gore / violence (unified VLM sweep)
+### 4.1 Visual: trigger sweep, then one classifier pass
 
-Visual detection is a single **full-film VLM sweep** — there is no separate
-cheap classifier anymore. A two-stage NudeNet-then-VLM design was tried and
-removed: NudeNet (a fast local ONNX classifier) scored **zero** on every frame
-of a full nude scene in The Martian that a vision model flagged at 0.95
-confidence, which meant the VLM never got a chance to confirm the scene. A
-blind fast pass can't be the gatekeeper if it can silently drop real content.
+Two passes, split because they answer different questions at different cost — and
+because a single pass cannot explain the difference between what a batch of
+thumbnails says and what real pixels of one range show.
 
-- **Sweep:** Sample frames across the whole film at a configurable interval
-  (default 2s — catches any scene that lasts ≥ ~2s). Frames are sent to the
-  vision model in small batches (4 per call), and the model is asked one
-  single-verdict question per batch: *"does this batch contain ANY flagged
-  content?"* covering nudity, gore, and violence in one pass. The built-in
-  per-category level scales are composed into the single sweep prompt, so what
-  counts as "flagged" is standardized (custom prompts optional).
-  This single-verdict format (rather than per-frame index JSON) is what proved
-  reliable with local reasoning VLMs.
-- **Merge + pad:** Flagged batch windows are merged into ranges with generous
-  before/after padding so a scene is never clipped. The sweep verdict is
-  authoritative: a range that was flagged is never dropped, even if a later
-  pass can't enrich it — the goal is to never show bad content, at the cost of
-  occasionally blurring more than the minimum. When merging, the WORST level
-  seen is kept (lowest rank = `low`, the most restrictive) so severity is never
-  downgraded.
-- **Confirm + describe + classify:** Each merged range is sent to the vision
-  model with the per-category confirm prompt to (a) produce the human-readable
-  scene description used for `blur`/`black` cards, (b) refine the category, and
-  (c) assign the severity level (low/med/high/exhigh) using the fixed scale.
-  The level is stored in the scan JSON, which is what makes scans shareable.
-- The VLM description must weave together **both** what is visually happening
-  and what is being said/plot-relevant during the scene (dialogue content from
-  the audio pipeline, see §4.2) — not just a visual description. E.g. not just
-  "two characters embrace in bed" but incorporating relevant plot-carrying
-  dialogue that happens during the scene, since the whole point of the `blur`
-  card is that the viewer doesn't miss story content.
-- Model access is via an **OpenAI-compatible chat completions API**
-  (`/v1/chat/completions` with image content blocks). Two backends, one API:
-  - **`mlx-vlm` (default):** NuclearCutter spawns its own
-    `python -m mlx_vlm.server` on `localhost:1234`, pre-loads the configured
-    MLX model (a Qwen MLX 4-bit model, defaulting to the same filesystem path
-    the project previously used through LM Studio), and serves it in-process.
-    Speed knobs: images are downscaled (~480px) before upload — the single
-    biggest latency lever (~6x) — plus 4-bit KV-cache quantization and
-    continuous batching (already on by default in mlx-vlm). The server is shut
-    down when the scan finishes.
-  - **`standalone`:** talk to an already-running OpenAI-compatible server (LM
-    Studio, Ollama, a manual mlx-vlm server) via `base_url`. No process is
-    started or stopped.
-  - Important mlx-vlm detail: the server caches models keyed by the exact
-    `model` string from each request, and it pre-loads the model under its
-    **full filesystem path**. Requests must therefore send the full
-    `model_path` as the model id (not the short name), or the server tries to
-    fetch the short name as a Hugging Face repo. Both VLM and text checks go
-    through the same loaded model.
+**Sweep (cheap, whole film).** Frames are sampled across the film and sent in
+small batches. The model is asked one cheap question per batch with a **short list
+of 12 trigger names** (`taxonomy.SWEEP_TRIGGERS`) rather than the 121-tag
+vocabulary: *which of these, if any, appear in these frames?*
 
-### 4.2 Foul language
+```
+skin · body_parts · intimate · blood · injury · fighting
+hostile · restraint · danger · substance · offensive_speech · doubt
+```
 
-- **Whisper transcription** (via `mlx-whisper` for Apple Silicon acceleration)
-  with word-level timestamps, run always.
-- **Subtitle cross-check:** if an embedded or sidecar subtitle file (SRT/ASS/etc)
-  is present, parse it and cross-check against the Whisper transcript for the
-  same time ranges — improves accuracy and catches cases Whisper mishears.
-- **Wordlist match:** both the Whisper transcript and subtitle text (when
-  present) are checked against a configurable profanity wordlist.
-- **LLM context check (always run, not optional):** flagged words/lines are also
-  passed to an LLM (same OpenAI-compatible endpoint) for a contextual check —
-  catches things a static wordlist misses and reduces false positives (e.g. a
-  non-profane homophone, a word used in a non-profane sense). Wordlist match
-  alone is never sufficient on its own; the LLM pass always runs on top of it.
-- The LLM also assigns each confirmed word a **severity level** (low/med/high/
-  exhigh) using the fixed foul-language scale, recorded in the scan.
-- Output: word-level (or utterance-level) timestamps for each flagged instance.
-  Muting pads each flagged window by `foul_language_mute_padding` seconds (default
-  0.5) on both sides so the word's onset/offset audio doesn't leak through —
-  whisper word timestamps can be tight, and an exact window lets the first/last
-  phoneme escape the mute. Only words meeting the user's `foul_language_level`
-  threshold are muted.
+Note the triggers are deliberately **not** the family names. They are written for
+recall at thumbnail resolution — `skin` means "skin that street clothes would
+cover", not a `nudity.*` verdict, and `danger` sweeps up a child in peril that no
+family owns. A one-to-one mapping to families would tempt someone into routing a
+trigger straight to a tag, which is exactly the shortcut that drops content.
+
+Coarse presence questions are what a low-resolution batch is good at, and keeping
+the vocabulary out of this prompt is what keeps the call cheap.
+
+The trigger verdict is **authoritative — the sweep can flag, and classify can never
+un-flag.** The confirm-style pass has no veto power: it can only enrich or keep the
+sweep's verdict. That asymmetry is why the passes cannot be merged into one
+"smarter" call; merging two classifications duplicates work without adding safety.
+
+**Merge + pad.** Flagged windows merge into ranges with generous padding so a scene
+is never clipped. When windows merge, tags take the **union** — not the worst
+level, since levels no longer exist. Losing a tag in a merge is an uncensored
+scene.
+
+**Classify (expensive, per range).** Each merged range is sent at higher resolution
+with the **full vocabulary** and returns tag ids, a `description`, `confidence`,
+a `rendering` qualifier and a `minors` estimate. Family routing is deliberately
+not used: the full 121 tags are always offered, because a nudity range routinely
+contains violence too and routing would drop it. Unknown ids fold to the family
+residual (§3). `minors` takes the **worst** of sweep and classify, so a sweep that
+spotted a child is never overruled by a pass that was not looking for one.
+
+**Descriptions.** A `description` must weave together what is visually happening
+*and* what is being said during the range — the whole point of a blur card is that
+the viewer does not lose story content. Not "two characters embrace" but the same
+sentence carrying the plot-relevant dialogue over the embrace.
+
+Descriptions are polished **lazily at render time, only for ranges actually being
+censored** (`polish_descriptions`), not in a mandatory whole-film summary pass. On a
+two-hour film where the viewer censors little, a scan-time summary pass spent model
+time narrating scenes nobody intended to hide.
+
+**Model access** is an OpenAI-compatible chat completions API
+(`/v1/chat/completions` with image content blocks). Two backends, one API:
+
+- **`mlx-vlm` (default):** NuclearCutter spawns its own `python -m
+  mlx_vlm.server` on `localhost:1234`, pre-loads the configured model, and shuts it
+  down when the scan finishes. Speed knobs: images downscaled (~480px) before
+  upload — the single biggest latency lever (~6x) — plus 4-bit KV-cache
+  quantization and continuous batching.
+- **`standalone`:** an already-running server (LM Studio, Ollama, a manual
+  mlx-vlm instance) via `base_url`. Nothing is started or stopped.
+
+mlx-vlm caches models keyed by the exact `model` string, pre-loading under the
+**full filesystem path**, so requests must send `model_path` as the model id — not
+the short name — or the server fetches the short name as a Hugging Face repo. The
+same loaded model serves VLM and text calls.
+
+A blind fast pass is never the gatekeeper. A NudeNet-then-VLM design was tried and
+removed: NudeNet scored **zero** on every frame of a full nude scene that the VLM
+flagged at 0.95 confidence, so the VLM never saw those scenes at all. Any future
+pre-filter must be recall-first or it silently drops real content.
+
+### 4.2 Language: wordlist for precision, model for meaning
+
+- **Whisper transcription** with word-level timestamps, run always (via
+  `mlx-whisper` on Apple Silicon).
+- **Subtitle cross-check:** an embedded or sidecar subtitle file (SRT/ASS/etc) is
+  parsed and cross-checked against the transcript for the same ranges — subtitles
+  are exact text and correct Whisper's mishearings.
+- **Wordlist pass (~190 entries, `detection/data/profanity_wordlist.txt`)** gives
+  *precision*: word-level timestamps, and a deterministic second opinion the model
+  cannot talk you out of. A wordlist alone is wrong often enough to matter ("assess"
+  containing a slur, a clinical use of a crude anatomical term).
+- **A dialogue sweep over the transcript** tags the language family descriptively:
+  which kind of utterance it is (`slur_racial`, `profanity_severe`,
+  `sexual_talk_explicit`, `degradation_insult`, ...). A model alone is expensive and
+  unreliable at timestamps; a wordlist alone cannot tell a slur from a medical
+  term, so the two are merged and each does what the other cannot.
+- **Merging unions the tags.** A wordlist hit plus a model hit is one detection with
+  both tags, never two detections and never one winning.
+- **What a language tag describes is the utterance, not the speaker's intent.**
+  `hostile_tone` and `degradation_insult` are judged from words alone, so they will
+  be wrong about irony, and about a villain being cruel *to* someone on purpose.
+  Per-detection correction exists for exactly this.
+- Language is **not** gendered, and never will be: "a slur" is the same words
+  whoever says them, and the target's identity is a guess a model gets wrong.
 
 ## 5. Fingerprinting (for matching shared timestamp files to a local file)
 
@@ -224,11 +254,21 @@ Scan JSON files are meant to be shareable and PR-able in the project repo, keyed
 by film identity (fingerprint + duration + title/year metadata), **not** by
 filename. Critically:
 
-- The JSON stores **raw detections only** — categories, timestamps, VLM
-  descriptions, confidence data. It does **not** store which action the
-  original generator chose (blur vs skip vs mute) — that lives in a separate,
-  local, non-shared user-preferences file. This is what makes one scan JSON
-  useful to every user regardless of their personal filtering choices.
+- The JSON stores **raw detections only** — tag ids, timestamps, VLM
+  descriptions, confidence data. It does **not** store which action the original
+  generator chose (blur vs skip vs mute), nor *which of the tags the generator
+  cared about* — that lives in a separate, local, non-shared `Selection`. This is
+  what makes one scan JSON useful to every user regardless of their personal
+  filtering choices.
+- Because a detection is a **fact** ("a shirtless man, a gun, blood") rather than
+  a verdict ("severity: high"), two people who disagree completely about what
+  deserves censoring can still use the same file. Under v1's severity levels they
+  could not: the scan encoded somebody else's threshold, and disagreeing with it
+  meant rescanning the film — hours of GPU time — to hold a different opinion.
+- Tags are **additive across versions**: adding a tag to the vocabulary does not
+  invalidate facts already recorded, so a scan ages rather than rots. A renamed or
+  removed tag bumps `TAXONOMY_VERSION`; a format change bumps `SCHEMA_VERSION`, and
+  a file on an older schema is refused loudly (never silently reinterpreted).
 - Format: plain JSON (not EDL/M3U/etc) — chosen specifically for readability and
   ease of reviewing/editing in a PR diff.
 
@@ -258,16 +298,28 @@ nuclearcutter render "/Volumes/Media/Movies/The.Martian.2015.1080p.mkv"
 Key configuration keys: `model_backend` (`mlx-vlm` auto-start or `standalone`),
 `model_path` (filesystem path to the MLX model), `base_url`, `vlm_model`,
 `text_model`, `whisper_model`, `sweep_interval`, `vision_timeout`,
-`timestamps_dir`; per-category severity thresholds
-(`nudity_level`/`gore_level`/`violence_level`/`foul_language_level`, each
-`low`/`med`/`high`/`exhigh`); optional per-category custom prompts
-(`nudity_prompt`/`gore_prompt`/`violence_prompt`/`foul_language_prompt`,
-empty = built-in fixed level scale); per-category render corrections, each with
-a visual and an audio action
-(`nudity_visual`/`nudity_audio`/`gore_visual`/`gore_audio`/`violence_visual`/
-`violence_audio`/`foul_language_visual`/`foul_language_audio`); and shared
-render settings `blur_strength`, `mute_padding` (extra seconds muted around
-each flagged word), and `font`.
+`timestamps_dir`, `blur_strength`, `mute_padding` (extra seconds muted around each
+flagged word) and `font`.
+
+The censoring intent lives in **five** keys, replacing v1's per-category
+`*_level` thresholds and per-category `*_visual`/`*_audio` pairs:
+
+| Key | Shape | Meaning |
+|---|---|---|
+| `selection` | list of tag ids | which facts get censored — the whole decision |
+| `family_actions` | `{family: {visual, audio}}` | what to do when a family's tag is selected |
+| `rendering` | list from `live_action`/`animated`/`anime`/`artwork`/`archival`/`fantasy`/`stage` | which presentation styles to filter (all on = widest) |
+| `minors` | list of `yes`/`uncertain` | which age estimates count as "a child is present" for the floor |
+| `polish_descriptions` | bool | spend model time at render to improve blur-card text |
+
+The removed keys had no replacement because the concept went away: there is no
+per-category threshold to set, and no per-category custom prompt — a prompt that
+redefines what a tag *means* would silently invalidate every scan file written
+under the built-in definition (see [TAXONOMY.md](TAXONOMY.md) §1).
+
+`settings.json` holds defaults for new scans; a scan file's own `Preferences` (and
+the GUI's edits to them) win over it, so a scan can be re-rendered later with
+different intent without touching the shared defaults.
 
 ### 7.1 Live dashboard
 

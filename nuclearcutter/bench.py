@@ -1,11 +1,22 @@
 """
 VLM benchmark — the "test/benchmark vlm" button in the web GUI.
 
-Takes a small frame collection from a movie and runs the REAL scan prompts
-(the sweep prompt + confirm prompt from prompts.json) against the selected
-model, reporting speed and accuracy. If a scan file exists for the movie, a
-few frames are sampled from its flagged windows so accuracy can be measured
-against known truth; the rest are random frames from the rest of the film.
+Takes a small frame collection from a movie and runs the REAL scan prompts (the
+trigger sweep + the tag classify call from prompts.json) against the selected
+model, reporting speed and accuracy. If a scan file exists for the movie, frames
+are sampled from its detected windows so accuracy can be measured against known
+truth; the rest are random frames from the rest of the film.
+
+Accuracy is measured per pass, because the two passes answer different
+questions:
+
+  sweep     did a batch containing a known detection get flagged at all?
+            (a yes/no question, and the one that decides whether footage gets
+            a closer look — a miss here is a scene that never gets classified)
+  identify  of the tags the scan file holds for that window, how many did the
+            model name? Reported as tag overlap, not as a single verdict,
+            because "it said shirtless_male where the scan said
+            underwear_male" is a different problem from "it said nothing".
 """
 
 from __future__ import annotations
@@ -16,10 +27,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from nuclearcutter.detection.vlm_confirm import (
-    _category_definitions, build_confirm_prompt, build_sweep_prompt,
+from nuclearcutter.detection.visual_scan import (
+    SWEEP_QUALITY_PIXELS, build_identify_prompt, build_sweep_prompt, scale_height_for,
 )
 from nuclearcutter.schema import ScanResult
+from nuclearcutter.taxonomy import TAGS
 from nuclearcutter.utils.ffmpeg import extract_frame_at
 
 N_TOTAL_FRAMES = 12  # 3 sweep batches of 4 frames
@@ -74,30 +86,23 @@ def run_benchmark(
     n_total: int = N_TOTAL_FRAMES,
     stop_event=None,
 ) -> dict:
-    """Run the benchmark and return {summary, batches, confirms}."""
-    from nuclearcutter.detection.vlm_confirm import (
-        SWEEP_QUALITY_PIXELS, scale_height_for,
-    )
-
+    """Run the benchmark and return {summary, batches, identifies}."""
     scale_height = scale_height_for(scale)
-    # Same sweep-only pixel cap the real sweep will use (confirms stay full).
+    # Same sweep-only pixel cap the real sweep will use (classify stays full).
     sweep_max_pixels = SWEEP_QUALITY_PIXELS.get(
         (sweep_resolution or "full").strip().lower()
     )
     duration = scan.identity.duration_seconds if scan else _probe_duration(video_path)
 
-    flagged_windows: list[tuple[float, float, str]] = []
-    if scan:
-        flagged_windows = [
-            (d.start, d.end, d.category.value) for d in scan.visual_detections
-        ]
+    # Known windows and their tags, from the film's own scan file.
+    windows: list[tuple[float, float, list[str]]] = [
+        (d.start, d.end, list(d.tags)) for d in (scan.visual_detections if scan else [])
+    ]
 
-    # Frame collection: midpoints of known flagged windows + random frames.
     rng = random.Random(RANDOM_SEED)
-    flagged_ts = []
-    for start, end, _cat in flagged_windows[:4]:
-        flagged_ts.append((start + end) / 2.0)
-    rand_ts = _random_timestamps(duration, n_total - len(flagged_ts), [(s, e) for s, e, _ in flagged_windows])
+    flagged_ts = [(s + e) / 2.0 for s, e, _ in windows[:4]]
+    rand_ts = _random_timestamps(duration, n_total - len(flagged_ts),
+                                 [(s, e) for s, e, _ in windows])
     all_ts = flagged_ts + rand_ts
     rng.shuffle(all_ts)
     all_ts = all_ts[:n_total]
@@ -113,8 +118,6 @@ def run_benchmark(
             except Exception as exc:
                 print(f"  warn: frame at {ts:.1f}s failed: {exc}")
 
-        defs = _category_definitions(None)
-
         batches: list[dict] = []
         for bi in range(0, len(frames), BATCH_SIZE):
             if stop_event is not None and stop_event.is_set():
@@ -123,15 +126,20 @@ def run_benchmark(
             batch_ts = kept_ts[bi:bi + BATCH_SIZE]
             if not batch:
                 continue
-            prompt = build_sweep_prompt(defs, len(batch))
+            prompt = build_sweep_prompt(len(batch))
             t0 = time.monotonic()
             data = _query_with_usage(client, prompt, batch, max_pixels=sweep_max_pixels)
             elapsed = time.monotonic() - t0
-            parsed = data.get("parsed", {})
-            usage = data.get("usage", {})
-            expected = _expected_category(batch_ts, flagged_windows)
-            flagged = bool(parsed.get("contains_flagged_content"))
-            got_cat = parsed.get("category")
+            parsed = data.get("parsed", {}) or {}
+            usage = data.get("usage", {}) or {}
+            triggers = parsed.get("triggers")
+            if not isinstance(triggers, list):
+                triggers = ["doubt"] if parsed.get("contains_flagged_content") else []
+            expected = _expected_tags(batch_ts, windows)
+            # Any trigger at all, 'doubt' included, means the model asked for a
+            # closer look — 'doubt' is it admitting it could not exclude the
+            # batch, which is a pass, not a miss.
+            flagged = bool(triggers)
             correct = (flagged and expected is not None) or (not flagged and expected is None)
             batches.append({
                 "batch": bi // BATCH_SIZE + 1,
@@ -140,18 +148,16 @@ def run_benchmark(
                 "completion_tokens": usage.get("completion_tokens"),
                 **data.get("timings", {}),
                 "flagged": flagged,
-                "category": got_cat,
-                "expected": expected,
+                "triggers": [str(t) for t in triggers],
+                "expected": sorted({TAGS[t].label for t in expected if t in TAGS}) if expected else None,
                 "correct": correct if expected is not None else None,
             })
 
-        # Confirm pass on up to 2 known flagged windows (accuracy on the
-        # per-category prompt).
-        confirms = []
-        for start, end, cat in flagged_windows[:2]:
+        # Classify pass on up to 2 known windows: same call a real scan makes.
+        identifies = []
+        for start, end, tags in windows[:2]:
             if stop_event is not None and stop_event.is_set():
                 break
-            mid = (start + end) / 2.0
             c_frames = []
             for k in range(6):
                 ts = start + (end - start) * (k + 0.5) / 6
@@ -161,38 +167,43 @@ def run_benchmark(
                     pass
             if not c_frames:
                 continue
-            from nuclearcutter.schema import Category
-
-            cat_enum = Category.from_legacy(cat)
-            prompt = build_confirm_prompt(cat_enum, defs.get(cat_enum, ""), "(no dialogue)")
+            prompt = build_identify_prompt(len(c_frames), "(no dialogue)")
             t0 = time.monotonic()
             data = _query_with_usage(client, prompt, c_frames)
             elapsed = time.monotonic() - t0
-            parsed = data.get("parsed", {})
-            matches = {k: bool(parsed.get(k)) for k in
-                       ("matches_low", "matches_med", "matches_high", "matches_exhigh")}
-            confirms.append({
-                "category": cat,
+            parsed = data.get("parsed", {}) or {}
+            got = [str(t) for t in (parsed.get("tags") or []) if str(t) in TAGS]
+            known = [t for t in tags if t in TAGS]
+            overlap = sorted(set(got) & set(known))
+            identifies.append({
                 "window": [round(start, 1), round(end, 1)],
                 "elapsed": round(elapsed, 1),
                 "prompt_tokens": data.get("usage", {}).get("prompt_tokens"),
                 "completion_tokens": data.get("usage", {}).get("completion_tokens"),
                 **data.get("timings", {}),
-                "flagged": any(matches.values()),
-                "levels": [k.split("_")[1] for k, v in matches.items() if v],
+                "tags": got,
+                "known": known,
+                "overlap": [TAGS[t].label for t in overlap],
+                # The number that matters: how much of the scan file's answer the
+                # model reproduced. 0 with a non-empty `tags` list means the model
+                # is describing the scene in vocabulary the scan did not use —
+                # usually a resolution problem, not a comprehension problem.
+                "recall": round(len(overlap) / len(known), 2) if known else None,
             })
             for p in c_frames:
                 p.unlink(missing_ok=True)
 
         judged = [b for b in batches if b.get("correct") is not None]
+        recalls = [i["recall"] for i in identifies if i.get("recall") is not None]
         summary = {
             "frames": len(frames),
             "batches": len(batches),
             "accuracy": f"{sum(b['correct'] for b in judged)}/{len(judged)}" if judged else "n/a",
             "mean_sweep_s": round(sum(b["elapsed"] for b in batches) / len(batches), 1) if batches else 0.0,
-            "confirm_count": len(confirms),
+            "identify_count": len(identifies),
+            "mean_tag_recall": round(sum(recalls) / len(recalls), 2) if recalls else None,
         }
-        return {"summary": summary, "batches": batches, "confirms": confirms}
+        return {"summary": summary, "batches": batches, "identifies": identifies}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -206,9 +217,9 @@ def _probe_duration(video_path: Path) -> float:
 def _query_with_usage(client, prompt: str, frames, max_pixels: int | None = None) -> dict:
     """Run a vision query through the SAME entry point a real scan uses
     (`LLMClient.vision_query_json`), so the benchmark's requests are identical
-    to an actual sweep/confirm call — same thinking-off flags, same prompt
-    plumbing, same image encoding. `max_pixels` mirrors the sweep-resolution
-    cap so benchmark sweep timings reflect the configured sweep pass.
+    to an actual sweep/classify call — same thinking-off flags, same prompt
+    plumbing, same image encoding. `max_pixels` mirrors the sweep-resolution cap
+    so benchmark sweep timings reflect the configured sweep pass.
     """
     if max_pixels:
         parsed = client.vision_query_json(prompt, frames, max_pixels=max_pixels)
@@ -221,12 +232,16 @@ def _query_with_usage(client, prompt: str, frames, max_pixels: int | None = None
     }
 
 
-def _expected_category(batch_ts: list[float], windows: list[tuple[float, float, str]]) -> str | None:
+def _expected_tags(batch_ts: list[float],
+                   windows: list[tuple[float, float, list[str]]]) -> list[str] | None:
+    """Tags of every known detection overlapping this batch, or None if the batch
+    is from unflagged footage (where the correct answer is to not ask)."""
+    out: list[str] = []
     for ts in batch_ts:
-        for s, e, cat in windows:
+        for s, e, tags in windows:
             if s <= ts <= e:
-                return cat
-    return None
+                out.extend(t for t in tags if t not in out)
+    return out or None
 
 
 def attach_usage_hook(client) -> None:

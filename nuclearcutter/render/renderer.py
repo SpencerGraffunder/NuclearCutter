@@ -21,10 +21,11 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from nuclearcutter.schema import AudioAction, Category, Preferences, ScanResult, VisualAction
+from nuclearcutter.schema import AudioAction, Preferences, ScanResult, VisualAction
+from nuclearcutter.taxonomy import TAGS, Family
 from nuclearcutter.utils.ffmpeg import probe_streams
 
 # Discard ffmpeg stderr (progress lines) to avoid memory accumulation.
@@ -43,12 +44,36 @@ class TimelineSegment:
     end: float
     visual: VisualAction  # what to do to the VIDEO
     audio: AudioAction  # what to do to the AUDIO (usually for language)
-    category: Category | None = None
+    # Which families matched here, by value ("nudity", "gore", ...). v1 carried
+    # one `category`; a detection can now answer to several families at once (a
+    # shooting is violence AND blood, and a viewer may filter one and not the
+    # other), and the card text and the mute decision both need the set.
+    families: list = field(default_factory=list)
+    tags: list = field(default_factory=list)
+    # Human-readable names of what was filtered, used for the small caption over
+    # an audio-only mute and as the card text when there is no description.
+    kinds: str = ""
     description: str = ""  # clean summary shown as text overlay for blur/black
+    # True when a VISUAL family asked for mute_scene, i.e. the audio of the
+    # whole segment goes silent (language mutes are separate, narrower windows).
+    scene_mute: bool = False
 
     @property
     def source_duration(self) -> float:
         return self.end - self.start
+
+    @property
+    def card_text(self) -> str:
+        """The text to show in place of the picture.
+
+        A detection the classify pass could not name has no description, and a
+        blank card is worse than no card — the viewer learns nothing about what
+        they missed. Fall back to naming what was filtered.
+        """
+        text = (self.description or "").strip()
+        if text:
+            return text
+        return self.kinds or "Content hidden by your filter settings."
 
 
 # Video container extensions — used to place "_cleaned" BEFORE the real video
@@ -86,81 +111,150 @@ def build_output_path(input_path: Path) -> Path:
     return input_path.with_name(f"{stem}_cleaned{ext}")
 
 
+def _polish_censored_descriptions(scan: ScanResult, prefs: Preferences,
+                                 summarizer, input_path: Path) -> None:
+    """Rewrite the description of every censored visual detection in place.
+
+    Only segments the selection hits are described, and only those that will
+    actually cover the picture (blur/black) — an audio-only mute has no card to
+    fill. Failures are ignored: a shorter description is a cosmetic loss, and it
+    would be indefensible to fail a render because a caption model was offline.
+    """
+    for d in scan.visual_detections:
+        fams, hit = _matched_families(d, prefs)
+        if not fams:
+            continue
+        if all(prefs.visual_for(f) == VisualAction.NONE for f in fams):
+            continue
+        action = "blacked out" if any(prefs.visual_for(f) == VisualAction.BLACK
+                                     for f in fams) else "blurred"
+        try:
+            polished = summarizer.describe_range(input_path, start=d.start, end=d.end,
+                                                original=d.description, action=action)
+        except Exception:  # noqa: BLE001 — caption polish must never fail a render
+            continue
+        if polished and polished.strip():
+            d.description = polished.strip()
+
+
+def _rank(action, order) -> int:
+    """Index of `action` in an ordering, for taking the strongest of two."""
+    try:
+        return order.index(action)
+    except ValueError:
+        return 0
+
+
+_VISUAL_STRENGTH = [VisualAction.NONE, VisualAction.BLUR, VisualAction.BLACK]
+_AUDIO_STRENGTH = [AudioAction.NONE, AudioAction.MUTE_SCENE, AudioAction.MUTE_WORD,
+                   AudioAction.MUTE_PHRASE, AudioAction.REPLACE_WORD,
+                   AudioAction.REPLACE_PHRASE]
+
+
+def _matched_families(d, prefs: Preferences) -> tuple[list, list]:
+    """(families, tags) this detection matches under the user's selection.
+
+    This is the ONLY place the selection is applied to a detection; the schema's
+    `censorable()` does the tag/rendering/dismissal rules and nothing here
+    re-implements them. A detection that matched nothing returns empty lists and
+    the caller leaves it alone entirely.
+    """
+    hit = d.censorable(prefs.selection)
+    fams: list[Family] = []
+    for tid in hit:
+        fam = TAGS[tid].family if tid in TAGS else Family.SAFETY
+        if fam not in fams:
+            fams.append(fam)
+    return fams, hit
+
+
+def _kinds_label(tags: list) -> str:
+    names = [TAGS[t].label for t in tags if t in TAGS]
+    return ", ".join(dict.fromkeys(names))
+
+
 def plan_timeline(scan: ScanResult, prefs: Preferences, duration: float) -> list[TimelineSegment]:
     """Build the full ordered, non-overlapping timeline covering the whole film.
 
-    Visual detections (nudity/gore/violence) drive segment boundaries whenever
-    their category's VISUAL action is not "none" AND the detection's severity
-    level meets the user's threshold for that category (prefs.level_for). So a
-    user who sets `nudity_level = "high"` leaves low/med nudity untouched.
+    A detection is corrected when the viewer's `selection` contains any of its
+    tags (and its rendering is included, and it was not dismissed) — there is no
+    threshold and no severity comparison anywhere in this function. What USED to
+    live here was `effective_level().is_corrected_by(prefs.level_for(category))`,
+    which compared a rank against a paragraph of prose somebody had written
+    about how bad a scene supposedly was.
 
-    Foul-language detections never create a new segment boundary on their own
-    (video is untouched for pure language mutes) — they're applied as an
-    audio-only mute layered on top of whichever segment(s) they fall within,
-    via _language_mute_ranges_within.
+    Each matched detection then takes the STRONGEST action asked for by any
+    family it matched: a segment that is both gore (blur) and violence (black)
+    goes black, because leaving one of the two viewer's asks unfulfilled is the
+    worse failure. Language detections still never create a segment boundary on
+    their own — video is untouched for a pure audio mute — they are applied as
+    mute windows layered inside whichever segment they fall in, via
+    _language_mute_ranges_within.
 
-    Exception: if the user sets foul_language_visual to a non-"none" action,
-    confirmed language detections DO drive visual segments (e.g. blur the video
-    while someone is swearing), over the whole utterance window — still subject
-    to the foul_language_level threshold.
+    Exception: if a language/substance family's VISUAL action is not "none", its
+    confirmed detections do drive visual segments (hide the picture while it is
+    being said), over the whole utterance window.
     """
-    events: list[tuple[float, float, Category, VisualAction, AudioAction, str]] = []
+    events: list[TimelineSegment] = []
 
     # Extra seconds blurred/blacked on each side of a visual segment.
     blur_pad = max(0.0, float(getattr(prefs, "blur_padding", 0.0)))
 
     for d in scan.visual_detections:
-        va = prefs.visual_for(d.category)
-        # A user-removed detection is never rendered, no matter what the
-        # render settings say — it stays on the timeline (dark grey) only.
-        if d.is_removed:
+        fams, hit = _matched_families(d, prefs)
+        if not fams:
+            continue  # nothing the viewer asked for is in this detection
+        visual_acts = [prefs.visual_for(f) for f in fams]
+        audio_acts = [prefs.audio_for(f) for f in fams]
+        va = max(visual_acts, key=lambda a: _rank(a, _VISUAL_STRENGTH))
+        aa = max(audio_acts, key=lambda a: _rank(a, _AUDIO_STRENGTH))
+        if va == VisualAction.NONE:
             continue
-        # Gate on the user's per-detection level override when present, else
-        # the scanned level.
-        if va != VisualAction.NONE and d.effective_level().is_corrected_by(prefs.level_for(d.category)):
-            events.append((
-                max(0.0, d.start - blur_pad),
-                min(duration, d.end + blur_pad), d.category, va,
-                prefs.audio_for(d.category), d.description,
-            ))
+        events.append(TimelineSegment(
+            start=max(0.0, d.start - blur_pad),
+            end=min(duration, d.end + blur_pad),
+            visual=va, audio=aa,
+            families=[f.value for f in fams],
+            tags=list(hit),
+            kinds=_kinds_label(hit),
+            description=d.description or "",
+            scene_mute=aa == AudioAction.MUTE_SCENE,
+        ))
 
-    lang_va = prefs.visual_for(Category.FOUL_LANGUAGE)
-    lang_threshold = prefs.level_for(Category.FOUL_LANGUAGE)
-    if lang_va != VisualAction.NONE:
-        for d in scan.language_detections:
-            # A user-removed detection is never rendered, regardless of settings.
-            if d.is_removed:
-                continue
-            # Gate on the user's per-detection level override when present, else
-            # the scanned level.
-            if not d.llm_confirmed or not d.effective_level().is_corrected_by(lang_threshold):
-                continue
-            events.append((
-                max(0.0, d.utterance_start - blur_pad),
-                min(duration, d.utterance_end + blur_pad), Category.FOUL_LANGUAGE,
-                lang_va, prefs.audio_for(Category.FOUL_LANGUAGE),
-                f'Speaker says "{d.word}".',
-            ))
+    for d in scan.language_detections:
+        fams, hit = _matched_families(d, prefs)
+        if not fams:
+            continue
+        va = max([prefs.visual_for(f) for f in fams],
+                 key=lambda a: _rank(a, _VISUAL_STRENGTH))
+        if va == VisualAction.NONE:
+            continue  # the ordinary case: audio-only, handled as a mute window
+        events.append(TimelineSegment(
+            start=max(0.0, d.utterance_start - blur_pad),
+            end=min(duration, d.utterance_end + blur_pad),
+            visual=va,
+            audio=max([prefs.audio_for(f) for f in fams],
+                      key=lambda a: _rank(a, _AUDIO_STRENGTH)),
+            families=[f.value for f in fams],
+            tags=list(hit),
+            kinds=_kinds_label(hit),
+            description="",
+            scene_mute=False,
+        ))
 
-    events.sort(key=lambda e: e[0])
+    events.sort(key=lambda e: e.start)
 
     segments: list[TimelineSegment] = []
     cursor = 0.0
-    for start, end, cat, va, aa, desc in events:
-        start = max(start, cursor)
-        if start >= end:
+    for ev in events:
+        ev.start = max(ev.start, cursor)
+        if ev.start >= ev.end:
             continue  # fully overlapped by a previous (already-planned) detection
-        if start > cursor:
-            segments.append(TimelineSegment(start=cursor, end=start,
+        if ev.start > cursor:
+            segments.append(TimelineSegment(start=cursor, end=ev.start,
                                             visual=VisualAction.NONE, audio=AudioAction.NONE))
-        segments.append(TimelineSegment(
-            start=start, end=end,
-            visual=va,
-            audio=aa,
-            category=cat,
-            description=desc,
-        ))
-        cursor = end
+        segments.append(ev)
+        cursor = ev.end
 
     if cursor < duration:
         segments.append(TimelineSegment(start=cursor, end=duration,
@@ -186,7 +280,18 @@ def render(
     stop_event=None,
     workers: int | None = None,
     encode_threads: int | None = None,
+    polish_descriptions: bool = False,
 ) -> Path:
+    """Render a cleaned copy of `input_path` according to `scan` + `prefs`.
+
+    `polish_descriptions` (off by default) spends one VLM call per CENSORED
+    segment to replace the scan's short on-screen description with a longer,
+    spoiler-safe summary for the blur/black card. It was a mandatory scan phase
+    in v1 (24 frames per range, ~40% of the confirm pass's cost, paid for every
+    detection on films where the viewer ends up censoring almost nothing). Now
+    it only ever runs over segments the selection actually hits, at the moment
+    you ask for a render, which is the only time a description is read.
+    """
     output_path = output_path or build_output_path(input_path)
     stream_info = probe_streams(input_path)
     video_stream = next(s for s in stream_info["streams"] if s["codec_type"] == "video")
@@ -205,6 +310,9 @@ def render(
     # much larger H.264 output (a known complaint with re-encoding).
     video_encoder = _encoder_for_codec(codec_name)
 
+    if summarizer is not None and polish_descriptions:
+        _polish_censored_descriptions(scan, prefs, summarizer, input_path)
+
     timeline = plan_timeline(scan, prefs, duration)
 
     # Optional live status for the web GUI (see utils/scan_status.py).
@@ -221,12 +329,18 @@ def render(
             phase="render",
             frames_total=len(timeline),
         )
-        # Seed the timeline markers with the detections that will be applied.
+        # Seed the timeline markers with the detections that will be applied —
+        # the ones the selection actually hits, so the render's own bar shows
+        # what is about to be corrected rather than everything that was found.
         for d in scan.visual_detections:
-            status.add_visual_detection(d.category, d.start, d.end, d.description or "", d.confidence)
+            if d.censorable(prefs.selection):
+                status.add_visual_detection(d.start, d.end, d.tags,
+                                            d.description or "", d.confidence,
+                                            d.rendering, d.minors)
         for d in scan.language_detections:
-            if d.llm_confirmed:
-                status.add_language_detection(d.word, d.start, d.end, d.utterance_start, d.utterance_end)
+            if d.censorable(prefs.selection):
+                status.add_language_detection(d.text, d.start, d.end, d.utterance_start,
+                                              d.utterance_end, d.tags)
         status_path = Path(status_path)
 
     def _write_status():
@@ -501,7 +615,7 @@ def _render_track_segments(
                 # visible only DURING the muted windows (not the whole segment).
                 caption = summarizer.caption_for_segment(
                     _absolute_ranges(mute_ranges, seg.start),
-                    _muted_words_within(scan, prefs, seg),
+                    _muted_kinds_within(scan, prefs, seg),
                 )
                 if caption.strip() and _ffmpeg_has_filter("overlay"):
                     overlay_path = tmp_dir / f"caption_{i:04d}.png"
@@ -516,11 +630,11 @@ def _render_track_segments(
             # On-screen descriptions are written by the summary model at SCAN
             # time (see scanner.scan / run_summary_pass) and baked into the
             # scan file — render just uses whatever is already there.
-            if seg.description.strip() and _ffmpeg_has_filter("overlay"):
+            if seg.card_text.strip() and _ffmpeg_has_filter("overlay"):
                 overlay_path = tmp_dir / f"overlay_{i:04d}.png"
-                _make_overlay_png(seg.description, width, height, font_path, overlay_path)
+                _make_overlay_png(seg.card_text, width, height, font_path, overlay_path)
             if seg.visual == VisualAction.BLUR:
-                video_filter = _build_blur_filter(seg.description, font_path,
+                video_filter = _build_blur_filter(seg.card_text, font_path,
                                                   strength=getattr(prefs, "blur_strength", 1.0),
                                                   width=width, height=height)
                 _extract_video_segment(
@@ -538,9 +652,11 @@ def _render_track_segments(
         # MUTE_SCENE, which silences the WHOLE flagged segment (no per-sound
         # recognition). Foul-language windows layer on top of any segment
         # otherwise (word/phrase granularity from whisper timestamps).
-        if (seg.audio.mutes_audio
-                and seg.category is not None
-                and seg.category != Category.FOUL_LANGUAGE):
+        if seg.scene_mute or (seg.audio.mutes_audio and seg.families and not any(
+                f in ("language", "substance") for f in seg.families)):
+            # A visual family asked for the whole scene silenced. Pure-language
+            # segments never take this branch: their muting is the narrower
+            # per-word/per-phrase windows below.
             _silent_audio(output_duration, a_out)
         else:
             if mute_ranges:
@@ -577,22 +693,20 @@ def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg: Time
     padded by `prefs.mute_padding` on both sides so word onset/offset audio doesn't
     leak through (whisper word timestamps can be tight). Clamped to the segment.
     """
-    lang_action = prefs.audio_for(Category.FOUL_LANGUAGE)
-    if not lang_action.mutes_audio:
-        return []
-    if lang_action in (AudioAction.REPLACE_WORD, AudioAction.REPLACE_PHRASE):
-        print("warning: replace_* not implemented yet — muting instead", file=sys.stderr)
-
     pad = max(0.0, float(getattr(prefs, "mute_padding", 0.5)))
-    phrase_scope = lang_action in (AudioAction.MUTE_PHRASE, AudioAction.REPLACE_PHRASE)
-    threshold = prefs.level_for(Category.FOUL_LANGUAGE)
     ranges: list[tuple[float, float]] = []
     for d in scan.language_detections:
-        # A user-removed detection is never rendered, regardless of settings.
-        if d.is_removed:
+        fams, _hit = _matched_families(d, prefs)
+        if not fams:
             continue
-        if not d.llm_confirmed or not d.effective_level().is_corrected_by(threshold):
+        actions = [prefs.audio_for(f) for f in fams]
+        lang_action = max(actions, key=lambda a: _rank(a, _AUDIO_STRENGTH))
+        if not lang_action.mutes_audio:
             continue
+        if lang_action in (AudioAction.REPLACE_WORD, AudioAction.REPLACE_PHRASE):
+            print("warning: replace_* not implemented yet — muting instead",
+                  file=sys.stderr)
+        phrase_scope = lang_action in (AudioAction.MUTE_PHRASE, AudioAction.REPLACE_PHRASE)
         if phrase_scope:
             m_start, m_end = d.utterance_start, d.utterance_end
         else:
@@ -601,29 +715,36 @@ def _language_mute_ranges_within(scan: ScanResult, prefs: Preferences, seg: Time
     return ranges
 
 
-def _muted_words_within(scan: ScanResult, prefs: Preferences, seg: TimelineSegment) -> list[str]:
-    """Confirmed foul words whose mute window falls within this segment.
+def _muted_kinds_within(scan: ScanResult, prefs: Preferences,
+                        seg: TimelineSegment) -> list[str]:
+    """Plain-English names of what was muted in this segment, for the caption.
 
-    Used to seed the muted-audio caption prompt (what was actually said).
-    Mirrors _language_mute_ranges_within's scoping (word vs phrase).
+    Deliberately NOT the words themselves: the caption prompt is told not to
+    quote or repeat what was said, and handing it the profanity invites it to do
+    exactly that. A caption like "a character swears" also survives a model that
+    would rather not echo a slur.
+
+    Scopes the same way `_language_mute_ranges_within` does (word vs phrase), so
+    the caption describes the muted window rather than the whole utterance.
     """
-    lang_action = prefs.audio_for(Category.FOUL_LANGUAGE)
-    if not lang_action.mutes_audio:
-        return []
-    phrase_scope = lang_action in (AudioAction.MUTE_PHRASE, AudioAction.REPLACE_PHRASE)
-    threshold = prefs.level_for(Category.FOUL_LANGUAGE)
-    words: list[str] = []
+    kinds: list[str] = []
     for d in scan.language_detections:
-        # A user-removed detection is never rendered, regardless of settings.
-        if d.is_removed:
+        fams, _hit = _matched_families(d, prefs)
+        if not fams:
             continue
-        if not d.llm_confirmed or not d.effective_level().is_corrected_by(threshold):
+        lang_action = max([prefs.audio_for(f) for f in fams],
+                          key=lambda a: _rank(a, _AUDIO_STRENGTH))
+        if not lang_action.mutes_audio:
             continue
+        phrase_scope = lang_action in (AudioAction.MUTE_PHRASE, AudioAction.REPLACE_PHRASE)
         m_start, m_end = (d.utterance_start, d.utterance_end) if phrase_scope else (d.start, d.end)
-        # Overlap check against the segment (no padding needed for the word list).
         if m_start < seg.end and m_end > seg.start:
-            words.append(d.word or "")
-    return words
+            for tid in d.censorable(prefs.selection):
+                tag = TAGS.get(tid)
+                label = tag.label if tag else None
+                if label and label not in kinds:
+                    kinds.append(label)
+    return kinds
 
 
 def _absolute_ranges(relative_ranges: list[tuple[float, float]], seg_start: float) -> list[tuple[float, float]]:

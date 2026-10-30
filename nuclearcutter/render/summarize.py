@@ -294,14 +294,15 @@ class SegmentSummarizer:
     # ------------------------------------------------------------------
 
     def caption_for_segment(
-        self, mute_ranges_abs: list[tuple[float, float]], words: list[str],
+        self, mute_ranges_abs: list[tuple[float, float]], kinds: list[str],
     ) -> str:
         """Produce a SHORT bottom caption for an audio-only mute segment.
 
-        `mute_ranges_abs` are the muted windows in ABSOLUTE movie time;
-        `words` are the confirmed foul words within the segment. Uses the
-        summary/text model to paraphrase the muted dialogue; falls back to a
-        generic caption when the model isn't reachable or there's no dialogue.
+        `mute_ranges_abs` are the muted windows in ABSOLUTE movie time; `kinds`
+        are the plain-English category names that triggered the mute (never the
+        spoken words — the prompt must not quote them). Uses the summary/text
+        model to paraphrase; falls back to a generic caption when the model isn't
+        reachable or there's no dialogue.
         """
         parts = []
         for r0, r1 in mute_ranges_abs:
@@ -309,15 +310,22 @@ class SegmentSummarizer:
             if slice_text:
                 parts.append(slice_text)
         dialogue = " ".join(parts)
-        words_txt = ", ".join(sorted({w for w in words if w})) or "(none)"
+        kinds_txt = ", ".join([k for k in kinds if k]) or "(unspecified)"
 
-        generic = "Audio muted (foul language)"
+        # Naming what was muted beats a bare "Audio muted": on a mute-only segment
+        # the picture is unchanged, so "Audio muted" alone leaves the viewer with
+        # no idea whether the filter misfired or what it hid. `kinds` arrives as
+        # descriptive tag labels ("Racial slur, Adult sexual talk"), never the
+        # spoken words. "(unspecified)" is the prompt's placeholder, not a caption.
+        named = [k.strip() for k in (kinds or []) if str(k).strip()
+                 and str(k).strip().lower() != "(unspecified)"]
+        generic = ("Audio muted: " + ", ".join(named[:3]).lower()) if named else "Audio muted"
         if not dialogue.strip():
             return generic  # no transcript to paraphrase — nothing for a model to add
 
         try:
             prompt = get_prompt(
-                "muted_caption_prompt", dialogue=dialogue, words=words_txt,
+                "muted_caption_prompt", dialogue=dialogue, kinds=kinds_txt,
             )
             raw, _used_vision = self.config.client.summary_query(prompt, [])
             caption = _clean_summary_text(raw)

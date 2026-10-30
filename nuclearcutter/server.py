@@ -30,17 +30,20 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from nuclearcutter.bench import attach_usage_hook, run_benchmark
-from nuclearcutter.detection.profanity import DEFAULT_FOUL_LANGUAGE_SCALE
-from nuclearcutter.detection.vlm_confirm import (
-    DEFAULT_LEVEL_SCALES, SWEEP_QUALITY_PIXELS, _LEVELS_IN_ORDER, vision_max_pixels_for_scale,
+from nuclearcutter.detection.visual_scan import (
+    SWEEP_QUALITY_PIXELS, vision_max_pixels_for_scale,
 )
 from nuclearcutter.render.renderer import (
     RenderStopped, build_output_path, full_video_suffix, render as render_pass,
 )
 from nuclearcutter.scan.scanner import ScanStopped, scan as scan_pass
 from nuclearcutter.schema import (
-    LEVEL_OVERRIDE_CHOICES, LEVEL_OVERRIDE_REMOVED,
-    AudioAction, Preferences, ScanResult, SeverityLevel, VisualAction,
+    AudioAction, LanguageDetection, Preferences, ScanResult, Selection,
+    VisualAction, VisualDetection, replace_tags,
+)
+from nuclearcutter.taxonomy import (
+    NON_CENSORABLE, PRESET_NAMES, TAXONOMY_VERSION, Family, Minors, Rendering,
+    TAGS, audio_options, default_tag_ids, selection_named, tags_in_family,
 )
 from nuclearcutter.utils.llm_client import LLMClient, LLMConfig
 from nuclearcutter.utils.model_server import (
@@ -50,6 +53,60 @@ from nuclearcutter.utils.model_server import (
 )
 from nuclearcutter.utils.system_stats import SystemStats
 
+def _pick(obj, name, default=None):
+    """Read a field from either a dataclass or a plain dict.
+
+    The scanner's progress callbacks hand over `detection.to_dict()` while the
+    loaded-scan path hands over the dataclass; the GUI must see one shape.
+    """
+    if isinstance(obj, dict):
+        val = obj.get(name, default)
+        return default if val is None else val
+    return getattr(obj, name, default)
+
+
+def _visual_marker(d, index: int | None = None) -> dict:
+    """One visual detection as the GUI receives it.
+
+    Carries the tag ids plus, for each tag, the family and label the GUI needs
+    to draw a coloured mark and a tooltip without holding its own copy of the
+    vocabulary. v1 sent `category` + `level` and the browser hardcoded both.
+    """
+    tags = [str(t) for t in _pick(d, "tags", [])]
+    out = {
+        "start": _pick(d, "start", 0.0), "end": _pick(d, "end", 0.0), "tags": tags,
+        "confidence": _pick(d, "confidence", 0.5),
+        "description": _pick(d, "description", ""),
+        "rendering": _pick(d, "rendering", "live_action"),
+        "minors": _pick(d, "minors", "no"),
+        "uncertain_tags": [str(t) for t in _pick(d, "uncertain_tags", [])],
+        "triggers": [str(t) for t in _pick(d, "triggers", [])],
+        "removed": bool(_pick(d, "removed", False)),
+        "kinds": [TAGS[t].label for t in tags if t in TAGS],
+        "families": sorted({TAGS[t].family.value for t in tags if t in TAGS}),
+    }
+    if index is not None:
+        out["index"] = index
+    return out
+
+
+def _language_marker(d, index: int | None = None) -> dict:
+    tags = [str(t) for t in _pick(d, "tags", [])]
+    out = {
+        "start": _pick(d, "start", 0.0), "end": _pick(d, "end", 0.0), "tags": tags,
+        "text": _pick(d, "text", ""),
+        "utterance_start": _pick(d, "utterance_start", _pick(d, "start", 0.0)),
+        "utterance_end": _pick(d, "utterance_end", _pick(d, "end", 0.0)),
+        "source": _pick(d, "source", "wordlist"),
+        "removed": bool(_pick(d, "removed", False)),
+        "kinds": [TAGS[t].label for t in tags if t in TAGS],
+        "families": sorted({TAGS[t].family.value for t in tags if t in TAGS}),
+    }
+    if index is not None:
+        out["index"] = index
+    return out
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 
@@ -57,24 +114,23 @@ INDEX_HTML = STATIC_DIR / "index.html"
 # The old config.toml is gone; this is the app's own saved state.
 DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "settings.json"
 
-CATEGORY_KEYS = ("nudity", "gore", "violence", "foul_language")
-VISUAL_ACTIONS = ("none", "blur", "black")
-AUDIO_ACTIONS = {
-    "nudity": ("none", "mute_scene"),
-    "gore": ("none", "mute_scene"),
-    "violence": ("none", "mute_scene"),
-    "foul_language": ("none", "mute_word", "mute_phrase", "replace_word", "replace_phrase"),
-}
-LEVELS = ("low", "med", "high", "exhigh")
+# The GUI drives every filter choice through the tag vocabulary in
+# nuclearcutter/taxonomy.py — there is no category or level list left to keep in
+# sync here. /api/taxonomy serves the vocabulary to the browser so the chooser is
+# generated from the same source the prompts and the render use.
+FAMILY_KEYS = tuple(f.value for f in Family)
+VISUAL_ACTIONS = tuple(a.value for a in VisualAction)
+# Per-family audio options come from the vocabulary itself, so the GUI's dropdown
+# can never offer an action the schema would reject (v1 hand-maintained this
+# table next to a nearly identical one in schema.py).
+def _audio_options_for(family_value: str) -> tuple:
+    return tuple(audio_options(Family(family_value)))
 
 # Media extensions offered in the GUI file picker.
 MEDIA_EXTS = {
     ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".webm", ".ts", ".m2ts",
     ".iso", ".mpg", ".mpeg", ".vob", ".flv", ".ogv",
 }
-
-_LEVEL_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
-
 
 def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
@@ -119,7 +175,7 @@ class JobInfo:
     # Per-step progress: transcribe / scan / verify / summary / render. None =
     # in progress (indeterminate), a float 0..1 = determinate.
     steps: dict = field(default_factory=lambda: {
-        "transcribe": 0.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0,
+        "transcribe": 0.0, "language": 0.0, "scan": 0.0, "identify": 0.0, "render": 0.0,
     })
     results: list = field(default_factory=list)  # benchmark rows
     logs: list = field(default_factory=list)  # ring buffer of terminal output
@@ -231,15 +287,19 @@ class AppState:
         self.summary_model = ""
         self.summary_frames = 12  # frames sampled per segment for the summary pass
         self.summary_max_context = 30000  # assumed loaded context when server reports none
-        self.levels = {c: "med" for c in CATEGORY_KEYS}
-        self.visual_actions = {
-            "nudity": "blur", "gore": "blur", "violence": "blur",
-            "foul_language": "none",
+        # What to censor: tag ids (the selection) plus, per family, how to hide
+        # it. Defaults are the taxonomy's, i.e. a first run censors nothing.
+        self.selection: list[str] = list(default_tag_ids())
+        self.family_actions: dict = {
+            f.value: {"visual": f.default_visual, "audio": f.default_audio}
+            for f in Family
         }
-        self.audio_actions = {
-            "nudity": "none", "gore": "none", "violence": "none",
-            "foul_language": "mute_phrase",
-        }
+        self.rendering: list[str] = [r.value for r in Rendering]
+        self.minors: list[str] = [m.value for m in Minors]
+        # Spend a VLM call per censored segment rewriting its blur/black card
+        # text. Off: the scan already wrote a description, and this is polish.
+        self.polish_descriptions: bool = False
+
         # --- Runtime -------------------------------------------------------
         self.scan = JobInfo(kind="scan")
         self.render = JobInfo(kind="render")
@@ -465,9 +525,11 @@ class AppState:
             "summary_model": self.summary_model,
             "summary_frames": self.summary_frames,
             "summary_max_context": self.summary_max_context,
-            "levels": dict(self.levels),
-            "visual_actions": dict(self.visual_actions),
-            "audio_actions": dict(self.audio_actions),
+            "selection": list(self.selection),
+            "family_actions": {k: dict(v) for k, v in self.family_actions.items()},
+            "rendering": list(self.rendering),
+            "minors": list(self.minors),
+            "polish_descriptions": bool(self.polish_descriptions),
         }
 
     def update_settings(self, payload: dict) -> dict:
@@ -532,46 +594,73 @@ class AppState:
             if val <= 0:
                 raise ValueError("summary_max_context must be > 0")
             self.summary_max_context = val
-        if "levels" in payload and isinstance(payload["levels"], dict):
-            for cat, lvl in payload["levels"].items():
-                if cat not in CATEGORY_KEYS:
+        # `selection` is the full list of tag ids to censor — sent whole, not as
+        # a diff, because "nothing selected" is itself a meaningful state a diff
+        # cannot express, and a stale id (renamed in a newer vocabulary) must not
+        # survive in a saved settings file.
+        if "selection" in payload:
+            ids = payload["selection"]
+            if not isinstance(ids, list):
+                raise ValueError("selection must be a list of tag ids")
+            unknown = [str(t) for t in ids if str(t) not in TAGS]
+            if unknown:
+                raise ValueError(f"unknown tag id(s) in selection: {', '.join(unknown[:6])}")
+            self.selection = [str(t) for t in ids]
+        if "family_actions" in payload and isinstance(payload["family_actions"], dict):
+            for fam, acts in payload["family_actions"].items():
+                if fam not in FAMILY_KEYS or not isinstance(acts, dict):
                     continue
-                if str(lvl) not in LEVELS:
-                    raise ValueError(f"level for {cat} must be low/med/high/exhigh, got {lvl!r}")
-                self.levels[cat] = str(lvl)
-        if "visual_actions" in payload and isinstance(payload["visual_actions"], dict):
-            for cat, act in payload["visual_actions"].items():
-                if cat not in CATEGORY_KEYS:
-                    continue
-                if str(act) not in VISUAL_ACTIONS:
-                    raise ValueError(f"visual action for {cat} must be none/blur/black, got {act!r}")
-                self.visual_actions[cat] = str(act)
-        if "audio_actions" in payload and isinstance(payload["audio_actions"], dict):
-            for cat, act in payload["audio_actions"].items():
-                if cat not in CATEGORY_KEYS:
-                    continue
-                if str(act) not in AUDIO_ACTIONS[cat]:
-                    raise ValueError(
-                        f"audio action for {cat} must be one of {AUDIO_ACTIONS[cat]}, got {act!r}"
-                    )
-                self.audio_actions[cat] = str(act)
+                cur = self.family_actions[fam]
+                if "visual" in acts:
+                    act = str(acts["visual"])
+                    if act not in VISUAL_ACTIONS:
+                        raise ValueError(
+                            f"visual action for {fam} must be one of {VISUAL_ACTIONS}, got {act!r}")
+                    cur["visual"] = act
+                if "audio" in acts:
+                    act = str(acts["audio"])
+                    allowed = _audio_options_for(fam)
+                    if act not in allowed:
+                        raise ValueError(
+                            f"audio action for {fam} must be one of {allowed}, got {act!r}")
+                    cur["audio"] = act
+        if "rendering" in payload:
+            vals = payload["rendering"]
+            if not isinstance(vals, list):
+                raise ValueError("rendering must be a list of rendering style ids")
+            known = {r.value for r in Rendering}
+            bad = [str(v) for v in vals if str(v) not in known]
+            if bad:
+                raise ValueError(f"unknown rendering style(s): {', '.join(bad[:4])}")
+            self.rendering = [str(v) for v in vals]
+        if "minors" in payload:
+            vals = payload["minors"]
+            if not isinstance(vals, list):
+                raise ValueError("minors must be a list of values")
+            known = {m.value for m in Minors}
+            bad = [str(v) for v in vals if str(v) not in known]
+            if bad:
+                raise ValueError(f"unknown minors value(s): {', '.join(bad[:4])}")
+            self.minors = [str(v) for v in vals]
+        if "polish_descriptions" in payload:
+            self.polish_descriptions = bool(payload["polish_descriptions"])
         self._save_settings()
         return self.settings_dict()
 
     def prefs(self) -> Preferences:
+        """The viewer's settings as a schema object the render can act on.
+
+        Unspecified families fall back to the taxonomy defaults inside
+        `Preferences`, so a family added later is never silently left with no
+        action. v1 listed twelve `nudity_visual=` style kwargs by hand here, and
+        a `SeverityLevel` for each category, which is what this replaced.
+        """
+        selection = Selection(tags=set(self.selection),
+                              renderings=set(self.rendering))
         return Preferences(
-            nudity_visual=VisualAction(self.visual_actions["nudity"]),
-            nudity_audio=AudioAction(self.audio_actions["nudity"]),
-            nudity_level=SeverityLevel.from_any(self.levels["nudity"]),
-            gore_visual=VisualAction(self.visual_actions["gore"]),
-            gore_audio=AudioAction(self.audio_actions["gore"]),
-            gore_level=SeverityLevel.from_any(self.levels["gore"]),
-            violence_visual=VisualAction(self.visual_actions["violence"]),
-            violence_audio=AudioAction(self.audio_actions["violence"]),
-            violence_level=SeverityLevel.from_any(self.levels["violence"]),
-            foul_language_visual=VisualAction(self.visual_actions["foul_language"]),
-            foul_language_audio=AudioAction(self.audio_actions["foul_language"]),
-            foul_language_level=SeverityLevel.from_any(self.levels["foul_language"]),
+            selection=selection,
+            visual_actions={f: str(a["visual"]) for f, a in self.family_actions.items()},
+            audio_actions={f: str(a["audio"]) for f, a in self.family_actions.items()},
             blur_strength=self.blur_strength,
             mute_padding=self.mute_padding,
             blur_padding=self.blur_padding,
@@ -672,7 +761,7 @@ class AppState:
         job.eta = None
         job.frames_done = 0
         job.frames_total = 0
-        job.steps = {"transcribe": 0.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0}
+        job.steps = {"transcribe": 0.0, "language": 0.0, "scan": 0.0, "identify": 0.0, "render": 0.0}
         job.stop_event = threading.Event()
         job.results = []
         job.logs = []
@@ -819,7 +908,7 @@ class AppState:
             # own via the GUI's per-section clear button).
             self.scan.steps = {
                 "transcribe": 1.0 if has_transcript else 0.0,
-                "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0,
+                "language": 1.0, "scan": 1.0, "identify": 1.0, "render": 0.0,
             }
             pending = "" if has_transcript else " — transcription pending (re-transcribe on next scan)"
             self.scan.message = (
@@ -915,7 +1004,7 @@ class AppState:
                         self._log(job, "[transcribing] starting")
                 elif stage == "visual_sweep" and detail:
                     done, total = detail
-                    job.phase = "visual_sweep"
+                    job.phase = "sweep"
                     job.frames_done, job.frames_total = int(done), int(total)
                     job.position = done * self.sweep_interval
                     job.steps["scan"] = (done / total) if total else 0.0
@@ -926,47 +1015,38 @@ class AppState:
                     if elapsed > 3 and done > 0:
                         remaining = (total - done) / (done / elapsed)
                         job.eta = remaining
-                elif stage == "visual_confirm" and detail:
+                elif stage == "visual_identify" and detail:
                     i, total = detail
-                    job.phase = "visual_confirm"
-                    job.steps["verify"] = (i / total) if total else 0.0
+                    job.phase = "identify"
+                    job.steps["identify"] = (i / total) if total else 0.0
                     if i == 0:
-                        self._log(job, f"[visual_confirm] confirming {total} candidate range(s)")
+                        self._log(job, f"[identify] classifying {total} candidate range(s)")
                 elif stage == "candidate" and isinstance(detail, dict):
-                    # Raw sweep hit — shown as a generic/unconfirmed timeline mark.
+                    # Raw sweep hit — an unconfirmed mark. It carries TRIGGER
+                    # names, not tags: the sweep decided where to look, not what
+                    # is there, and drawing a category here would invent one.
                     self.live_timeline["visual_candidates"].append({
-                        "category": detail.get("category", ""),
+                        "triggers": detail.get("triggers", []),
                         "start": detail.get("start", 0.0),
                         "end": detail.get("end", 0.0),
                         "confidence": detail.get("confidence", 0.5),
-                        "level": detail.get("level", "low"),
                     })
                 elif stage == "visual_detection" and isinstance(detail, dict):
-                    # Confirmed + classified detection — render-settings filterable.
-                    self.live_timeline["visual_detections"].append({
-                        "category": detail.get("category", ""),
-                        "start": detail.get("start", 0.0),
-                        "end": detail.get("end", 0.0),
-                        "level": detail.get("level", "med"),
-                        "confidence": detail.get("confidence", 0.5),
-                        "description": detail.get("description", ""),
-                    })
+                    # Classified detection, tagged from the fixed vocabulary.
+                    self.live_timeline["visual_detections"].append(_visual_marker(detail))
+                elif stage == "language" and detail:
+                    done, total = detail
+                    job.phase = "language"
+                    job.steps["language"] = (done / total) if total else 0.0
                 elif stage == "language_detections" and isinstance(detail, list):
                     self.live_timeline["language_detections"] = detail
+                    job.steps["language"] = 1.0
                 elif stage == "language_detection":
-                    job.phase = "language_detection"
-                    self._log(job, "[language_detection]")
-                elif stage == "summary":
-                    job.phase = "summary"
-                    if isinstance(detail, tuple) and detail:
-                        i, total = detail
-                        job.steps["summary"] = (i / total) if total else 1.0
-                        self._log(job, f"[summary] {i}/{total}")
-                    else:
-                        job.steps["summary"] = 0.0
-                        self._log(job, "[summary] rewriting descriptions with the summary model")
+                    job.phase = "language"
+                    self._log(job, "[language] scanning dialogue")
                 elif stage == "done":
-                    job.steps = {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0, "summary": 1.0}
+                    job.steps = {"transcribe": 1.0, "language": 1.0, "scan": 1.0,
+                                 "identify": 1.0, "render": 0.0}
                     job.position = job.duration
                     self._log(job, "[done]")
 
@@ -983,19 +1063,16 @@ class AppState:
                 partial_result_path=partial_path,
                 scale=self.scale,
                 stop_event=job.stop_event,
-                summary_model=self.summary_model or None,
-                summary_frames=self.summary_frames,
-                summary_max_context=self.summary_max_context,
                 client_factory=_client_factory,
             )
 
             # The scan's summary pass enriched the descriptions — keep the GUI's
             # live timeline in sync so the mark tooltips show the new text.
             self.live_timeline["visual_detections"] = [
-                {"category": d.category.value, "start": d.start, "end": d.end,
-                 "level": d.level.value, "confidence": d.confidence,
-                 "description": d.description}
-                for d in result.visual_detections
+                _visual_marker(d, index=i) for i, d in enumerate(result.visual_detections)
+            ]
+            self.live_timeline["language_detections"] = [
+                _language_marker(d, index=i) for i, d in enumerate(result.language_detections)
             ]
 
             from nuclearcutter.cli import _save_result_with_fallback
@@ -1006,7 +1083,8 @@ class AppState:
             job.duration = result.identity.duration_seconds
             job.position = job.duration
             job.progress = 1.0
-            job.steps = {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "render": 0.0, "summary": 1.0}
+            job.steps = {"transcribe": 1.0, "language": 1.0, "scan": 1.0, "identify": 1.0,
+                         "render": 0.0}
             job.phase = "done"
             job.status = "done"
             job.message = (f"Scan complete: {len(result.visual_detections)} visual, "
@@ -1127,38 +1205,57 @@ class AppState:
             return auto
         raise HTTPException(400, "no scan file found — scan the movie first, or set a scan file path")
 
-    def set_detection_override(self, dtype: str, index: int, level: Optional[str]) -> dict:
-        """Set (or clear) a per-detection level override from the timeline popup.
+    def set_detection_edits(self, dtype: str, index: int, tags=None,
+                            removed=None) -> dict:
+        """Edit one detection from the timeline popup, then persist the scan file.
 
-        `dtype` is "visual" or "language"; `index` is the 0-based position in the
-        corresponding detection list; `level` is one of the LEVEL_OVERRIDE_CHOICES
-        ("low"/"med"/"high"/"exhigh"/"removed") or None to clear. The override is
-        stored ON the detection (a plain string sentinel, not a SeverityLevel), so
-        the standardized severity scale and shared-scan invariants stay intact.
+        `tags`, when sent, REPLACES the detection's tag list — the popup shows
+        every tag on the detection with its family's action beside it, and
+        unticking one means "this scene does not contain that", which is exactly
+        what a viewer looking at the frame can judge.
 
-        It is written to the scan file (the same file the render reads), so a
-        "removed" detection is skipped on the next render no matter the settings,
-        and a level override re-gates that detection against the user's threshold.
+        `removed=True` ("don't censor this scene") hides it from the render while
+        keeping it on the timeline as a fact the viewer decided to allow. It
+        travels in the shared scan file. It does NOT override the child floor: a
+        detection carrying an enforced tag still censores that tag, and
+        `censorable()` is where that is decided, so nothing here has to remember.
+
+        There is no level override any more because there is no level. v1 stored
+        `level_override="removed"`, a string that meant "not removed, but
+        censored anyway", and a threshold comparison decided the rest.
         """
         if self.scan_result is None:
             raise HTTPException(400, "no scan loaded — load/scan a movie first")
         if dtype not in ("visual", "language"):
             raise HTTPException(400, f"detection type must be 'visual' or 'language', got {dtype!r}")
-        if level is not None and level not in LEVEL_OVERRIDE_CHOICES:
-            raise HTTPException(
-                400,
-                f"level override must be one of {list(LEVEL_OVERRIDE_CHOICES)} or null, got {level!r}",
-            )
-        detections = (
-            self.scan_result.visual_detections
-            if dtype == "visual"
-            else self.scan_result.language_detections
-        )
+        detections = (self.scan_result.visual_detections if dtype == "visual"
+                      else self.scan_result.language_detections)
         if not 0 <= index < len(detections):
             raise HTTPException(404, f"no {dtype} detection at index {index}")
         det = detections[index]
-        det.level_override = level
-        # Persist to the scan file the render will read.
+
+        if tags is not None:
+            if not isinstance(tags, list):
+                raise HTTPException(400, "tags must be a list of tag ids")
+            clean: list[str] = []
+            for t in tags:
+                tid = str(t)
+                if tid not in TAGS:
+                    raise HTTPException(400, f"unknown tag id: {tid}")
+                if tid not in clean:
+                    clean.append(tid)
+            if not clean:
+                raise HTTPException(400,
+                                    "a detection must keep at least one tag — to stop it "
+                                    "being censored, remove it instead of emptying its tags")
+            # replace_tags(), not `det.tags =`: it carries the child-protection
+            # floor across the rewrite, so unticking the exposure tags cannot be
+            # used to walk under a rule that is not the viewer's to make.
+            replace_tags(det, clean)
+
+        if removed is not None:
+            det.removed = bool(removed)
+
         path = Path(self.scan_result_path) if self.scan_result_path else None
         if path is not None and path.exists():
             try:
@@ -1166,10 +1263,11 @@ class AppState:
             except OSError as exc:
                 raise HTTPException(500, f"could not save scan file: {exc}") from exc
         return {
-            "ok": True,
-            "type": dtype,
-            "index": index,
-            "level": det.level_override,
+            "ok": True, "type": dtype, "index": index,
+            "tags": list(det.tags), "removed": bool(det.removed),
+            # Still-censoring-anyway is visible to the GUI so the popup can say
+            # WHY the scene is hidden even though it was removed.
+            "still_censored": bool(det.censorable(self.prefs().selection)),
             "saved": bool(path is not None and path.exists()),
         }
 
@@ -1235,6 +1333,7 @@ class AppState:
             # its own warnings; returns None (and degrades gracefully) on any
             # failure so the render never blocks on the LLM.
             summarizer = self._build_summarizer(job, video)
+            polish = bool(self.polish_descriptions)
 
             def _progress(stage, detail):
                 if stage == "render" and detail:
@@ -1268,6 +1367,7 @@ class AppState:
                 progress_callback=_progress,
                 stop_event=job.stop_event,
                 summarizer=summarizer,
+                polish_descriptions=polish,
             )
             job.status = "done"
             job.phase = "done"
@@ -1344,14 +1444,16 @@ class AppState:
                 scan_result = None
 
             job.phase = "benchmarking"
-            job.message = "Extracting 12 frames and running sweep + confirm prompts..."
-            self._log(job, "[benchmark] extracting 12 frames and running sweep + confirm prompts")
+            job.message = "Sampling frames and running the sweep + identify prompts..."
+            self._log(job, "[benchmark] sampling frames and running sweep + identify prompts")
             result = run_benchmark(
                 video, client, scan=scan_result, scale=self.scale,
                 sweep_resolution=self.sweep_resolution,
                 stop_event=job.stop_event,
             )
-            job.results = [result["summary"], result["batches"], result["confirms"]]
+            # [summary, sweep batches, identify rows] in this order — the GUI
+            # destructures the same triple (see renderBenchResults).
+            job.results = [result["summary"], result["batches"], result["identifies"]]
             if job.stop_event is not None and job.stop_event.is_set():
                 job.status = "stopped"
                 job.phase = "stopped"
@@ -1362,9 +1464,14 @@ class AppState:
                 job.status = "done"
                 job.phase = "done"
                 s = result["summary"]
-                self._log(job, 
+                # Recall is the number that decides whether a model is usable here:
+                # a sweep can be 100% "flagged/clean" right and still name none of
+                # the categories the previous scan found.
+                self._log(job,
                     f"[benchmark] done: {s['frames']} frames, accuracy {s['accuracy']}, "
-                    f"mean sweep {s['mean_sweep_s']}s"
+                    f"mean sweep {s['mean_sweep_s']}s, "
+                    f"tag recall {s.get('mean_tag_recall')} "
+                    f"over {s['identify_count']} range(s)"
                 )
                 job.message = (
                     f"Benchmark done: {s['frames']} frames, "
@@ -1402,16 +1509,11 @@ class AppState:
                 "duration": self.scan_result.identity.duration_seconds,
                 "visual_candidates": [],
                 "visual_detections": [
-                    {"index": i, "category": d.category.value, "start": d.start, "end": d.end,
-                     "level": d.level.value, "confidence": d.confidence,
-                     "description": d.description, "level_override": d.level_override}
+                    _visual_marker(d, index=i)
                     for i, d in enumerate(self.scan_result.visual_detections)
                 ],
                 "language_detections": [
-                    {"index": i, "category": "foul_language", "start": d.start, "end": d.end,
-                     "utterance_start": d.utterance_start, "utterance_end": d.utterance_end,
-                     "word": d.word, "level": d.level.value, "llm_confirmed": d.llm_confirmed,
-                     "level_override": d.level_override}
+                    _language_marker(d, index=i)
                     for i, d in enumerate(self.scan_result.language_detections)
                 ],
             }
@@ -1495,10 +1597,14 @@ class ClearScanBody(BaseModel):
     section: str = "scan_verify"  # "transcribe" | "scan_verify"
 
 
-class OverrideBody(BaseModel):
+class DetectionEditBody(BaseModel):
     type: str  # "visual" | "language"
     index: int  # 0-based position in the detection list
-    level: Optional[str] = None  # "low"|"med"|"high"|"exhigh"|"removed", or None to clear
+    # Full replacement tag list for this one detection (corrections to what the
+    # model SAW), or None to leave the tags alone.
+    tags: Optional[list[str]] = None
+    # True = stop censoring this detection while keeping it on the timeline.
+    removed: Optional[bool] = None
 
 
 def create_app(state: AppState | None = None) -> FastAPI:
@@ -1633,19 +1739,22 @@ def create_app(state: AppState | None = None) -> FastAPI:
         section = (body.section if body is not None else "scan_verify").strip().lower()
         if section == "transcribe":
             return st.clear_transcription_progress()
-        if section in ("scan", "verify", "scan_verify"):
+        # The scan is now sweep -> identify (and the language pass runs before
+        # them, over the same transcript). All of it is stored in the one scan
+        # file, so every post-transcript name clears the same thing.
+        if section in ("scan", "sweep", "verify", "identify", "language", "scan_verify"):
             return st.clear_scan_progress()
         raise HTTPException(400, f"unknown clear section: {section!r}")
 
-    @app.post("/api/detection/override")
-    def api_detection_override(body: OverrideBody):
-        """Set or clear a per-detection level override from the timeline popup.
+    @app.post("/api/detection/edit")
+    def api_detection_edit(body: DetectionEditBody):
+        """Correct or dismiss one detection from the timeline popup.
 
-        The override is stored on the detection and written to the scan file the
-        render reads, so a "removed" detection is skipped on the next render no
-        matter the settings, and a level override re-gates that detection.
+        Stored on the detection and written to the scan file the render reads, so
+        the edit survives a reload and travels with a shared scan file.
         """
-        return st.set_detection_override(body.type, body.index, body.level)
+        return st.set_detection_edits(body.type, body.index, tags=body.tags,
+                                      removed=body.removed)
 
     @app.post("/api/render/start")
     def api_render_start():
@@ -1663,15 +1772,57 @@ def create_app(state: AppState | None = None) -> FastAPI:
     def api_benchmark_stop():
         return {"job": st.stop_benchmark().to_dict()}
 
-    @app.get("/api/definitions")
-    def api_definitions():
-        """The per-category severity level definitions, shown as hover tooltips
-        in the render settings. Same source the scanner's prompts are built from."""
-        out = {}
-        for cat, levels in DEFAULT_LEVEL_SCALES.items():
-            out[cat.value] = {lv.value: levels[lv] for lv in _LEVELS_IN_ORDER}
-        out["foul_language"] = DEFAULT_FOUL_LANGUAGE_SCALE
-        return out
+    @app.get("/api/taxonomy")
+    def api_taxonomy():
+        """The whole vocabulary: families, tags, and the actions each family takes.
+
+        The GUI builds its chooser from this instead of hardcoding a list, so
+        adding a category in one Python file is all it takes to make it appear in
+        the browser — and a scan file written by a different build cannot
+        disagree about what an id means.
+        """
+        families = []
+        for fam in Family:
+            families.append({
+                "id": fam.value,
+                "label": fam.label,
+                "blurb": fam.blurb,
+                "visual": [a.value for a in VisualAction] if fam.takes_visual else [],
+                "audio": list(audio_options(fam)),
+                "default_visual": fam.default_visual,
+                "default_audio": fam.default_audio,
+                "tag_count": len(tags_in_family(fam)),
+            })
+        tags = []
+        for tag in TAGS.values():
+            tags.append({
+                "id": tag.id, "family": tag.family.value, "label": tag.label,
+                "hint": tag.hint, "gender": tag.gender,
+                # A tag with `audio` can be heard (muted); one with `visual` can
+                # be seen. Some do both — "gore.open_wound_moderate" is a scream
+                # as often as a wound — and the GUI only offers both controls then.
+                "audio": tag.audio, "visual": tag.visual,
+                "always_censor": tag.always_censor,
+            })
+        return {
+            "taxonomy_version": TAXONOMY_VERSION,
+            "schema_version": 2,
+            "families": families,
+            "tags": tags,
+            "rendering": [{"id": r.value, "label": r.label} for r in Rendering],
+            "minors": [{"id": m.value, "label": m.label,
+                        "description": m.description} for m in Minors],
+            "default_selection": default_tag_ids(),
+            # What "select nothing" and "select everything" mean, so the GUI's
+            # preset buttons do not each re-implement the family rules.
+            # Presets come from taxonomy.selection_named(), the same function the
+            # CLI's --preset flag uses, so a button here and a flag there cannot
+            # mean different things. It already omits `always_censor` tags, so the
+            # chooser never offers to untick the child floor.
+            "presets": {name: list(selection_named(name).tags)
+                        for name in PRESET_NAMES},
+            "preset_order": list(PRESET_NAMES),
+        }
 
     @app.get("/api/browse")
     def api_browse(path: str = "", exts: str = ""):

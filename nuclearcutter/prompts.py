@@ -23,8 +23,9 @@ PROMPTS_FILE = Path(__file__).parent / "prompts.json"
 REQUIRED_KEYS = (
     "system_prompt",
     "sweep_prompt",
-    "confirm_prompt",
-    "foul_language_context_prompt",
+    "identify_prompt",
+    "language_line_prompt",
+    "dialogue_group_prompt",
     "summary_prompt",
     "muted_caption_prompt",
 )
