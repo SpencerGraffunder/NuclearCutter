@@ -946,6 +946,51 @@ class AppState:
         """The model server must be reachable before a job that needs it starts."""
         require_server_up(self.llm_base_url, api_key=self.api_key)
 
+    def _seed_live_timeline(self, video: Path, job: "JobInfo | None" = None) -> dict:
+        """Rows the live timeline starts a scan with, from a previous run's file.
+
+        Resuming should not start you at zero: a scan interrupted at 80% keeps its
+        candidates so the timeline still shows what was already found.
+
+        But only from a status file of THIS schema. The scanner refuses to resume
+        across a taxonomy change for exactly this reason, and this seed was the leak
+        on the display side: scanning a film with a v1 status file beside it painted
+        ~1000 v1 candidates onto a v2 timeline, each carrying a `category` and a
+        `level` the new UI has no notion of. The film then looked far more flagged
+        than the scan had found, and those rows never clear, because the new scan
+        has no way to address what it did not produce.
+        """
+        empty = {"visual_candidates": [], "visual_detections": [],
+                 "language_detections": []}
+        seed_status = video.with_suffix(".nuclearcutter.status.json")
+        try:
+            if not seed_status.exists():
+                return empty
+            import json as _json
+
+            from nuclearcutter.utils.scan_status import SCHEMA_VERSION as STATUS_SCHEMA
+
+            seed = _json.loads(seed_status.read_text())
+        except (OSError, ValueError) as exc:
+            # An unreadable status file is not a reason to refuse the scan — the
+            # scan rebuilds it. Starting empty is the whole recovery.
+            if job is not None:
+                self._log(job, f"[resume] could not read status file ({exc}); "
+                               "starting the timeline empty")
+            return empty
+
+        if seed.get("SCHEMA") != STATUS_SCHEMA:
+            if job is not None:
+                self._log(job, f"[resume] status file is schema {seed.get('SCHEMA')!r}, "
+                               f"this build is v{STATUS_SCHEMA}; starting the timeline empty")
+            return empty
+
+        return {
+            "visual_candidates": list(seed.get("visual_candidates", [])),
+            "visual_detections": list(seed.get("visual_detections", [])),
+            "language_detections": list(seed.get("language_detections", [])),
+        }
+
     def _run_scan(self) -> None:
         job = self.scan
         video = Path(self.video_path)
@@ -971,21 +1016,7 @@ class AppState:
                 )
                 return c
 
-            # Seed the live timeline from any prior run's status file, so a
-            # resumed scan shows its existing candidates/detections immediately.
-            self.live_timeline = {"visual_candidates": [], "visual_detections": [],
-                                  "language_detections": []}
-            seed_status = video.with_suffix(".nuclearcutter.status.json")
-            try:
-                if seed_status.exists():
-                    import json as _json
-
-                    seed = _json.loads(seed_status.read_text())
-                    self.live_timeline["visual_candidates"] = list(seed.get("visual_candidates", []))
-                    self.live_timeline["visual_detections"] = list(seed.get("visual_detections", []))
-                    self.live_timeline["language_detections"] = list(seed.get("language_detections", []))
-            except (OSError, ValueError):
-                pass
+            self.live_timeline = self._seed_live_timeline(video, job=job)
 
             def _progress(stage, detail):
                 if stage == "transcribing":

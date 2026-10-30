@@ -1205,3 +1205,50 @@ def test_every_scan_phase_that_moves_the_job_also_moves_its_message():
         if "job.phase = " in code and "job.message = " not in code:
             silent.append(stage)
     assert not silent, f"phase(s) update without a message: {silent}"
+
+
+def test_a_stale_status_file_does_not_seed_the_live_timeline(tmp_path):
+    """A scan paints its timeline from the last status file — but only its own kind.
+
+    The seed used to read whatever file was there. Scan a film that has a v1
+    status file next to it and ~1000 v1 candidates appeared on the v2 timeline, each
+    with a `category` and a `level` the new UI does not have: the film looked far
+    more flagged than the scan had found, and the rows never cleared because the
+    new scan cannot address what it did not produce. The scanner already refuses to
+    RESUME across a taxonomy change; displaying across one was the leak.
+    """
+    import json
+
+    video = tmp_path / "Film.mkv"
+    video.write_bytes(b"\0")
+    status = tmp_path / "Film.nuclearcutter.status.json"
+    stale = {
+        "SCHEMA": 1,
+        "visual_candidates": [{"category": "violence", "level": "low",
+                               "start": 340.0, "end": 340.0, "confidence": 0.95}],
+        "visual_detections": [{"category": "nudity", "level": "high",
+                               "start": 90.0, "end": 100.0, "description": "old"}],
+        "language_detections": [{"word": "damn", "start": 12.0, "end": 12.4}],
+    }
+    status.write_text(json.dumps(stale))
+
+    st = AppState()
+    st.video_path = str(video)
+    seeded = st._seed_live_timeline(video)
+    assert seeded["visual_candidates"] == [], "v1 candidates leaked into a v2 timeline"
+    assert seeded["visual_detections"] == [], "v1 detections leaked into a v2 timeline"
+    assert seeded["language_detections"] == []
+
+    # A current-schema file still seeds, or resume loses the progress it exists for.
+    from nuclearcutter.utils.scan_status import SCHEMA_VERSION
+
+    fresh = dict(stale, SCHEMA=SCHEMA_VERSION,
+                 visual_candidates=[{"triggers": ["skin"], "start": 30.0,
+                                     "end": 30.0, "confidence": 0.6}])
+    status.write_text(json.dumps(fresh))
+    seeded = st._seed_live_timeline(video)
+    assert len(seeded["visual_candidates"]) == 1, "a resumable scan started from nothing"
+
+    # Unreadable file: no crash, empty timeline (the scan rebuilds it).
+    status.write_text("{not json")
+    assert st._seed_live_timeline(video)["visual_candidates"] == []
