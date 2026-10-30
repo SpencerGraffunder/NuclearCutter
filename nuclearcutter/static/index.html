@@ -458,12 +458,36 @@ captions shown while audio is muted — never for the scan itself.</span></div>
       <button id="tl-next" class="tl-nav" title="Next detection" disabled>▶</button>
       <span class="hint" id="tl-info"></span>
     </div>
-    <div class="legend">
+    <div class="legend" id="legend">
+      <!-- One swatch per family, kept in step with .tl-mark.<family> in the CSS
+           above (colors are declared twice — CSS can no more read JSON than the
+           Python can read the DOM; the order of `LEGEND_FAMILIES` below is the
+           only thing tying them together, and buildLegend() asserts it covers
+           every family /api/taxonomy reports). A legend naming 4 of 8 families
+           makes the other four marks mystery colors, and the whole point of the
+           timeline is reading a 2-hour film at a glance. -->
       <span><i style="background:var(--red)"></i>nudity</span>
-      <span><i style="background:var(--orange)"></i>gore</span>
+      <span><i style="background:#ff7ab8"></i>intimacy</span>
       <span><i style="background:var(--yellow)"></i>violence</span>
-      <span><i style="background:var(--magenta)"></i>foul language</span>
-      <span><i style="background:#7fbf7f"></i>unconfirmed candidate</span>
+      <span><i style="background:var(--orange)"></i>gore</span>
+      <span><i style="background:#b48cff"></i>self-harm</span>
+      <span><i style="background:var(--magenta)"></i>language</span>
+      <span><i style="background:#8cffd0"></i>substances</span>
+      <span><i style="background:#ff3b3b"></i>unsure</span>
+      <span><i style="background:#7fbf7f"></i>candidate (not yet classified)</span>
+      <span><i style="background:#3a3a3a"></i>dismissed</span>
+      <span id="tl-count" style="color:var(--yellow)"></span>
+    </div>
+      <span><i style="background:var(--red)"></i>nudity</span>
+      <span><i style="background:#ff7ab8"></i>intimacy</span>
+      <span><i style="background:var(--yellow)"></i>violence</span>
+      <span><i style="background:var(--orange)"></i>gore</span>
+      <span><i style="background:#b48cff"></i>self-harm</span>
+      <span><i style="background:var(--magenta)"></i>language</span>
+      <span><i style="background:#8cffd0"></i>substances</span>
+      <span><i style="background:#ff3b3b"></i>unsure</span>
+      <span><i style="background:#7fbf7f"></i>candidate (not yet classified)</span>
+      <span><i style="background:#3a3a3a"></i>dismissed</span>
       <span id="tl-count" style="color:var(--yellow)"></span>
     </div>
 
@@ -569,7 +593,59 @@ async function loadTaxonomy() {
   buildPresets();
   buildQualifiers();
   buildChooser();
+  buildLegend();
   if (state && state.settings) applySelectionToChooser(state.settings);
+}
+
+// Timeline swatch colors, in reading order. CSS cannot read JSON, so the colors
+// genuinely are declared twice — here and in `.tl-mark.<family>` above. What is
+// NOT duplicated is the list of families: buildLegend() gets that from
+// /api/taxonomy and paints any family missing from this table in a loud default,
+// so adding a family in Python yields an oddly-coloured-but-labelled swatch
+// instead of a mark whose color means nothing to anybody.
+const LEGEND_COLORS = {
+  nudity: "var(--red)",
+  intimacy: "#ff7ab8",
+  violence: "var(--yellow)",
+  gore: "var(--orange)",
+  harm: "#b48cff",
+  language: "var(--magenta)",
+  substance: "#8cffd0",
+  safety: "#ff3b3b",
+};
+const LEGEND_ORDER = ["nudity", "intimacy", "violence", "gore", "harm",
+                      "language", "substance", "safety"];
+
+function buildLegend() {
+  const box = $("legend");
+  if (!box || !TAX) return;
+  const count = $("tl-count");
+  box.innerHTML = "";
+  const known = TAX.families.map(f => f.id);
+  LEGEND_ORDER.filter(id => known.includes(id))
+    .concat(known.filter(id => !LEGEND_ORDER.includes(id)))
+    .forEach(id => {
+      const fam = TAX.families.find(f => f.id === id);
+      const s = document.createElement("span");
+      const i = document.createElement("i");
+      i.style.background = LEGEND_COLORS[id] || "#c8c8c8";
+      s.appendChild(i);
+      s.appendChild(document.createTextNode(
+        (fam && fam.label ? fam.label : id).toLowerCase()));
+      if (fam && fam.blurb) s.title = fam.blurb;
+      box.appendChild(s);
+    });
+  // Not families: states a detection can be in that no family color explains.
+  [["#7fbf7f", "candidate (not yet classified)"], ["#3a3a3a", "dismissed"],
+   ["#9a9a9a", "could not name it"]].forEach(([color, text]) => {
+    const s = document.createElement("span");
+    const i = document.createElement("i");
+    i.style.background = color;
+    s.appendChild(i);
+    s.appendChild(document.createTextNode(text));
+    box.appendChild(s);
+  });
+  if (count) box.appendChild(count);   // keep the counter inside the legend row
 }
 
 function buildPresets() {
@@ -582,7 +658,7 @@ function buildPresets() {
     nudity: ["Nudity", "nudity only"],
     sexual: ["Sexual", "nudity and intimacy"],
     language: ["Language", "swearing, slurs, adult talk, smoking and drinking"],
-    graphic: ["Graphic", "violence, gore and self-harm"],
+    graphic: ["Graphic", "violence and blood — not self-harm, tick that separately"],
     everything: ["Everything", "every category that can be chosen"],
   };
   // Order comes from the server (taxonomy.PRESET_NAMES), not from a list here,
@@ -1267,8 +1343,6 @@ function renderTimeline() {
   }
   const dur = tlInfo.duration;
   const marks = [];
-  // Unconfirmed sweep candidates: generic marks, always shown (they have no
-  // category/level yet, so render settings can't filter them).
   // Unconfirmed sweep candidates: the sweep only said "something near here might
   // matter", so they get a neutral mark with no popup — offering a checkbox for a
   // range nothing has classified yet would imply a classification that has not

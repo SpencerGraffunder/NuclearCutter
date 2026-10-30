@@ -1124,3 +1124,48 @@ def test_timeline_marks_carry_labels_the_browser_cannot_compute():
     assert marker["minors"] == Minors.UNCERTAIN.value
     assert marker["triggers"] == ["skin"]
     assert marker["tags"] == ["nudity.shirtless_male"]
+
+
+def test_legend_colours_and_names_every_family():
+    """A timeline mark in a colour the legend does not name is a mystery swatch.
+
+    The colours are necessarily declared twice (CSS cannot read JSON), so what the
+    test pins is the thing that does not have to be duplicated: coverage. Every
+    family the API reports must have BOTH a `.tl-mark.<family>` colour and a place
+    in the legend colour table, and no family may be named in the legend colour
+    table that the API no longer reports (a stale swatch teaches people to
+    distrust the legend).
+    """
+    from nuclearcutter.taxonomy import Family
+
+    page = _page(make_client()[1])
+    table = page[page.index("const LEGEND_COLORS = {"):]
+    table = table[:table.index("};")]
+    for fam in Family:
+        assert f".tl-mark.{fam.value}" in page, f"no timeline colour for {fam.value}"
+        assert f"{fam.value}:" in table, f"{fam.value} missing from LEGEND_COLORS"
+    for stale in ("nudity_candidate", "foul_language", "intimate"):
+        assert f"{stale}:" not in table, f"{stale} is not a family but is in the legend"
+
+
+def test_preset_buttons_follow_the_server_without_naming_families_wrongly():
+    """The button row is built from preset_order, but the tooltips are words a
+    human wrote — and a tooltip that promises more than the preset contains is a
+    small lie with censoring consequences.
+
+    `graphic` specifically must not advertise self-harm: it is the button a viewer
+    reaches for when a film has a battle in it, and inheriting suicide-method
+    detail from it is the worst surprise this product could produce.
+    """
+    page = _page(make_client()[1])
+    _, c = make_client()
+    presets = c.get("/api/taxonomy").json()["presets"]
+
+    assert "preset_order" in page, "the button row stopped following the server's order"
+    for name in presets:
+        assert f"{name}:" in page, f"no GUI label for the {name!r} preset"
+
+    graphic_line = next(ln for ln in page.splitlines() if "graphic:" in ln and "Graphic" in ln)
+    assert "self-harm" in graphic_line.lower(), "graphic tooltip should state the exclusion"
+    assert "not self-harm" in graphic_line.lower(), "graphic tooltip must EXCLUDE self-harm"
+    assert not any(t.startswith("harm.") for t in presets["graphic"])
