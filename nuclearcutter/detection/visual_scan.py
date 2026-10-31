@@ -70,10 +70,11 @@ DEFAULT_SWEEP_INTERVAL = DEFAULT_SWEEP_INTERVAL_SECONDS
 # (the conversation cache cannot carry over across batches because every batch
 # has new pictures) plus ~0.5-1s per image. So MORE frames per call is the
 # speed lever: measured live with never-seen 240p frames, 4/call = 2.8-3.6
-# s/frame, 8/call = 1.5, 16/call = 0.9. 8 doubles throughput with modest
-# localisation dilution; drop back to 4 if localisation gets sloppy on real
-# footage.
-SWEEP_FRAMES_PER_CALL = 8
+# s/frame, 8/call = 1.5, 16/call = 0.9. Recall-checked against a full-film
+# sidecar ground truth (10-min clip, 302 samples): 16/call covers 75/80 (94%)
+# GT detections at 375s vs 8/call 72/80 (90%) at 523s -- faster AND better
+# recall; 4/call only reaches 96% and costs 3.7x.
+SWEEP_FRAMES_PER_CALL = 16
 
 # How many batches' frames one chunked ffmpeg pass extracts. Frames are grabbed
 # in chunks (seek once, decode forward) instead of one seek+decode PER FRAME:
@@ -83,14 +84,15 @@ SWEEP_FRAMES_PER_CALL = 8
 # thread while the VLM chews the current batch.
 SWEEP_CHUNK_BATCHES = 8
 
-# How many sweep VLM calls to keep in flight at once. A sweep call is dominated
-# by its fixed per-request cost (~8s of prompt + vision preprocessing against
-# ~1s of decode for a few JSON tokens), so serial calls leave the server
-# working on one conversation at a time while it has the capacity to read a
-# second prompt beside a running decode. Servers without batch slots simply
-# queue the extra request, which costs nothing. Results are still merged in
-# chronological order; only the execution overlaps. Clamped to 1..4.
-DEFAULT_SWEEP_CONCURRENCY = 2
+# How many sweep VLM calls to keep in flight at once. The idea was to hide the
+# fixed per-request cost (~8s of prompt + vision preprocessing against ~1s of
+# decode) by giving the server a second prompt to read beside a running
+# decode. MEASURED AS A LOSS on servers that queue instead of truly decoding
+# conversations together (llama.cpp-style slot batching): two in flight cost
+# +18-50% wall per call and multiply p90 latency. The knob stays for servers
+# that do batch conversations; the default is serial. Results are merged in
+# chronological order either way. Clamped to 1..4.
+DEFAULT_SWEEP_CONCURRENCY = 1
 
 # Frame scale-down presets selectable in the web GUI. The chosen height also
 # bounds the VLM request's vision_max_pixels so images are never sent larger.

@@ -300,7 +300,7 @@ class AppState:
         self.whisper_model = ""
         self.scale = "480p"
         self.sweep_resolution = "full"  # sweep-pass pixel preset (vlm_confirm.SWEEP_QUALITY_PIXELS)
-        self.sweep_concurrency = 2  # overlapping sweep VLM calls; 1 = serial
+        self.sweep_concurrency = 1  # overlapping sweep VLM calls; >1 only helps servers that batch conversations
         self.sweep_interval = 2.0
         # --- Render settings ----------------------------------------------
         self.output_name = ""  # empty -> <stem>_cleaned
