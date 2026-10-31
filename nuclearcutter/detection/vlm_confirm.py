@@ -87,9 +87,16 @@ MAX_VLM_RETRIES = 3
 DEFAULT_SWEEP_INTERVAL_SECONDS = 2.0
 DEFAULT_SWEEP_INTERVAL = DEFAULT_SWEEP_INTERVAL_SECONDS
 
-# How many sampled frames go into a single batched VLM review call. Kept at 4:
-# this is the batch size that proved reliable and accurate with local VLMs.
-SWEEP_FRAMES_PER_CALL = 4
+# How many sampled frames go into a single batched VLM review call. Kept at 4
+# for a long time because image pixel cost dominated the sweep; with
+# sweep_resolution capping pixels and thinking off, what dominates instead is
+# the per-fresh-conversation fixed cost (~8s per call on the local server —
+# prefix cache cannot carry over, since every batch has new pictures) plus
+# ~0.5-1s per image, so MORE frames per call is the speed lever. Measured live
+# with never-seen 240p frames: 4/call = 2.8-3.6 s/frame, 8/call = 1.5,
+# 16/call = 0.9. 8 doubles throughput with modest localisation dilution; drop
+# back to 4 if flagged-frame localisation gets sloppy on real footage.
+SWEEP_FRAMES_PER_CALL = 8
 
 # How many batches' frames one chunked ffmpeg pass extracts. Frames are
 # grabbed in chunks (one decode pass per SWEEP_CHUNK_BATCHES batches — seek
