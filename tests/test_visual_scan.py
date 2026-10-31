@@ -327,7 +327,7 @@ def test_resume_skips_already_swept_samples(tiny_video):
 
     client2 = FakeClient(lambda p, f: _sweep_reply([]))
     det2 = VisualScanDetector(client2)
-    _, resumed = det2.sweep(tiny_video, sample_interval=0.5,
+    _, resumed = det2.sweep(tiny_video, sample_interval=interval,
                             resume_from=full.frames_total // 2)
     # Progress is reported in ABSOLUTE counts so the GUI bar does not jump back.
     assert resumed.frames_done == full.frames_total
