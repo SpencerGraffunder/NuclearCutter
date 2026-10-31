@@ -64,10 +64,16 @@ from nuclearcutter.utils.llm_client import LLMClient
 DEFAULT_SWEEP_INTERVAL_SECONDS = 2.0
 DEFAULT_SWEEP_INTERVAL = DEFAULT_SWEEP_INTERVAL_SECONDS
 
-# Sampled frames per batched VLM call. 4 is the size that proved reliable with
-# local reasoning VLMs; bigger batches are not cheaper (pixels are conserved)
-# and make the model's per-frame localisation sloppier.
-SWEEP_FRAMES_PER_CALL = 4
+# Sampled frames per batched VLM call. Was 4 when image pixel cost dominated
+# the sweep; with sweep_resolution capping pixels and thinking off, what
+# dominates instead is a fixed ~8s cost per fresh request on the model server
+# (the conversation cache cannot carry over across batches because every batch
+# has new pictures) plus ~0.5-1s per image. So MORE frames per call is the
+# speed lever: measured live with never-seen 240p frames, 4/call = 2.8-3.6
+# s/frame, 8/call = 1.5, 16/call = 0.9. 8 doubles throughput with modest
+# localisation dilution; drop back to 4 if localisation gets sloppy on real
+# footage.
+SWEEP_FRAMES_PER_CALL = 8
 
 # How many batches' frames one chunked ffmpeg pass extracts. Frames are grabbed
 # in chunks (seek once, decode forward) instead of one seek+decode PER FRAME:
