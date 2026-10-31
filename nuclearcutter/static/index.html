@@ -366,8 +366,8 @@
     <div class="row"><label>Scan interval (s)</label>
       <input type="number" id="sweep_interval" value="2" min="0.5" step="0.5"></div>
     <div class="row"><label>Sweep calls in flight</label>
-      <input type="number" id="sweep_concurrency" value="2" min="1" max="4" step="1">
-      <span class="hint" style="width:auto;">How many sweep requests run at the same time. Every call pays the same fixed server overhead, so overlapping two can roughly halve sweep time when the model server decodes several conversations together; servers that cannot simply queue them. 1 = one at a time.</span></div>
+      <input type="number" id="sweep_concurrency" value="1" min="1" max="4" step="1">
+      <span class="hint" style="width:auto;">How many sweep requests run at the same time. Only helps when the model server truly decodes several conversations together; servers that queue them get slower with overlap. 1 = one at a time.</span></div>
 
     <div class="row"><label>Summary model (rewrite descriptions)</label>
       <select id="summary_model">
@@ -920,7 +920,7 @@ function collectSettings() {
     whisper_model: $("whisper_model").value,
     scale: $("scale").value,
     sweep_resolution: $("sweep_resolution").value,
-    sweep_concurrency: Math.min(4, Math.max(1, parseInt($("sweep_concurrency").value, 10) || 2)),
+    sweep_concurrency: Math.min(4, Math.max(1, parseInt($("sweep_concurrency").value, 10) || 1)),
     sweep_interval: parseFloat($("sweep_interval").value) || 2,
     output_name: $("output_name").value,
     scan_path: $("scan_path").value,
@@ -1010,7 +1010,7 @@ function applySettingsToUI(s, skipSave) {
   setSelectValue($("whisper_model"), s.whisper_model);
   $("scale").value = s.scale || "480p";
   $("sweep_resolution").value = s.sweep_resolution || "full";
-  setInputValue("sweep_concurrency", s.sweep_concurrency || 2);
+  setInputValue("sweep_concurrency", s.sweep_concurrency || 1);
   setInputValue("sweep_interval", s.sweep_interval || 2);
   setInputValue("output_name", s.output_name || "");
   setInputValue("scan_path", s.scan_path || "");
