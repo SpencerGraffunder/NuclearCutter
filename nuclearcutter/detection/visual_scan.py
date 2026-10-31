@@ -38,8 +38,8 @@ import logging
 import shutil
 import sys
 import tempfile
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter, OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -82,6 +82,15 @@ SWEEP_FRAMES_PER_CALL = 8
 # pass costs ~0.2-0.3s/frame AND the next chunk is extracted on a background
 # thread while the VLM chews the current batch.
 SWEEP_CHUNK_BATCHES = 8
+
+# How many sweep VLM calls to keep in flight at once. A sweep call is dominated
+# by its fixed per-request cost (~8s of prompt + vision preprocessing against
+# ~1s of decode for a few JSON tokens), so serial calls leave the server
+# working on one conversation at a time while it has the capacity to read a
+# second prompt beside a running decode. Servers without batch slots simply
+# queue the extra request, which costs nothing. Results are still merged in
+# chronological order; only the execution overlaps. Clamped to 1..4.
+DEFAULT_SWEEP_CONCURRENCY = 2
 
 # Frame scale-down presets selectable in the web GUI. The chosen height also
 # bounds the VLM request's vision_max_pixels so images are never sent larger.
@@ -318,7 +327,8 @@ class VisualScanDetector:
 
     def __init__(self, client: LLMClient, scale: str | None = None,
                  sweep_resolution: str | None = None,
-                 identify_scale: str | None = None):
+                 identify_scale: str | None = None,
+                 sweep_concurrency: int | None = None):
         self.client = client
         self.scale_height = scale_height_for(scale)
         self.sweep_max_pixels = SWEEP_QUALITY_PIXELS.get(
@@ -326,6 +336,9 @@ class VisualScanDetector:
         # Classify gets its own resolution (defaults to the run's `scale`) so a
         # fast thumbnail sweep no longer drags classification down with it.
         self.identify_max_pixels = vision_max_pixels_for_scale(identify_scale or scale)
+        if sweep_concurrency is None:
+            sweep_concurrency = DEFAULT_SWEEP_CONCURRENCY
+        self.sweep_concurrency = max(1, min(4, int(sweep_concurrency)))
 
     # -- pass 1: sweep ------------------------------------------------------
     def sweep(self, video_path: Path,
@@ -360,72 +373,116 @@ class VisualScanDetector:
             batch_iter = self._iter_prefetched_batches(
                 video_path, timestamps, max(resume_from, 0), tmp_dir, stop_event)
             try:
-                for i, batch_ts, frame_paths in batch_iter:
-                    if stop_event is not None and stop_event.is_set():
-                        stopped = True
-                        break
+                # Slide up to `sweep_concurrency` VLM calls at a time: a batch
+                # costs ~8s of fixed server work (prompt + vision preprocess)
+                # against ~1s of decode, so serial calls idle the server's
+                # ability to read a second prompt beside a running decode.
+                # Batches are SUBMITTED and CONSUMED in chronological order —
+                # window merging and the flagged callbacks depend on it — only
+                # the execution overlaps. concurrency=1 keeps one worker and
+                # behaves exactly like the old serial loop.
+                _skip = Future()            # completed stand-in for a batch
+                _skip.set_result(None)      # whose frames all failed extraction
+                window: "OrderedDict[int, tuple]" = OrderedDict()
+                seq = 0
+                exhausted = False
+                with ThreadPoolExecutor(max_workers=self.sweep_concurrency,
+                                        thread_name_prefix="sweep_query") as query_pool:
 
-                    if frame_paths:
-                        stats.batches_queried += 1
-                        try:
-                            result = self._query_sweep_batch(frame_paths)
-                        finally:
-                            for p in frame_paths:
-                                p.unlink(missing_ok=True)
+                    def _fill():
+                        nonlocal seq, exhausted
+                        while not exhausted and len(window) < self.sweep_concurrency:
+                            nxt = next(batch_iter, None)
+                            if nxt is None:
+                                exhausted = True
+                                break
+                            idx, bts, fps_ = nxt
+                            if not fps_:
+                                window[seq] = (idx, bts, _skip, False)
+                            else:
+                                stats.batches_queried += 1
+                                window[seq] = (idx, bts,
+                                               query_pool.submit(
+                                                   self._query_and_clean, fps_), True)
+                            seq += 1
 
-                        if result is None:
-                            # NOT verified clean — count it. This is the
-                            # difference between "nothing found" and "couldn't
-                            # look", and the caller decides how loud to be.
-                            stats.batches_failed += 1
-                            logging.warning(
-                                "sweep: batch at %.1f-%.1fs FAILED after %d attempts "
-                                "(%d so far) — these frames are NOT verified clean.",
-                                batch_ts[0], batch_ts[-1], MAX_VLM_RETRIES,
-                                stats.batches_failed)
-                            # A batch we could not read is not evidence of
-                            # cleanliness; hand it to classify anyway. v1 only
-                            # warned, which meant a dead stretch of the server
-                            # quietly produced a clean-looking scan.
-                            windows.append(SweepWindow(
-                                start=batch_ts[0], end=batch_ts[-1],
-                                triggers=["doubt"],
-                                rendering=Rendering.LIVE_ACTION.value,
-                                subjects=_subjects_of(None), confidence=0.0))
-                            continue
+                    while True:
+                        if stop_event is not None and stop_event.is_set():
+                            # Nothing new is submitted; the in-flight queries
+                            # still land (their threads and temp frames must
+                            # finish before tmp_dir goes) and progress stays
+                            # partial, like a stopped serial sweep.
+                            for _, _, fut, ran in window.values():
+                                if ran:
+                                    try:
+                                        fut.result()
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                            stopped = True
+                            break
 
-                        triggers = _clean_triggers(result.get("triggers"))
-                        if triggers:
-                            confidence = _as_float(result.get("confidence"), 0.5)
-                            rendering = _rendering_of(result.get("rendering"))
-                            subjects = _subjects_of(result.get("subjects"))
-                            flagged_ts = _flagged_timestamps(batch_ts,
-                                                             result.get("frames"))
-                            if flagged_ts:
-                                frame_granularity = True
-                                for ts in flagged_ts:
-                                    w = SweepWindow(ts, ts, list(triggers), rendering,
-                                                    subjects, confidence)
+                        _fill()
+                        if not window:
+                            break
+
+                        i, batch_ts, fut, ran = window.popitem(last=False)[1]
+                        if ran:
+                            result = fut.result()
+                            if result is None:
+                                # NOT verified clean — count it. This is the
+                                # difference between "nothing found" and
+                                # "couldn't look", and the caller decides how
+                                # loud to be.
+                                stats.batches_failed += 1
+                                logging.warning(
+                                    "sweep: batch at %.1f-%.1fs FAILED after %d attempts "
+                                    "(%d so far) — these frames are NOT verified clean.",
+                                    batch_ts[0], batch_ts[-1], MAX_VLM_RETRIES,
+                                    stats.batches_failed)
+                                # A batch we could not read is not evidence of
+                                # cleanliness; hand it to classify anyway. v1
+                                # only warned, which meant a dead stretch of
+                                # the server quietly produced a clean-looking
+                                # scan.
+                                windows.append(SweepWindow(
+                                    start=batch_ts[0], end=batch_ts[-1],
+                                    triggers=["doubt"],
+                                    rendering=Rendering.LIVE_ACTION.value,
+                                    subjects=_subjects_of(None), confidence=0.0))
+                                continue
+
+                            triggers = _clean_triggers(result.get("triggers"))
+                            if triggers:
+                                confidence = _as_float(result.get("confidence"), 0.5)
+                                rendering = _rendering_of(result.get("rendering"))
+                                subjects = _subjects_of(result.get("subjects"))
+                                flagged_ts = _flagged_timestamps(
+                                    batch_ts, result.get("frames"))
+                                if flagged_ts:
+                                    frame_granularity = True
+                                    for ts in flagged_ts:
+                                        w = SweepWindow(ts, ts, list(triggers), rendering,
+                                                        subjects, confidence)
+                                        windows.append(w)
+                                        if on_flagged_window:
+                                            on_flagged_window(ts, ts, list(triggers),
+                                                              confidence)
+                                else:
+                                    w = SweepWindow(batch_ts[0], batch_ts[-1],
+                                                    list(triggers), rendering, subjects,
+                                                    confidence)
                                     windows.append(w)
                                     if on_flagged_window:
-                                        on_flagged_window(ts, ts, list(triggers),
-                                                          confidence)
-                            else:
-                                w = SweepWindow(batch_ts[0], batch_ts[-1],
-                                                list(triggers), rendering, subjects,
-                                                confidence)
-                                windows.append(w)
-                                if on_flagged_window:
-                                    on_flagged_window(batch_ts[0], batch_ts[-1],
-                                                      list(triggers), confidence)
+                                        on_flagged_window(batch_ts[0], batch_ts[-1],
+                                                          list(triggers), confidence)
 
-                    done = i + len(batch_ts)
-                    stats.frames_done = done
-                    if on_progress:
-                        on_progress(done, len(timestamps))
-                    if done % 100 == 0 or done >= len(timestamps):
-                        print(f"[sweep] {done} / {len(timestamps)} frames",
-                              file=sys.stderr, flush=True)
+                        done = i + len(batch_ts)
+                        stats.frames_done = done
+                        if on_progress:
+                            on_progress(done, len(timestamps))
+                        if done % 100 == 0 or done >= len(timestamps):
+                            print(f"[sweep] {done} / {len(timestamps)} frames",
+                                  file=sys.stderr, flush=True)
             finally:
                 # Close the generator so its prefetch thread finishes (and any
                 # in-flight ffmpeg exits) before tmp_dir is removed below.
@@ -523,6 +580,16 @@ class VisualScanDetector:
                 if attempt == MAX_VLM_RETRIES:
                     return None
         return None
+
+    def _query_and_clean(self, frame_paths: list[Path]) -> dict | None:
+        """_query_sweep_batch plus temp-frame cleanup — the worker the query
+        window runs. Safe to call from any thread (LLMClient opens its own
+        connection per request)."""
+        try:
+            return self._query_sweep_batch(frame_paths)
+        finally:
+            for p in frame_paths:
+                p.unlink(missing_ok=True)
 
     # -- pass 2: identify ---------------------------------------------------
     def identify(self, video_path: Path, candidate: CandidateRange,
