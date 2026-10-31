@@ -35,7 +35,7 @@ def _fake_result() -> ScanResult:
             VisualDetection(
                 start=10.0,
                 end=20.0,
-                description="test", tags=["gore.blood_moderate"],
+                description="test", tags=["gore.blood"],
                 confidence=0.9,
                 )
         ],
@@ -168,7 +168,7 @@ def test_preset_then_allow_reads_the_way_it_sounds():
 
 def test_grep_selects_by_label_as_well_as_id():
     prefs = _prefs_from_args(_Args(grep=["bikini|swimwear"]))
-    assert "nudity.swimwear_female" in prefs.selection.tags
+    assert "nudity.underwear_swimwear_female" in prefs.selection.tags
 
 
 def test_grep_with_no_match_is_an_error_not_a_silent_nothing():
@@ -188,9 +188,9 @@ def test_unknown_tag_is_an_error_that_points_at_the_list():
 def test_tag_file_supports_comments_and_json(tmp_path):
     plain = tmp_path / "house.txt"
     plain.write_text("# our household\nnudity.shirtless_male\n\n# language\n"
-                     "language.slur_racial\n")
+                     "language.slur\n")
     assert _prefs_from_args(_Args(tag_file=str(plain))).selection.tags == {
-        "nudity.shirtless_male", "language.slur_racial"}
+        "nudity.shirtless_male", "language.slur"}
 
     as_json = tmp_path / "house.json"
     as_json.write_text(json.dumps({"tags": ["gore.blood_heavy"]}))

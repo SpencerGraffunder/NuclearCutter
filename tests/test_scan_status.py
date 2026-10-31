@@ -20,9 +20,9 @@ def test_status_roundtrip(tmp_path):
     st.set_phase("sweep")
     st.set_sweep(50, 100)
     st.add_candidate(10.0, 12.0, ["skin"], 0.9)
-    st.add_visual_detection(30.0, 40.0, ["gore.blood_moderate"], "desc", 0.7)
+    st.add_visual_detection(30.0, 40.0, ["gore.blood"], "desc", 0.7)
     st.add_language_detection("damn", 5.0, 5.2, 4.0, 6.0,
-                              tags=["language.profanity_common"])
+                              tags=["language.profanity"])
     st.write(p)
 
     loaded = ScanStatus.load(p)
@@ -35,8 +35,8 @@ def test_status_roundtrip(tmp_path):
     # classification that has not happened yet.
     assert loaded.visual_candidates == [{"triggers": ["skin"], "start": 10.0,
                                          "end": 12.0, "confidence": 0.9}]
-    assert loaded.visual_detections[0]["tags"] == ["gore.blood_moderate"]
-    assert loaded.language_detections[0]["tags"] == ["language.profanity_common"]
+    assert loaded.visual_detections[0]["tags"] == ["gore.blood"]
+    assert loaded.language_detections[0]["tags"] == ["language.profanity"]
 
 
 def test_status_write_is_valid_json(tmp_path):

@@ -1911,7 +1911,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 "id": tag.id, "family": tag.family.value, "label": tag.label,
                 "hint": tag.hint, "gender": tag.gender,
                 # A tag with `audio` can be heard (muted); one with `visual` can
-                # be seen. Some do both — "gore.open_wound_moderate" is a scream
+                # be seen. Some do both — "gore.wound_bone" is a scream
                 # as often as a wound — and the GUI only offers both controls then.
                 "audio": tag.audio, "visual": tag.visual,
                 "always_censor": tag.always_censor,

@@ -45,7 +45,8 @@ separate, local, revisitable act performed against that record. The full
 vocabulary and the reasoning behind it live in **[TAXONOMY.md](TAXONOMY.md)**;
 this section is the interface summary.
 
-**8 families, 121 tags** (`nuclearcutter/taxonomy.py` is the single source of
+**8 families, 68 tags** (taxonomy v3 merged v2's 121; retired ids still resolve
+through `LEGACY_TAGS`) (`nuclearcutter/taxonomy.py` is the single source of
 truth: prompts, scan files, the render plan, the GUI and the CLI's presets are all
 generated from it):
 
@@ -134,7 +135,7 @@ thumbnails says and what real pixels of one range show.
 
 **Sweep (cheap, whole film).** Frames are sampled across the film and sent in
 small batches. The model is asked one cheap question per batch with a **short list
-of 12 trigger names** (`taxonomy.SWEEP_TRIGGERS`) rather than the 121-tag
+of 12 trigger names** (`taxonomy.SWEEP_TRIGGERS`) rather than the 68-tag
 vocabulary: *which of these, if any, appear in these frames?*
 
 ```
@@ -163,8 +164,9 @@ scene.
 
 **Classify (expensive, per range).** Each merged range is sent at higher resolution
 with the **full vocabulary** and returns tag ids, a `description`, `confidence`,
-a `rendering` qualifier and a `minors` estimate. Family routing is deliberately
-not used: the full 121 tags are always offered, because a nudity range routinely
+a `rendering` qualifier and a `minors` estimate (both chosen on the CLI, not in
+the GUI). Family routing is deliberately
+not used: the full vocabulary is always offered, because a nudity range routinely
 contains violence too and routing would drop it. Unknown ids fold to the family
 residual (§3). `minors` takes the **worst** of sweep and classify, so a sweep that
 spotted a child is never overruled by a pass that was not looking for one.

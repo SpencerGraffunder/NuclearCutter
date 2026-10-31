@@ -239,7 +239,7 @@ class TestRunSummaryPass:
         # this one is neutral on purpose — a scene description is a scene
         # description whether the tag is cleavage or gore.
         return VisualDetection(start=start, end=end,
-                               tags=["nudity.cleavage_female"],
+                               tags=["nudity.breasts_partial_female"],
                                description=desc, confidence=0.9)
 
     def test_enriches_descriptions_in_place(self, tmp_path):

@@ -448,10 +448,10 @@ def test_identify_query_failure_is_reported_as_not_classified(tiny_video,
 
 def test_identify_keeps_real_tags_alongside_an_invented_one(tiny_video,
                                                             no_ffmpeg_needed):
-    client = FakeClient([_identify_reply(["gore.wound_open", "gore.guts_yummy"])])
+    client = FakeClient([_identify_reply(["gore.wound_bone", "gore.guts_yummy"])])
     det = VisualScanDetector(client)
     out, _ok = det.identify(tiny_video, _candidate())
-    assert "gore.wound_open" in out.tags
+    assert "gore.wound_bone" in out.tags
     assert "gore.unclear" in out.tags
 
 
@@ -463,13 +463,13 @@ def test_identify_enforces_the_child_protection_floor(tiny_video, no_ffmpeg_need
 
 
 def test_identify_records_uncertain_tags_only_when_real(tiny_video, no_ffmpeg_needed):
-    client = FakeClient([_identify_reply(["violence.fight_armed"],
-                                         uncertain_tags=["violence.fight_armed",
+    client = FakeClient([_identify_reply(["violence.fight"],
+                                         uncertain_tags=["violence.fight",
                                                          "gore.blood_heavy"])])
     det = VisualScanDetector(client)
     out, _ok = det.identify(tiny_video, _candidate())
     # 'uncertain' about a tag you did not assert is meaningless, so it is dropped.
-    assert out.uncertain_tags == ["violence.fight_armed"]
+    assert out.uncertain_tags == ["violence.fight"]
 
 
 def test_identify_uses_more_frames_for_longer_ranges(tiny_video, no_ffmpeg_needed):

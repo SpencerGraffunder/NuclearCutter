@@ -25,7 +25,7 @@ JSON shape (schema v2 — tag taxonomy):
       "visual_detections":  [ {"tags":["nudity.shirtless_male"],"start":..,"end":..,
                                 "description":..,"confidence":..,"rendering":"live_action",
                                 "minors":"no"}, ... ],
-      "language_detections":[ {"tags":["language.profanity_common"],"text":"..","start":..,
+      "language_detections":[ {"tags":["language.profanity"],"text":"..","start":..,
                                 "end":..,"utterance_start":..,"utterance_end":..}, ... ]
     }
 

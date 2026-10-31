@@ -13,7 +13,7 @@ from nuclearcutter.schema import (
 from nuclearcutter.server import (
     AppState, JobInfo, _LogCapture, _scan_steps, create_app,
 )
-from nuclearcutter.taxonomy import Minors
+from nuclearcutter.taxonomy import Minors, TAXONOMY_VERSION, TAGS
 
 
 def make_client(state=None):
@@ -202,7 +202,7 @@ def _write_full_scan(tmp_path):
         language_detections=[
             LanguageDetection(start=5.0, end=5.5, utterance_start=4.0,
                               utterance_end=6.0, text="damn",
-                              tags=["language.profanity_common"]),
+                              tags=["language.profanity"]),
         ],
     )
     scan.save(tmp_path / "M.nuclearcutter.json")
@@ -413,7 +413,7 @@ def test_taxonomy_endpoint_is_the_single_source_of_the_chooser():
     r = c.get("/api/taxonomy")
     assert r.status_code == 200
     d = r.json()
-    assert d["taxonomy_version"] == 2
+    assert d["taxonomy_version"] == TAXONOMY_VERSION
     assert d["schema_version"] == 2
 
     fam_ids = [f["id"] for f in d["families"]]
@@ -434,7 +434,12 @@ def test_taxonomy_endpoint_is_the_single_source_of_the_chooser():
         "a picture has no words to mute one at a time"
 
     tags = d["tags"]
-    assert len(tags) > 80, "the chooser is useless if the vocabulary is truncated"
+    # "More than N tags" was the old anti-truncation guard, and the merge to 68 tags
+    # broke it while proving it was the wrong assertion: a fixed floor says nothing
+    # about whether the endpoint told the whole story. Assert equality with the live
+    # vocabulary instead — a dropped or capped tag now fails immediately, at any size.
+    assert {t["id"] for t in tags} == set(TAGS.keys()), \
+        "the endpoint is not serving the whole vocabulary"
     by_family = {}
     for t in tags:
         by_family.setdefault(t["family"], []).append(t)
@@ -559,7 +564,7 @@ def test_timeline_dict_during_scan_uses_live_data():
         {"tags": ["nudity.shirtless_male"], "start": 10.0, "end": 12.0,
          "confidence": 0.9})
     st.live_timeline["language_detections"].append(
-        {"tags": ["language.profanity_common"], "text": "damn", "start": 5.0,
+        {"tags": ["language.profanity"], "text": "damn", "start": 5.0,
          "end": 5.5, "utterance_start": 4.0, "utterance_end": 6.0,
          "llm_confirmed": True})
     tl = st.timeline_dict()
@@ -612,7 +617,7 @@ def test_loaded_scan_is_auto_loaded_for_saved_movie(tmp_path):
         language_detections=[
             LanguageDetection(start=5.0, end=5.5, utterance_start=4.0,
                               utterance_end=6.0, text="damn",
-                              tags=["language.profanity_common"]),
+                              tags=["language.profanity"]),
         ],
     )
     scan.save(tmp_path / "M.nuclearcutter.json")
@@ -1030,14 +1035,61 @@ def test_page_renders_marks_by_family_class_the_server_sends():
         assert f".tl-mark.{fam.value}" in page, f"no mark colour for {fam.value}"
 
 
-def test_page_search_matches_tag_hints_not_only_labels():
-    """Searching 'surgery' has to find the wound tags, whose hints mention it and
-    whose labels do not. Otherwise the search box is a label filter and people
-    conclude a category does not exist."""
-    page = _page(make_client()[1])
-    assert "tag-search" in page
-    assert "hidden-by-search" in page
-    assert "tag-hint" in page
+def _code(page: str) -> str:
+    """The page with its comments stripped.
+
+    The removals below are documented *in* the HTML with comments that name what was
+    removed and why, so "is the word X still on the page" is not a usable test —
+    assert against the code, and let the prose say whatever it needs to.
+    """
+    import re
+    out = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    out = re.sub(r"/\*.*?\*/", "", out, flags=re.S)
+    # Line comments, but not the "//" in a URL — hence the negative lookbehind.
+    return re.sub(r"(?<!:)//[^\n]*", "", out)
+
+
+def test_chooser_has_no_search_box_but_still_hints_on_hover():
+    """The search box was removed on request (2026-10-30), with the preset row, the
+    "Picture style" qualifiers and the "Include people" checkboxes.
+
+    The reason those four went: the panel is a list of categories you tick, and each
+    of them was a different way to change what the list means without touching a
+    tick — one preset tap rewrote every neighbouring checkbox, so the panel stopped
+    being a readable record of a decision. The hover hint is what replaced the search
+    box's job ("what exactly is this?"), so it stays, and it stays asserted.
+    """
+    page = _code(_page(make_client()[1]))
+    assert "tag-search" not in page, "the search box came back"
+    assert "hidden-by-search" not in page, "dead filter CSS for a removed control"
+    assert "filterChooser" not in page, "the search handler is still wired up"
+    assert "title" in page and "hint" in page, "the chooser lost its hover definitions"
+    # Removals must not silently become "everything is gone": the chips are still
+    # built from the API, which is the whole point of /api/taxonomy.
+    assert "buildChooser" in page
+    assert "TAX.tags" in page, "the chooser no longer builds itself from the vocabulary"
+
+
+def test_removed_gui_controls_still_reach_the_server_with_safe_defaults():
+    """Losing the checkboxes must not change what the server is told.
+
+    `rendering` and `minors` are read by the render plan as filters over detections:
+    an EMPTY rendering list makes rendering_allowed() false for every detection, so a
+    page that kept reading its own deleted checkboxes would have shipped "nothing is
+    censored" behind a panel showing every box ticked. The page therefore carries the
+    server's own values through, and this pins the server half of that contract.
+    """
+    from nuclearcutter.taxonomy import Rendering, Selection, rendering_allowed
+
+    _, c = make_client()
+    tax = c.get("/api/taxonomy").json()
+    assert tax["rendering"] and tax["minors"], "API must keep offering what the GUI dropped"
+
+    all_renderings = Selection(renderings={r.value for r in Rendering})
+    assert rendering_allowed("live_action", all_renderings)
+    assert not rendering_allowed("live_action", Selection(renderings=set())), (
+        "an empty rendering list must exclude, which is exactly why the GUI sends "
+        "the full set instead of reading removed checkboxes")
 
 
 def test_detection_edit_endpoint_rejects_an_out_of_range_index():
@@ -1076,19 +1128,19 @@ def test_detection_edit_changes_tags_and_the_dismissed_flag():
     #    different edit from a dismissal and both must be possible independently.
     r = _client.post("/api/detection/edit",
                      json={"type": "visual", "index": 0,
-                           "tags": ["gore.blood_moderate", "violence.beating_prolonged"]})
+                           "tags": ["gore.blood", "violence.beating_abuse"]})
     assert r.status_code == 200
     det = st.scan_result.visual_detections[0]
-    assert det.tags == ["gore.blood_moderate", "violence.beating_prolonged"]
+    assert det.tags == ["gore.blood", "violence.beating_abuse"]
     assert det.removed is True  # the dismissal was not silently reset
 
     # 3) editing the tags of a detection that involves a minor re-applies the
     #    child floor: removing the exposure tags by hand must not walk around it.
     st.scan_result.visual_detections[0].minors = Minors.YES.value
-    st.scan_result.visual_detections[0].tags = ["nudity.breasts_full_female"]
+    st.scan_result.visual_detections[0].tags = ["nudity.breasts_bare_female"]
     st.scan_result.visual_detections[0].removed = True
     r = _client.post("/api/detection/edit",
-                     json={"type": "visual", "index": 0, "tags": ["violence.argument"]})
+                     json={"type": "visual", "index": 0, "tags": ["violence.threat_or_weapon"]})
     assert r.status_code == 200, r.text
     protected = st.scan_result.visual_detections[0]
     assert "safety.exposure_with_minor" in protected.tags, \
@@ -1145,27 +1197,30 @@ def test_legend_colours_and_names_every_family():
         assert f"{stale}:" not in table, f"{stale} is not a family but is in the legend"
 
 
-def test_preset_buttons_follow_the_server_without_naming_families_wrongly():
-    """The button row is built from preset_order, but the tooltips are words a
-    human wrote — and a tooltip that promises more than the preset contains is a
-    small lie with censoring consequences.
+def test_presets_are_gone_from_the_page_but_still_mean_what_they_said():
+    """The button row left the GUI (2026-10-30): one tap rewrote every tick beside it.
 
-    `graphic` specifically must not advertise self-harm: it is the button a viewer
-    reaches for when a film has a battle in it, and inheriting suicide-method
-    detail from it is the worst surprise this product could produce.
+    The presets themselves stay in the vocabulary and the CLI (`--preset graphic`), so
+    the guarantee that mattered — a preset must not quietly include what its label
+    excludes — still has to hold, and it is now asserted where the presets live.
+    `graphic` is the case that earned the check: it is the button a viewer reaches for
+    when a film has a battle in it, and inheriting suicide-method detail from it would
+    be the worst surprise this product could produce.
     """
-    page = _page(make_client()[1])
-    _, c = make_client()
-    presets = c.get("/api/taxonomy").json()["presets"]
+    from nuclearcutter.taxonomy import selection_named
 
-    assert "preset_order" in page, "the button row stopped following the server's order"
-    for name in presets:
-        assert f"{name}:" in page, f"no GUI label for the {name!r} preset"
+    page = _code(_page(make_client()[1]))
+    assert "buildPresets" not in page, "the preset row came back"
+    assert "buildQualifiers" not in page, "the qualifier row came back"
+    assert 'id="presets"' not in page, "the preset row came back"
 
-    graphic_line = next(ln for ln in page.splitlines() if "graphic:" in ln and "Graphic" in ln)
-    assert "self-harm" in graphic_line.lower(), "graphic tooltip should state the exclusion"
-    assert "not self-harm" in graphic_line.lower(), "graphic tooltip must EXCLUDE self-harm"
-    assert not any(t.startswith("harm.") for t in presets["graphic"])
+    graphic = set(selection_named("graphic").tags)
+    assert not any(t.startswith("harm.") for t in graphic), \
+        "graphic must not reach into self-harm"
+    assert any(t.startswith("violence.") for t in graphic)
+    assert any(t.startswith("gore.") for t in graphic)
+    assert set(selection_named("nudity").tags) <= set(selection_named("sexual").tags)
+    assert not selection_named("none").tags
 
 
 def test_every_scan_phase_that_moves_the_job_also_moves_its_message():
@@ -1356,7 +1411,7 @@ def test_a_running_scan_shows_its_own_timeline_not_the_loaded_one(tmp_path):
         "visual_candidates": [{"triggers": ["skin"], "start": 30.0, "end": 30.0,
                                "confidence": 0.6}],
         "visual_detections": [{"start": 40.0, "end": 44.0, "description": "new scan",
-                               "confidence": 0.8, "tags": ["gore.blood_moderate"]}],
+                               "confidence": 0.8, "tags": ["gore.blood"]}],
         "language_detections": [],
     }
     live = st.timeline_dict()

@@ -24,6 +24,7 @@ from nuclearcutter.schema import (
 )
 from nuclearcutter.scan import scanner
 from nuclearcutter.scan.scanner import ScanStopped, scan
+from nuclearcutter.taxonomy import TAXONOMY_VERSION
 from nuclearcutter.utils.llm_client import LLMConfig
 from nuclearcutter.utils.scan_status import ScanStatus
 
@@ -79,7 +80,7 @@ def no_media(monkeypatch):
                         lambda *a, **k: [LanguageDetection(
                             start=10.4, end=10.7, utterance_start=10.0,
                             utterance_end=11.0, text="damn",
-                            tags=["language.profanity_mild"], llm_confirmed=True)])
+                            tags=["language.profanity"], llm_confirmed=True)])
 
     def fake_sweep(self, video_path, sample_interval=2.0, on_flagged_window=None,
                    on_progress=None, resume_from=0, existing_windows=None,
@@ -144,7 +145,7 @@ def test_phases_run_in_the_documented_order(video, tmp_path, no_media):
 
 def test_language_is_tagged_from_the_vocabulary(video, tmp_path, no_media):
     result, _s, _p = _run(video, tmp_path)
-    assert result.language_detections[0].tags == ["language.profanity_mild"]
+    assert result.language_detections[0].tags == ["language.profanity"]
 
 
 def test_result_carries_tags_not_levels(video, tmp_path, no_media):
@@ -161,7 +162,7 @@ def test_status_file_records_every_phase(video, tmp_path, no_media):
     st = ScanStatus.load(tmp_path / "Movie.nuclearcutter.status.json")
     assert st.phase == "done"
     assert st.visual_detections[0]["tags"] == ["nudity.shirtless_male"]
-    assert st.language_detections[0]["tags"] == ["language.profanity_mild"]
+    assert st.language_detections[0]["tags"] == ["language.profanity"]
 
 
 def test_partial_result_is_written_as_it_goes(video, tmp_path, no_media):
@@ -171,7 +172,7 @@ def test_partial_result_is_written_as_it_goes(video, tmp_path, no_media):
     data = json.loads(partial.read_text())
     assert data["schema_version"] == 2
     assert data["visual_detections"][0]["tags"] == ["nudity.shirtless_male"]
-    assert data["generator"]["taxonomy_version"] == 2
+    assert data["generator"]["taxonomy_version"] == TAXONOMY_VERSION
 
 
 def test_dialogue_in_the_range_is_reaches_classify(video, tmp_path, no_media, monkeypatch):
@@ -207,7 +208,7 @@ def test_classify_is_skipped_for_ranges_already_classified(video, tmp_path, no_m
                                     "end": 22.0, "description": "kept",
                                     "confidence": 0.8, "rendering": "live_action",
                                     "minors": "no"})
-    prior.language_detections.append({"tags": ["language.profanity_mild"], "text": "damn",
+    prior.language_detections.append({"tags": ["language.profanity"], "text": "damn",
                                       "start": 1.0, "end": 1.2, "utterance_start": 0.5,
                                       "utterance_end": 2.0})
     prior.write(status_path)
@@ -216,7 +217,7 @@ def test_classify_is_skipped_for_ranges_already_classified(video, tmp_path, no_m
     assert no_media["identify"] == [], "the range was already classified"
     kept = [d for d in result.visual_detections if d.description == "kept"]
     assert kept, "the prior detection must survive the resume"
-    assert result.language_detections[0].tags == ["language.profanity_mild"]
+    assert result.language_detections[0].tags == ["language.profanity"]
 
 
 def test_resume_reconverts_frame_counts_when_the_interval_changed(video, tmp_path,
@@ -384,7 +385,7 @@ def test_generator_records_the_model_and_taxonomy(video, tmp_path, no_media):
     result, _s, _p = _run(video, tmp_path, client=FakeClient(),
                           llm_override=LLMConfig(vlm_model="gemma-test",
                                                  text_model="gemma-test"))
-    assert result.generator["taxonomy_version"] == 2
+    assert result.generator["taxonomy_version"] == TAXONOMY_VERSION
     assert result.generator.get("vlm_model")
 
 

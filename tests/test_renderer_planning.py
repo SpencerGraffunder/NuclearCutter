@@ -30,7 +30,7 @@ def _vis(tags, start=10.0, end=13.0, description="something happens",
                            minors=minors, triggers=["skin"], removed=removed)
 
 
-def _lang(text="damn", tags=("language.profanity_mild",), start=5.0, end=5.4,
+def _lang(text="damn", tags=("language.profanity",), start=5.0, end=5.4,
           utt=(4.0, 7.0), removed=False) -> LanguageDetection:
     return LanguageDetection(start=start, end=end, utterance_start=utt[0],
                              utterance_end=utt[1], text=text, tags=list(tags),
@@ -114,8 +114,8 @@ def test_the_severity_machine_is_unreachable_from_the_package():
 # --------------------------------------------------------------------------
 
 def test_a_detection_matching_two_families_takes_the_strongest_visual_action():
-    det = _vis(["gore.wound_detail", "violence.beating_prolonged"], start=20.0, end=24.0)
-    prefs = _prefs({"gore.wound_detail", "violence.beating_prolonged"},
+    det = _vis(["gore.wound_bone", "violence.beating_abuse"], start=20.0, end=24.0)
+    prefs = _prefs({"gore.wound_bone", "violence.beating_abuse"},
                    visual_actions={"gore": "blur", "violence": "black"})
     hits = _censored(plan_timeline(_scan(visual=[det]), prefs, duration=60.0))
     assert len(hits) == 1
@@ -126,8 +126,8 @@ def test_a_detection_matching_two_families_takes_the_strongest_visual_action():
 def test_a_detection_matching_a_family_set_to_none_still_uses_the_other():
     # Blood that is also violence, where the viewer filters gore but not
     # violence: the scene is still hidden, because gore asked for it.
-    det = _vis(["gore.blood_moderate", "violence.fight_armed"])
-    prefs = _prefs({"gore.blood_moderate"},
+    det = _vis(["gore.blood", "violence.fight"])
+    prefs = _prefs({"gore.blood"},
                    visual_actions={"gore": "blur", "violence": "none"})
     hits = _censored(plan_timeline(_scan(visual=[det]), prefs, duration=60.0))
     assert len(hits) == 1
@@ -135,8 +135,8 @@ def test_a_detection_matching_a_family_set_to_none_still_uses_the_other():
 
 
 def test_scene_mute_comes_from_a_visual_family_asking_for_it():
-    det = _vis(["violence.beating_prolonged"])
-    prefs = _prefs({"violence.beating_prolonged"},
+    det = _vis(["violence.beating_abuse"])
+    prefs = _prefs({"violence.beating_abuse"},
                    visual_actions={"violence": "black"},
                    audio_actions={"violence": "mute_scene"})
     seg = _censored(plan_timeline(_scan(visual=[det]), prefs, duration=60.0))[0]
@@ -145,8 +145,8 @@ def test_scene_mute_comes_from_a_visual_family_asking_for_it():
 
 
 def test_audio_is_left_alone_unless_a_family_asks():
-    det = _vis(["gore.blood_moderate"])
-    prefs = _prefs({"gore.blood_moderate"}, audio_actions={"gore": "none"})
+    det = _vis(["gore.blood"])
+    prefs = _prefs({"gore.blood"}, audio_actions={"gore": "none"})
     seg = _censored(plan_timeline(_scan(visual=[det]), prefs, duration=60.0))[0]
     assert seg.audio is AudioAction.NONE
 
@@ -164,8 +164,8 @@ def test_anime_detection_is_untouched_when_only_live_action_is_included():
 
 def test_stage_rendering_can_be_excluded_from_a_filter():
     # The Hadestown case: a filmed stage show where nothing is actually bare.
-    det = _vis(["nudity.shoulders_back_bare_female"], rendering=Rendering.STAGE.value)
-    prefs = _prefs({"nudity.shoulders_back_bare_female"})
+    det = _vis(["nudity.skin_bare_female"], rendering=Rendering.STAGE.value)
+    prefs = _prefs({"nudity.skin_bare_female"})
     prefs.selection.renderings = {Rendering.LIVE_ACTION.value, Rendering.ANIMATED.value}
     assert _censored(plan_timeline(_scan(visual=[det]), prefs, duration=60.0)) == []
 
@@ -270,13 +270,13 @@ def test_a_detection_at_the_very_end_does_not_run_past_the_film():
 
 def test_language_detection_does_not_create_a_video_segment_by_default():
     scan = _scan(language=[_lang()])
-    timeline = plan_timeline(scan, _prefs({"language.profanity_mild"}), duration=60.0)
+    timeline = plan_timeline(scan, _prefs({"language.profanity"}), duration=60.0)
     assert _censored(timeline) == [], "swearing must not blank the screen"
 
 
 def test_language_can_hide_the_picture_when_asked():
     scan = _scan(language=[_lang()])
-    prefs = _prefs({"language.profanity_mild"}, visual_actions={"language": "blur"})
+    prefs = _prefs({"language.profanity"}, visual_actions={"language": "blur"})
     hits = _censored(plan_timeline(scan, prefs, duration=60.0))
     assert len(hits) == 1
     # The whole sentence, not just the word: hiding the picture while a line is
@@ -289,7 +289,7 @@ def test_mute_windows_are_word_sized_for_mute_word():
     from nuclearcutter.render.renderer import _language_mute_ranges_within
 
     scan = _scan(language=[_lang(start=5.0, end=5.4, utt=(4.0, 8.0))])
-    prefs = _prefs({"language.profanity_mild"}, audio_actions={"language": "mute_word"},
+    prefs = _prefs({"language.profanity"}, audio_actions={"language": "mute_word"},
                    mute_padding=0.0)
     seg = TimelineSegment(start=0.0, end=20.0, visual=VisualAction.NONE,
                           audio=AudioAction.NONE)
@@ -301,7 +301,7 @@ def test_mute_windows_are_sentence_sized_for_mute_phrase():
     from nuclearcutter.render.renderer import _language_mute_ranges_within
 
     scan = _scan(language=[_lang(start=5.0, end=5.4, utt=(4.0, 8.0))])
-    prefs = _prefs({"language.profanity_mild"},
+    prefs = _prefs({"language.profanity"},
                    audio_actions={"language": "mute_phrase"}, mute_padding=0.25)
     seg = TimelineSegment(start=0.0, end=20.0, visual=VisualAction.NONE,
                           audio=AudioAction.NONE)
@@ -313,7 +313,7 @@ def test_mute_windows_are_clamped_to_the_segment():
     from nuclearcutter.render.renderer import _language_mute_ranges_within
 
     scan = _scan(language=[_lang(start=9.0, end=12.0, utt=(8.0, 30.0))])
-    prefs = _prefs({"language.profanity_mild"}, audio_actions={"language": "mute_word"},
+    prefs = _prefs({"language.profanity"}, audio_actions={"language": "mute_word"},
                    mute_padding=0.0)
     seg = TimelineSegment(start=0.0, end=10.0, visual=VisualAction.NONE,
                           audio=AudioAction.NONE)
@@ -324,7 +324,7 @@ def test_mute_nothing_for_a_family_with_audio_none():
     from nuclearcutter.render.renderer import _language_mute_ranges_within
 
     scan = _scan(language=[_lang()])
-    prefs = _prefs({"language.profanity_mild"}, audio_actions={"language": "none"})
+    prefs = _prefs({"language.profanity"}, audio_actions={"language": "none"})
     seg = TimelineSegment(start=0.0, end=30.0, visual=VisualAction.NONE,
                           audio=AudioAction.NONE)
     assert _language_mute_ranges_within(scan, prefs, seg) == []
@@ -334,7 +334,7 @@ def test_a_removed_language_detection_is_not_muted():
     from nuclearcutter.render.renderer import _language_mute_ranges_within
 
     scan = _scan(language=[_lang(removed=True)])
-    prefs = _prefs({"language.profanity_mild"}, audio_actions={"language": "mute_word"})
+    prefs = _prefs({"language.profanity"}, audio_actions={"language": "mute_word"})
     seg = TimelineSegment(start=0.0, end=30.0, visual=VisualAction.NONE,
                           audio=AudioAction.NONE)
     assert _language_mute_ranges_within(scan, prefs, seg) == []
@@ -343,10 +343,10 @@ def test_a_removed_language_detection_is_not_muted():
 def test_two_different_language_tags_mute_independently():
     from nuclearcutter.render.renderer import _language_mute_ranges_within
 
-    scan = _scan(language=[_lang("damn", ["language.profanity_mild"], 5.0, 5.4),
-                           _lang("nword", ["language.slur_racial"], 20.0, 20.6)])
+    scan = _scan(language=[_lang("damn", ["language.profanity"], 5.0, 5.4),
+                           _lang("nword", ["language.slur"], 20.0, 20.6)])
     # Filter slurs only: mild swearing stays audible.
-    prefs = _prefs({"language.slur_racial"}, audio_actions={"language": "mute_word"},
+    prefs = _prefs({"language.slur"}, audio_actions={"language": "mute_word"},
                    mute_padding=0.0)
     seg = TimelineSegment(start=0.0, end=40.0, visual=VisualAction.NONE,
                           audio=AudioAction.NONE)
@@ -413,10 +413,10 @@ def test_polish_reports_position_across_only_the_segments_it_visits():
     from nuclearcutter.render.renderer import _polish_censored_descriptions
 
     censored = [_vis(start=10.0, end=14.0, tags=("nudity.full_nude_female",)),
-                _vis(start=40.0, end=44.0, tags=("gore.blood_moderate",))]
-    untouched = [_vis(start=70.0, end=74.0, tags=("violence.verbal_threat",))]
+                _vis(start=40.0, end=44.0, tags=("gore.blood",))]
+    untouched = [_vis(start=70.0, end=74.0, tags=("violence.threat_or_weapon",))]
     scan = _scan(visual=censored + untouched)
-    prefs = _prefs(selected=("nudity.full_nude_female", "gore.blood_moderate"))
+    prefs = _prefs(selected=("nudity.full_nude_female", "gore.blood"))
 
     seen = []
 
@@ -446,7 +446,7 @@ def test_polish_without_a_callback_or_work_does_not_report_nonsense():
     from nuclearcutter.render.renderer import _polish_censored_descriptions
 
     seen = []
-    clean = _scan(visual=[_vis(tags=("violence.verbal_threat",))])
+    clean = _scan(visual=[_vis(tags=("violence.threat_or_weapon",))])
     prefs = _prefs(selected=("nudity.full_nude_female",))
     _polish_censored_descriptions(clean, prefs, object(), Path("x.mkv"),
                                   progress_callback=lambda s, d: seen.append((s, d)))

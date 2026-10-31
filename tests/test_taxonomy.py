@@ -81,12 +81,26 @@ def test_language_family_is_audio_only():
         assert tag.audio and not tag.visual, tag.id
 
 
-def test_slurs_are_their_own_tags_not_buried_in_profanity():
-    slurs = [t.id for t in tags_in_family(Family.LANGUAGE) if t.id.startswith("language.slur_")]
-    assert len(slurs) >= 5
-    # The old scale filed slurs and "damn" in the same bucket; the new vocabulary
-    # must keep them separable or the redesign has lost its main win.
-    assert "language.profanity_mild" not in slurs
+def test_slurs_are_their_own_tag_not_buried_in_profanity():
+    """A slur must be filterable without also censoring "damn".
+
+    That separation — not the number of slur tags — is the redesign's main win, and it
+    survives the 2026-10-30 merge, which folded the five slur targets (race, religion /
+    ethnicity, LGBTQ, disability, sexists) into one `language.slur`. The merge is a
+    deliberate trade: a viewer deciding "censor slurs" is deciding on the presence of a
+    slur, and the chooser was 5 checkboxes for one decision. If a viewer ever needs
+    "slur against group X but not Y", that is an argument for splitting THIS tag again —
+    not evidence the merge was wrong for everything else.
+    """
+    slurs = [t.id for t in tags_in_family(Family.LANGUAGE)
+             if "slur" in t.id or "group" in t.hint.lower()]
+    assert slurs, "the vocabulary lost its slur tag"
+    assert "language.profanity" not in slurs, "a slur must not require censoring swearing"
+    # The separability that actually matters, asserted directly: selecting slurs does
+    # not reach ordinary swearing.
+    slur_only = Selection(tags={"language.slur"})
+    assert tags_hit(["language.slur"], slur_only) == ["language.slur"]
+    assert tags_hit(["language.profanity"], slur_only) == []
 
 
 # --------------------------------------------------------------------------
@@ -95,8 +109,8 @@ def test_slurs_are_their_own_tags_not_buried_in_profanity():
 
 def test_normalize_keeps_known_ids_and_dedupes():
     out = normalize_tags(["nudity.shirtless_male", "nudity.shirtless_male",
-                          "gore.blood_moderate"])
-    assert out == ["nudity.shirtless_male", "gore.blood_moderate"]
+                          "gore.blood"])
+    assert out == ["nudity.shirtless_male", "gore.blood"]
 
 
 def test_normalize_folds_unknown_id_into_family_residual():
@@ -111,7 +125,7 @@ def test_normalize_folds_unrecognised_family_into_unclassified():
 
 
 def test_normalize_survives_garbage_types():
-    assert normalize_tags([None, 3, {"a": 1}, "gore.blood_moderate"]) == ["gore.blood_moderate"]
+    assert normalize_tags([None, 3, {"a": 1}, "gore.blood"]) == ["gore.blood"]
 
 
 def test_normalize_accepts_case_and_separator_variants():
@@ -135,18 +149,18 @@ def test_harm_family_has_no_residual_so_unknown_becomes_unclassified():
 def test_default_selection_censors_nothing():
     sel = default_selection()
     assert not sel.tags
-    det = _Det(["gore.blood_moderate"])
+    det = _Det(["gore.blood"])
     assert tags_hit(det.tags, sel) == []
 
 
 def test_tags_hit_matches_selected_tag():
-    sel = Selection(tags={"gore.blood_moderate"})
-    assert tags_hit(["gore.blood_moderate", "violence.verbal_threat"], sel) == ["gore.blood_moderate"]
+    sel = Selection(tags={"gore.blood"})
+    assert tags_hit(["gore.blood", "violence.threat_or_weapon"], sel) == ["gore.blood"]
 
 
 def test_tags_hit_always_includes_enforced_tag():
     sel = Selection(tags=set())  # nothing selected at all
-    hit = tags_hit(["nudity.breasts_full_female", "safety.exposure_with_minor"], sel)
+    hit = tags_hit(["nudity.breasts_bare_female", "safety.exposure_with_minor"], sel)
     assert "safety.exposure_with_minor" in hit
 
 
@@ -171,15 +185,15 @@ def test_selection_round_trips_through_dict():
 
 
 def test_from_dict_drops_unknown_ids_and_restores_default_renderings():
-    sel = Selection.from_dict({"tags": ["gore.blood_moderate", "bogus.thing"]})
-    assert sel.tags == {"gore.blood_moderate"}
+    sel = Selection.from_dict({"tags": ["gore.blood", "bogus.thing"]})
+    assert sel.tags == {"gore.blood"}
     assert sel.renderings == {r.value for r in Rendering}
 
 
 def test_presets_select_whole_families():
     graphic = selection_named("graphic")
-    assert "gore.blood_moderate" in graphic.tags
-    assert "violence.beating_prolonged" in graphic.tags or any(
+    assert "gore.blood" in graphic.tags
+    assert "violence.beating_abuse" in graphic.tags or any(
         t.startswith("violence.") for t in graphic.tags)
     assert not any(t.startswith("nudity.") for t in graphic.tags)
 
@@ -206,7 +220,7 @@ def test_non_censorable_tags_are_the_enforced_ones():
 # --------------------------------------------------------------------------
 
 def test_rendering_filter_excludes_a_style():
-    sel = Selection(tags={"gore.blood_moderate"}, renderings={"live_action"})
+    sel = Selection(tags={"gore.blood"}, renderings={"live_action"})
     assert rendering_allowed("anime", sel) is False
     assert rendering_allowed("live_action", sel) is True
 
@@ -251,14 +265,14 @@ def test_family_media_defaults_are_valid_actions():
 # --------------------------------------------------------------------------
 
 def test_minor_exposure_is_enforced_and_undismissable():
-    det = _Det(["nudity.breasts_full_female"], minors=Minors.YES.value)
+    det = _Det(["nudity.breasts_bare_female"], minors=Minors.YES.value)
     enforce_minor_protection(det)
     assert "safety.exposure_with_minor" in det.tags
     assert "safety.exposure_with_minor" in minor_locked_tags(det)
 
 
 def test_uncertain_age_is_a_checkbox_not_a_force():
-    det = _Det(["nudity.legs_thigh_bare_female"], minors=Minors.UNCERTAIN.value)
+    det = _Det(["nudity.skin_bare_female"], minors=Minors.UNCERTAIN.value)
     enforce_minor_protection(det)
     assert "safety.exposure_age_uncertain" in det.tags
     assert "safety.exposure_with_minor" not in det.tags
@@ -275,7 +289,7 @@ def test_uncertain_minor_without_exposure_gets_no_protection_tag():
     standard (see the test below) — it is the model's confident claim that a child
     is in frame, and that is precisely the case the floor exists for.
     """
-    violent = "violence.beating_prolonged" if "violence.beating_prolonged" in TAGS \
+    violent = "violence.beating_abuse" if "violence.beating_abuse" in TAGS \
         else tags_in_family(Family.VIOLENCE)[0].id
     det = _Det([violent], minors=Minors.UNCERTAIN.value)
     enforce_minor_protection(det)
@@ -293,7 +307,7 @@ def test_confident_minor_gets_the_floor_even_without_an_exposure_tag():
         needed a nudity tag to still be there could be switched off by deleting
         that tag. `minors` is not part of a tag edit.
     """
-    det = _Det(["violence.beating_prolonged"], minors=Minors.YES.value)
+    det = _Det(["violence.beating_abuse"], minors=Minors.YES.value)
     enforce_minor_protection(det)
     assert "safety.exposure_with_minor" in det.tags
 
@@ -302,27 +316,27 @@ def test_tag_edit_cannot_walk_under_the_floor():
     """The concrete version of the same rule, through the API a viewer uses."""
     from nuclearcutter.schema import VisualDetection, replace_tags
 
-    det = VisualDetection(start=1.0, end=2.0, tags=["nudity.breasts_full_female"],
+    det = VisualDetection(start=1.0, end=2.0, tags=["nudity.breasts_bare_female"],
                           description="x", confidence=0.9, minors=Minors.YES.value)
-    replace_tags(det, ["violence.argument"])
+    replace_tags(det, ["violence.threat_or_weapon"])
     assert "safety.exposure_with_minor" in det.tags, \
         "unticking the exposure tags must not remove the floor with them"
 
     # Clearing the minors flag is the honest way out, and it does work.
     det.minors = Minors.NO.value
-    replace_tags(det, ["violence.argument"])
+    replace_tags(det, ["violence.threat_or_weapon"])
     assert "safety.exposure_with_minor" not in det.tags
 
 
 def test_enforce_is_idempotent():
-    det = _Det(["nudity.cleavage_female"], minors=Minors.YES.value)
+    det = _Det(["nudity.breasts_partial_female"], minors=Minors.YES.value)
     enforce_minor_protection(det)
     enforce_minor_protection(det)
     assert det.tags.count("safety.exposure_with_minor") == 1
 
 
 def test_enforced_tag_is_censorable_with_nothing_selected():
-    det = _Det(["nudity.cleavage_female", "safety.exposure_with_minor"])
+    det = _Det(["nudity.breasts_partial_female", "safety.exposure_with_minor"])
     assert "safety.exposure_with_minor" in tags_hit(det.tags, default_selection())
 
 
@@ -362,7 +376,7 @@ def test_sweep_triggers_are_lowercase_ids():
 
 
 def test_family_of_helper():
-    assert family_of("gore.blood_moderate") is Family.GORE
+    assert family_of("gore.blood") is Family.GORE
     assert family_of("nope.nope") is None
 
 
@@ -374,13 +388,21 @@ def test_family_of_helper():
 def test_documented_tag_and_preset_counts():
     from nuclearcutter.taxonomy import PRESET_NAMES, NON_CENSORABLE
 
+    # Counts are pinned so a vocabulary change has to be *stated* rather than
+    # noticed. 2026-10-30: 121 tags -> 68. The chooser had grown into a wall of
+    # checkboxes where adjacent pairs were one decision under two clinical names
+    # (bare midriff / bare back / bare thighs, see-through / soaked, five slur
+    # targets, brief / passionate kissing), so a viewer who wanted "censor revealed
+    # clothing" had to tick six boxes and know which six. Each merged tag's hint
+    # still names every case the old ones covered, so the model's instructions did
+    # not get vaguer — only the number of choices the human is asked to make.
     per_family = {f.value: len(tags_in_family(f)) for f in Family}
-    assert per_family == {"nudity": 35, "intimacy": 11, "violence": 26, "gore": 21,
-                          "harm": 5, "language": 16, "substance": 4, "safety": 3}
-    assert len(TAGS) == 121
+    assert per_family == {"nudity": 18, "intimacy": 7, "violence": 13, "gore": 12,
+                          "harm": 4, "language": 8, "substance": 3, "safety": 3}
+    assert len(TAGS) == 68
     counts = {n: len(selection_named(n).tags) for n in PRESET_NAMES}
-    assert counts == {"none": 0, "nudity": 37, "sexual": 48, "language": 22,
-                      "graphic": 49, "everything": 120}
+    assert counts == {"none": 0, "nudity": 20, "sexual": 27, "language": 13,
+                      "graphic": 27, "everything": 67}
 
 
 def test_presets_never_remove_what_an_earlier_one_picked():

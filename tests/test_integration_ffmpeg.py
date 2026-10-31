@@ -42,11 +42,11 @@ def synthetic_video(tmp_path):
 @requires_ffmpeg
 def test_render_blur_preserves_duration(synthetic_video, tmp_path):
     identity = FilmIdentity(title="T", year=2024, duration_seconds=20.0, phash_samples=[])
-    vd_blur = VisualDetection(start=8.0, end=12.0, tags=["gore.blood_moderate"],
+    vd_blur = VisualDetection(start=8.0, end=12.0, tags=["gore.blood"],
                               description="A short scene happens here.", confidence=0.9)
     scan = ScanResult(schema_version=SCHEMA_VERSION, identity=identity,
                       visual_detections=[vd_blur], language_detections=[])
-    prefs = Preferences(selection=Selection(tags=["gore.blood_moderate"]))
+    prefs = Preferences(selection=Selection(tags=["gore.blood"]))
 
     out_path = tmp_path / "out.mp4"
     result_path = render(synthetic_video, scan, prefs, output_path=out_path)
@@ -155,9 +155,9 @@ def test_render_mutes_the_selected_word_and_keeps_the_timeline(synthetic_video, 
                       visual_detections=[], language_detections=[
                           LanguageDetection(start=2.0, end=2.6, utterance_start=1.0,
                                             utterance_end=4.0, text="damn it all",
-                                            tags=["language.profanity_common"]),
+                                            tags=["language.profanity"]),
                       ])
-    prefs = Preferences(selection=Selection(tags=["language.profanity_common"]),
+    prefs = Preferences(selection=Selection(tags=["language.profanity"]),
                         audio_actions={"language": AudioAction.MUTE_WORD.value},
                         mute_padding=0.0)
 
@@ -178,9 +178,9 @@ def test_render_muted_window_is_silent_and_everywhere_else_is_not(synthetic_vide
                       visual_detections=[], language_detections=[
                           LanguageDetection(start=2.0, end=2.6, utterance_start=1.0,
                                             utterance_end=4.0, text="damn",
-                                            tags=["language.profanity_common"]),
+                                            tags=["language.profanity"]),
                       ])
-    prefs = Preferences(selection=Selection(tags=["language.profanity_common"]),
+    prefs = Preferences(selection=Selection(tags=["language.profanity"]),
                         audio_actions={"language": AudioAction.MUTE_WORD.value},
                         mute_padding=0.0)
     out = tmp_path / "levels.mp4"
@@ -211,10 +211,10 @@ def test_render_unselected_language_tags_are_not_muted(synthetic_video, tmp_path
                       visual_detections=[], language_detections=[
                           LanguageDetection(start=2.0, end=2.6, utterance_start=1.0,
                                             utterance_end=4.0, text="damn it all",
-                                            tags=["language.profanity_common"]),
+                                            tags=["language.profanity"]),
                       ])
     # The viewer censors slurs; this detection is ordinary profanity.
-    prefs = Preferences(selection=Selection(tags=["language.slur_racial"]),
+    prefs = Preferences(selection=Selection(tags=["language.slur"]),
                         audio_actions={"language": AudioAction.MUTE_WORD.value})
     out_path = tmp_path / "out_untouched.mp4"
     result_path = render(synthetic_video, scan, prefs, output_path=out_path)

@@ -38,7 +38,7 @@ def _lang(**kw) -> LanguageDetection:
         start=kw.get("start", 5.0), end=kw.get("end", 5.4),
         utterance_start=kw.get("utterance_start", 4.0),
         utterance_end=kw.get("utterance_end", 7.0),
-        text=kw.get("text", "damn"), tags=kw.get("tags", ["language.profanity_mild"]))
+        text=kw.get("text", "damn"), tags=kw.get("tags", ["language.profanity"]))
 
 
 def _scan(**kw) -> ScanResult:
@@ -62,7 +62,7 @@ def test_save_and_load_round_trip(tmp_path):
     original.save(path)
     back = ScanResult.load(path)
     assert back.visual_detections[0].tags == ["nudity.shirtless_male"]
-    assert back.language_detections[0].tags == ["language.profanity_mild"]
+    assert back.language_detections[0].tags == ["language.profanity"]
     assert back.identity.title == "Test"
 
 
@@ -190,11 +190,11 @@ def test_a_removed_detection_is_not_censorable():
 
 def test_removing_one_tag_does_not_remove_the_others():
     # The popup unticks what is not there; the rest of the detection still acts.
-    det = _vis(tags=["nudity.shirtless_male", "gore.blood_moderate"])
-    sel = Selection(tags={"nudity.shirtless_male", "gore.blood_moderate"})
-    assert det.censorable(sel) == ["nudity.shirtless_male", "gore.blood_moderate"]
-    det.tags = ["gore.blood_moderate"]
-    assert det.censorable(sel) == ["gore.blood_moderate"]
+    det = _vis(tags=["nudity.shirtless_male", "gore.blood"])
+    sel = Selection(tags={"nudity.shirtless_male", "gore.blood"})
+    assert det.censorable(sel) == ["nudity.shirtless_male", "gore.blood"]
+    det.tags = ["gore.blood"]
+    assert det.censorable(sel) == ["gore.blood"]
 
 
 def test_removal_cannot_walk_around_the_child_floor():
@@ -208,13 +208,13 @@ def test_removal_cannot_walk_around_the_child_floor():
 def test_removed_language_detection_is_not_censorable():
     d = _lang()
     d.removed = True
-    assert d.censorable(Selection(tags={"language.profanity_mild"})) == []
+    assert d.censorable(Selection(tags={"language.profanity"})) == []
 
 
 def test_language_detection_censorable():
     d = _lang()
-    assert d.censorable(Selection(tags={"language.profanity_mild"})) == \
-        ["language.profanity_mild"]
+    assert d.censorable(Selection(tags={"language.profanity"})) == \
+        ["language.profanity"]
     assert d.censorable(Selection()) == []
 
 
@@ -231,13 +231,13 @@ def test_uncertain_is_a_fact_not_a_verdict():
 # --------------------------------------------------------------------------
 
 def test_tag_counts_for_the_scan_summary():
-    scan = _scan(visual=[_vis(tags=["nudity.shirtless_male", "gore.blood_moderate"]),
+    scan = _scan(visual=[_vis(tags=["nudity.shirtless_male", "gore.blood"]),
                          _vis(tags=["nudity.shirtless_male"], start=20.0, end=22.0)],
                  language=[_lang()])
     counts = scan.tag_counts()
     assert counts["nudity.shirtless_male"] == 2
-    assert counts["gore.blood_moderate"] == 1
-    assert counts["language.profanity_mild"] == 1
+    assert counts["gore.blood"] == 1
+    assert counts["language.profanity"] == 1
 
 
 def test_empty_scan_is_valid():
@@ -273,14 +273,14 @@ def test_unknown_family_falls_back_to_a_safe_action():
 
 
 def test_preferences_round_trip_keeps_selection_and_actions(tmp_path):
-    prefs = Preferences(selection=Selection(tags={"gore.blood_moderate"},
+    prefs = Preferences(selection=Selection(tags={"gore.blood"},
                                             renderings={"live_action"}),
                         visual_actions={"violence": "black"},
                         blur_strength=2.0, blur_padding=0.5)
     path = tmp_path / "prefs.json"
     prefs.save(path)
     back = Preferences.load(path)
-    assert back.selection.tags == {"gore.blood_moderate"}
+    assert back.selection.tags == {"gore.blood"}
     assert back.selection.renderings == {"live_action"}
     assert back.visual_for("violence") is VisualAction.BLACK
     assert back.blur_strength == 2.0
@@ -292,10 +292,10 @@ def test_preferences_load_of_a_file_with_levels_is_ignored_not_fatal(tmp_path):
     # equivalent, so the default is used; crashing on a stale preference file
     # would be a worse outcome than silently resetting one screen.
     path = tmp_path / "prefs.json"
-    path.write_text(json.dumps({"nudity_level": "high", "selection": ["gore.blood_moderate"]}))
+    path.write_text(json.dumps({"nudity_level": "high", "selection": ["gore.blood"]}))
     back = Preferences.load(path)
     assert back.visual_for("nudity") is VisualAction.BLUR
-    assert back.selection.tags == {"gore.blood_moderate"}
+    assert back.selection.tags == {"gore.blood"}
 
 
 def test_selection_accepts_a_bare_list_of_ids():

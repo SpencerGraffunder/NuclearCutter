@@ -1,12 +1,29 @@
 # The tag vocabulary — what is in a scene, not how bad it is
 
-**Taxonomy version 2 · schema version 2 · 121 tags in 8 families**
+**Taxonomy version 3 · schema version 2 · 68 tags in 8 families**
+(94 retired ids from version 2 still resolve, through `taxonomy.LEGACY_TAGS`)
 
 This document explains the vocabulary in
 [`nuclearcutter/taxonomy.py`](../nuclearcutter/taxonomy.py). That file is the
 single source of truth: the model's prompts, the scan file, the render plan, the
 GUI's checkboxes and the CLI's `--preset` flags are all generated from it. Adding
 a tag there is the only edit required to make it appear everywhere.
+
+Version 3 merged version 2's 121 tags down to 68. The reason is the same as the
+reason for the vocabulary itself: a chooser is a list of **decisions**, and by the
+end of version 2 it had stopped being one. Bare shoulders, bare midriff and bare
+thighs were three checkboxes for "skin is showing"; see-through and soaked clothing
+were two for "the fabric is not concealing"; five slur tags were one decision about
+slurs; brief and passionate kissing were one decision about kissing. Someone who
+wanted to censor revealing clothing had to know which six boxes to tick.
+
+Each merged tag's hint still names every case the retired tags covered, so the model
+is still asked to distinguish them — the merge cost the *viewer's* list, not the
+model's precision. Scan files written by version 2 keep working: `normalize_tags()`
+maps a retired id onto the tag that absorbed it, which beats folding it into
+`nudity.unclear` and telling the viewer the scan could not identify what the
+previous scan identified precisely. See §6 for what a merged tag can no longer
+express.
 
 ---
 
@@ -52,13 +69,13 @@ The scan file stops being an opinion, which is what makes it worth sharing
 
 | Family | Tags | Default action | What it covers |
 |---|---|---|---|
-| `nudity` | 35 | blur picture | How much of a body, or what kind of clothing, is visible |
-| `intimacy` | 11 | blur picture | Kissing, undressing and sex — with or without nudity |
-| `violence` | 26 | blur picture | One person hurting, or threatening to hurt, another |
-| `gore` | 21 | blur picture | Wounds, blood and bodies that are damaged |
-| `harm` | 5 | blur picture | Someone hurting themselves, and how it is done |
-| `language` | 16 | mute phrase | Swearing, slurs, insults and explicit talk |
-| `substance` | 4 | blur picture | Smoking, heavy drinking and drug use |
+| `nudity` | 18 | blur picture | How much of a body, or what kind of clothing, is visible |
+| `intimacy` | 7 | blur picture | Kissing, undressing and sex — with or without nudity |
+| `violence` | 13 | blur picture | One person hurting, or threatening to hurt, another |
+| `gore` | 12 | blur picture | Wounds, blood and bodies that are damaged |
+| `harm` | 4 | blur picture | Someone hurting themselves, and how it is done |
+| `language` | 8 | mute phrase | Swearing, slurs, insults and explicit talk |
+| `substance` | 3 | blur picture | Smoking, heavy drinking and drug use |
 | `safety` | 3 | blur picture | The scan noticed something but could not name it |
 
 Defaults are **starting points, not policies** — every family's action is a
@@ -198,17 +215,18 @@ Presets are **starting points**, one tap to get close and then edit. From
 | Preset | Tags | Adds |
 |---|---|---|
 | `none` | 0 | nothing — the default, the tool does not decide for you |
-| `nudity` | 37 | the `nudity` family |
-| `sexual` | 48 | + `intimacy` |
-| `language` | 22 | `language` + `substance` (orthogonal to the above) |
-| `graphic` | 49 | `violence` + `gore` (**not** `harm`, see below) |
-| `everything` | 120 | every choosable tag (121 minus the child floor, which is not a choice) |
+| `nudity` | 20 | the `nudity` family |
+| `sexual` | 27 | + `intimacy` |
+| `language` | 13 | `language` + `substance` (orthogonal to the above) |
+| `graphic` | 27 | `violence` + `gore` (**not** `harm`, see below) |
+| `everything` | 67 | every choosable tag (68 minus the child floor, which is not a choice) |
 
-They nest (`nudity` ⊂ `sexual` ⊂ `everything`), so a preset button never *removes*
-what an earlier one picked. The GUI builds its row of buttons from the server's
-`preset_order`, and the CLI's `--preset` choices come from the same tuple — three
-hand-maintained lists drift, and the failure is a button that 400s or a flag
-nobody can guess.
+They nest (`nudity` ⊂ `sexual` ⊂ `everything`), so applying two never *removes* what
+the first one picked. Since 2026-10-30 the presets are CLI-only: the GUI's row of
+buttons was removed, because one tap rewrote every checkbox next to it and the panel
+stopped being a readable record of the viewer's choice. The names still come from
+`PRESET_NAMES` in one place, so `--preset graphic` and the API's `presets` map cannot
+drift from each other.
 
 Deliberately absent:
 
@@ -227,7 +245,10 @@ Deliberately absent:
 
 ## 5. Rendering qualifiers
 
-Stored per detection, applied as checkboxes, **all on by default** — 7 styles:
+Stored per detection, **all on by default** — 7 styles. Set them with `--rendering`
+on the CLI or `rendering` in `settings.json`; the GUI stopped offering them on
+2026-10-30, so it always sends whatever the scan recorded (see §4 for why dropping
+the checkboxes had to be paired with carrying the values through).
 
 | Style | What it catches |
 |---|---|
@@ -241,8 +262,14 @@ Stored per detection, applied as checkboxes, **all on by default** — 7 styles:
 
 Defaults are all-on because a wrong guess must never silently un-censor. A
 detection tagged `artwork` that the viewer forgot to include would otherwise
-vanish from the timeline; instead, un-ticking `artwork` is a deliberate narrowing
+vanish from the timeline; instead, narrowing to `live_action` is a deliberate choice
 ("I don't need the museum scene blurred").
+
+An **empty** rendering list is not "all of them", it is "none of them":
+`rendering_allowed()` returns false for every detection. That asymmetry is the trap
+any UI that stops offering these controls has to handle, and it is why the page
+carries the server's values through rather than reading its own deleted checkboxes.
+It is asserted in `tests/test_server.py` and in the browser harness.
 
 ---
 
@@ -271,6 +298,27 @@ at.
   will be tagged by how they look. The renderer cannot know, and should not guess
   in the other direction.
 
+### What the v3 merge gave up
+
+Merging is not free, and the cost is worth naming rather than burying in a changelog:
+
+- **`language.slur` no longer says which group a slur targets.** Five tags became one,
+  so "censor slurs against my community, keep the rest" is no longer expressible. It
+  was the most defensible cut in the merge — a slur is one decision for a viewer, and
+  five checkboxes asked you to enumerate every group that might come up — but it is
+  the one a viewer can legitimately object to. If that need is real, the fix is to
+  split this tag again, not to argue that merges are always right.
+- **`nudity.skin_bare_female` does not say which body part.** Shoulder, back, midriff
+  and thigh are one tick now. Only the *hint* still separates them, so the model may
+  report a midriff and the GUI will show it as "bare skin".
+- **`gore.blood` keeps `gore.blood_heavy` but dropped the trivial/moderate split**, so
+  "a nosebleed is fine, a geyser is not" is no longer expressible.
+- **`violence.fight` merged shove, slap and both kinds of brawl**, so a viewer who
+  wanted to keep slapstick but blur real combat cannot say so.
+
+Nothing here is unrecoverable: a merged tag splits back into two, and `LEGACY_TAGS`
+maps the merged-away name onto whatever replaces it next time too.
+
 The honest summary: **a scan is a floor, not a ceiling.** Content absent from the
 scan file may still be in the film. When in doubt about a specific film, watch the
 `*.unclear` and `safety.unclassified` segments first — they are the moments the
@@ -279,7 +327,23 @@ be candid.
 
 ---
 
-## 7. Migration from v1
+## 7. Migration
+
+**v2 → v3 (2026-10-30, the merge).** A version 2 scan file loads in a version 3
+build and every retired id resolves onto the tag that absorbed it, through
+`taxonomy.LEGACY_TAGS`. Old scans keep working *and* keep their detail, which is
+better than folding `nudity.midriff_bare_female` into `nudity.unclear`: that would
+tell the viewer the scan cannot say what the previous scan said exactly, and would
+make the censorable range stricter than what was seen. Two things to know:
+
+- The `generator.taxonomy_version` in the file stays at 2 until the film is rescanned.
+  The alias map is what makes that safe, and it is one-way (many retired ids to one
+  live id, never the reverse), so a merged tag can never invent censorship.
+- Rescanning is still worth doing, because the new tags are how the *new* prompts
+  describe a scene. A v2 scan tells you what was seen; a v3 scan tells you what the
+  current model was asked to look for.
+
+**v1.**
 
 v1 scan files are **rejected with a non-zero exit**, never coerced. A v1 `level`
 is a judgement about how much censorship a scene needed; there is no honest way

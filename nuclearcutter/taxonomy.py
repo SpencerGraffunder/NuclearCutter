@@ -49,7 +49,7 @@ from enum import Enum
 # previous vocabulary still LOADS (unknown ids fold into their family residual,
 # so nothing becomes uncensorable), but a re-scan is what gets the new
 # categories.
-TAXONOMY_VERSION = 2
+TAXONOMY_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -252,377 +252,277 @@ F = Family
 
 _TAGS: list[Tag] = [
     # ------------------------------------------------------------------ nudity
-    # Body-state facts, women. Split from men because a user may only want to
-    # filter female modesty (or male), and because the lines people draw are
-    # genuinely different for each.
-    _t("nudity.cleavage_female", "Cleavage (women)", F.NUDITY,
-       "A female character's cleavage is visible: skin between the breasts above a "
-       "low neckline. Breasts are otherwise covered.", gender="female"),
-    _t("nudity.shoulders_back_bare_female", "Bare shoulders or back (women)", F.NUDITY,
-       "A female character's shoulders, upper back or neckline are bare (off-shoulder, "
-       "backless, halter). No chest exposure beyond this.", gender="female"),
-    _t("nudity.midriff_bare_female", "Bare midriff (women)", F.NUDITY,
-       "A female character's stomach or waist is bare (crop top, midriff-revealing outfit).",
+    # Body-state facts. Women and men stay split where the modesty line a viewer
+    # draws is genuinely different for each (that is a standing requirement); tags
+    # that describe the same STATE for either sex are one tag with gender="any".
+    #
+    # 2026-10-30 merge: this family was 35 tags, and the chooser was a wall of
+    # checkboxes where most adjacent pairs were the same decision wearing different
+    # clinical names. Bare shoulders, bare midriff and bare thighs are all "skin is
+    # showing"; see-through and soaked clothing are both "the fabric is not doing its
+    # job". Each merged tag's hint still lists every case the old ones covered, so
+    # the MODEL's precision did not have to be paid for with the viewer's simplicity.
+    _t("nudity.skin_bare_female", "Bare skin: shoulders, back, midriff or legs (women)", F.NUDITY,
+       "A female character's shoulders, upper back, midriff, stomach, waist, legs or "
+       "upper thighs are bare: off-shoulder or backless dress, halter top, crop top, "
+       "short skirt or shorts, a high slit, bare legs with no tights. Clothing still "
+       "covers the chest and groin.", gender="female"),
+    _t("nudity.breasts_partial_female", "Partially exposed breasts or cleavage (women)", F.NUDITY,
+       "A female character's breasts are partly visible but the areolae are covered: "
+       "cleavage above a low neckline, sideboob, a breast slipping from a top, "
+       "nude-coloured or pastie coverage. Nipples are not clearly visible.",
        gender="female"),
-    _t("nudity.legs_thigh_bare_female", "Bare legs or thighs (women)", F.NUDITY,
-       "A female character's legs or upper thighs are bare: short skirt or shorts, a high "
-       "slit, bare legs with no tights.", gender="female"),
-    _t("nudity.breasts_partial_female", "Partially exposed breasts (women)", F.NUDITY,
-       "Part of a female character's bare breast is visible - side breast, under breast, "
-       "breast fold - but the nipple area is covered by a hand, arm, hair or clothing.",
+    _t("nudity.breasts_bare_female", "Bare breasts (women)", F.NUDITY,
+       "A female character's bare breasts, including visible nipples or areolae, "
+       "whether fully bare or seen through fabric that leaves the areola visible. "
+       "Side view, back view or brief frame counts.", gender="female"),
+    _t("nudity.full_nude_female", "Fully nude (women)", F.NUDITY,
+       "A female character is nude: genitals, pubic area or buttocks visible, or the "
+       "whole body is bare. Buttocks count as full nudity even if the front is hidden.",
        gender="female"),
-    _t("nudity.breasts_full_female", "Bare breasts (women)", F.NUDITY,
-       "A female character's bare breast is fully or almost fully visible, with or without "
-       "the nipple visible.", gender="female"),
-    _t("nudity.nipples_visible_female", "Visible nipples (women)", F.NUDITY,
-       "A female character's nipple or areola is visible, including through sheer or wet "
-       "material, or unpainted through thin fabric.", gender="female"),
-    _t("nudity.full_nude_female", "Fully nude / genitals or buttocks (women)", F.NUDITY,
-       "A female character shows genitals, pubic hair, buttocks or anus, or is shown nude "
-       "with no garment covering those parts. Bare buttocks count as this category.",
-       gender="female"),
-    _t("nudity.swimwear_female", "Swimwear / bikini (women)", F.NUDITY,
-       "A female character is in a bikini, tankini, one-piece or other swimwear, worn as "
-       "swimwear or as clothing.", gender="female"),
-    _t("nudity.underwear_lingerie_female", "Underwear or lingerie (women)", F.NUDITY,
-       "A female character is in a bra, panties, slips, lingerie or babydoll as her only "
-       "or main clothing. Not swimwear.", gender="female"),
-    _t("nudity.hosiery_female", "Stockings, garters or fishnets (women)", F.NUDITY,
-       "A female character wears stockings, a garter belt, hold-ups or fishnet tights as "
-       "lingerie or as the main visible garment, not everyday tights with clothing.",
-       gender="female"),
-    _t("nudity.sheer_transparent_female", "See-through clothing (women)", F.NUDITY,
-       "A female character's clothing is transparent or mesh enough that her skin or under-"
-       "garments show through it.", gender="female"),
-    _t("nudity.wet_clothing_female", "Soaked or clinging wet clothing (women)", F.NUDITY,
-       "A female character's clothing is soaked and clinging, showing the shape of her body "
-       "or under-garments.", gender="female"),
-    _t("nudity.tight_revealing_female", "Skin-tight or fetish clothing (women)", F.NUDITY,
-       "A female character wears skin-tight bodycon, wet-look, latex, vinyl, a catsuit or a "
-       "body stocking that traces the whole body.", gender="female"),
-    _t("nudity.covered_only_towel_female", "Undressed but hidden by hand, towel or sheet (women)",
-       F.NUDITY,
-       "A female character is plainly not wearing clothes but a hand, arm, towel, sheet or "
-       "prop hides the private parts.", gender="female"),
-    _t("nudity.genital_outline_female", "Genital outline through clothing (women)", F.NUDITY,
-       "The outline of a female character's genitals or pubic area shows through tight or "
-       "thin clothing.", gender="female"),
-    _t("nudity.breastfeeding_female", "Breastfeeding", F.NUDITY,
-       "A female character is nursing a baby at the breast.", gender="female"),
-    _t("nudity.childbirth_female", "Childbirth", F.NUDITY,
-       "A birth or labour scene in which a woman's body is exposed for delivery.",
-       gender="female"),
-    _t("nudity.medical_exposure_female", "Medical exposure (women)", F.NUDITY,
-       "A female character's body is exposed in a medical context: being examined, treated, "
-       "operated on, or an incision site being worked on.", gender="female"),
-    _t("nudity.masturbation_female", "Self-touch / masturbation (women)", F.NUDITY,
-       "A female character touches her own private parts, or her hand moves under covers or "
-       "clothing in a sexual way.", gender="female"),
-
-    # Body-state facts, men. Deliberately shorter than the women's list: there is
-    # no male cleavage, midriff or nipple line that people filter, and inventing
-    # male twins for female tags would add checkboxes no one turns on.
+    _t("nudity.underwear_swimwear_female", "Underwear, lingerie or swimwear (women)", F.NUDITY,
+       "A female character in underwear, lingerie, a bra, a bikini or a swimsuit, "
+       "including topless-appearing swimwear that is still swimwear.", gender="female"),
+    _t("nudity.revealing_clothing_female", "Revealing, sheer-cut or fetish clothing (women)", F.NUDITY,
+       "A female character wears clothing that reads as sexualised coverage rather "
+       "than exposing a body part: stockings, garters, fishnets, corset, mesh or cut-out "
+       "garments, latex, PVC, or other skin-tight fetish wear.", gender="female"),
+    _t("nudity.sheer_or_wet_female", "See-through or soaked clothing (women)", F.NUDITY,
+       "A female character's clothing fails to conceal because of what it is made of or "
+       "what happened to it: sheer, mesh, translucent or lace fabric, or wet, soaked, "
+       "rain-soaked or pool-soaked clothing clinging to the body so its shape or "
+       "underlying skin shows.", gender="female"),
     _t("nudity.shirtless_male", "Shirtless (men)", F.NUDITY,
-       "A male character's bare chest or torso is visible with no shirt, whether or not he "
-       "is muscular.", gender="male"),
-    _t("nudity.full_nude_male", "Fully nude / genitals or buttocks (men)", F.NUDITY,
-       "A male character shows genitals, pubic area or buttocks, or is shown nude with "
-       "nothing covering those parts.", gender="male"),
-    _t("nudity.swimwear_male", "Swimwear (men)", F.NUDITY,
-       "A male character is in swim briefs, trunks or board shorts as his only clothing.",
+       "A male character's bare chest is visible, whether or not the rest is clothed.",
        gender="male"),
-    _t("nudity.underwear_male", "Underwear (men)", F.NUDITY,
-       "A male character is in boxers, briefs or boxer shorts as his only clothing.",
-       gender="male"),
-    _t("nudity.covered_only_towel_male", "Undressed but hidden by hand, towel or sheet (men)",
-       F.NUDITY,
-       "A male character is plainly not wearing clothes but a hand, towel or sheet hides "
-       "the private parts.", gender="male"),
-    _t("nudity.erection_visible_male", "Visible erection or bulge (men)", F.NUDITY,
-       "A male character has a visible erection, or the shape of his genitals is visible "
-       "through thin or tight clothing.", gender="male"),
-    _t("nudity.masturbation_male", "Self-touch / masturbation (men)", F.NUDITY,
-       "A male character touches his own private parts, or his hand moves under covers in a "
-       "sexual way.", gender="male"),
-    _t("nudity.medical_exposure_male", "Medical exposure (men)", F.NUDITY,
-       "A male character's body is exposed in a medical context: being examined, treated or "
-       "operated on.", gender="male"),
-    _t("nudity.sheer_tight_male", "See-through or skin-tight clothing (men)", F.NUDITY,
-       "A male character's clothing is sheer, mesh or so tight that it exposes the shape of "
-       "his body or genitals.", gender="male"),
-    _t("nudity.wet_clothing_male", "Soaked or clinging wet clothing (men)", F.NUDITY,
-       "A male character's clothing is soaked and clinging enough to show his body or "
-       "under-garments.", gender="male"),
-
-    # Nudity facts that are not about a gendered body.
+    _t("nudity.full_nude_male", "Fully nude (men)", F.NUDITY,
+       "A male character is nude: genitals, pubic area or buttocks visible, or the whole "
+       "body is bare.", gender="male"),
+    _t("nudity.underwear_swimwear_male", "Underwear or swimwear (men)", F.NUDITY,
+       "A male character in underwear, boxers, briefs, swim trunks or speedos, with no "
+       "shirt or with the lower body in undergarments only.", gender="male"),
+    _t("nudity.sheer_or_wet_male", "See-through or soaked clothing (men)", F.NUDITY,
+       "A male character's clothing shows what is underneath because it is sheer, "
+       "skin-tight mesh or latex, or because it is wet and clinging.", gender="male"),
+    _t("nudity.undressed_covered", "Undressed but covered", F.NUDITY,
+       "A character is evidently undressed or getting undressed yet nothing is exposed: "
+       "hiding behind a hand, a towel, a bed sheet, a doorway or a foreground object. "
+       "Any sex is implied by the situation, not by what is visible."),
+    _t("nudity.genital_shape", "Genital outline or erection through clothing", F.NUDITY,
+       "The genital area is legible through clothing: a visible erection or bulge, a "
+       "camel toe, or an outline pressed through tight or thin fabric. No bare genital "
+       "skin."),
+    _t("nudity.self_touch", "Self-touch or masturbation", F.NUDITY,
+       "A character touches their own genitals or simulates masturbation, alone, with no "
+       "other person involved and usually no full nudity shown."),
+    _t("nudity.medical_or_maternal", "Medical or maternal exposure", F.NUDITY,
+       "A body is exposed in a clinical or maternal context rather than a sexual one: a "
+       "medical exam, surgery site, hospital gown, a pregnancy examination, childbirth, "
+       "or breastfeeding."),
     _t("nudity.implied_not_visible", "Nudity implied, nothing shown", F.NUDITY,
-       "Characters are clearly nude but nothing is on display: turned away, behind another "
-       "person, in shadow, cut away from, or framed above the neck."),
-    _t("nudity.bathing_shower", "Bathing or showering", F.NUDITY,
-       "A character is bathing, in a bath, a shower or a hot tub, whether or not any private "
-       "part is visible."),
-    _t("nudity.changing_clothes", "Changing clothes", F.NUDITY,
-       "A character is actively getting undressed or dressed, partially clothed."),
-    _t("nudity.behind_covers", "Under bed covers", F.NUDITY,
-       "A character is under bed covers with bare skin or an undressed shoulder visible, "
-       "bodies entangled under the covers."),
+       "The scene means nudity without showing it: characters in bed under covers, a "
+       "shadow or silhouette, a shower running with nobody visible, someone stepping out "
+       "of frame nude, reactions that assume nudity."),
+    _t("nudity.vulnerable_context", "Bathing, changing or in bed", F.NUDITY,
+       "A vulnerable-but-clothed context: showering or bathing (with modesty intact), "
+       "changing clothes, getting into or out of bed, waking up in bed. Any nudity is "
+       "obscured, off frame, or cut away."),
     _t("nudity.unclear", "Nudity unclear", F.NUDITY,
-       "A person appears to be undressed, underdressed or in an intimate state but the "
-       "picture is too dark, brief, distant or blocked to say what is visible. Use this "
-       "instead of inventing a specific body part.", low_precision=True),
+       "Something skin-like, flesh-toned or body-shaped is visible but its extent or "
+       "location is ambiguous: a dark or fast frame, heavy shadow, a blur, an out-of-focus "
+       "foreground, or a partial frame. Use this rather than nothing when the frame seems "
+       "to show exposure that cannot be identified."),
 
-    # --------------------------------------------------------------- intimacy
-    # Its own family (not part of nudity) so that kissing and sex scenes with no
-    # nudity at all are separable: "censor the sex, keep the kissing" and "censor
-    # making out, nothing is nude" are both ordinary choices.
-    _t("intimacy.kissing_brief", "Brief kissing", F.INTIMACY,
-       "A quick or closed-mouth kiss, or a kiss that lasts under about two seconds."),
-    _t("intimacy.kissing_passionate", "Passionate kissing", F.INTIMACY,
-       "A prolonged kiss, open-mouth or with tongues, or characters kissing while falling, "
-       "lying or moving together."),
-    _t("intimacy.cuddling_clothed", "Cuddling or embracing intimately", F.INTIMACY,
-       "Characters hold or cuddle each other in bed or in an intimate pose while fully "
-       "clothed, with no undressing."),
-    _t("intimacy.couple_in_bed_undressed", "Couple in bed, undressed", F.INTIMACY,
-       "Two characters are in bed together undressed or partly undressed, whether or not "
-       "anything is visible."),
+    # ---------------------------------------------------------------- intimacy
+    _t("intimacy.kissing", "Kissing", F.INTIMACY,
+       "Characters kissing, at any length or intensity: a brief peck, a prolonged or "
+       "passionate kiss, open-mouthed kissing. Kissing on the cheek or hand that reads "
+       "as romantic counts if it is held."),
     _t("intimacy.undressing_another", "Undressing or handling another person", F.INTIMACY,
-       "One character pulls clothing off another, or hands move under another character's "
-       "clothing or over their body."),
-    _t("intimacy.simulated_sex", "Simulated sex", F.INTIMACY,
-       "Characters appear to be having sex: bodies joined or intertwined, on top of each "
-       "other, rhythmic movement, whether clothed or not, with no genitals visible."),
-    _t("intimacy.sex_suggested_offscreen", "Sex suggested, shown off screen", F.INTIMACY,
-       "Sex is clearly happening or about to happen without being shown: a door closing, "
-       "candlelit bed, moaning or rustling over a shot of the room, two characters getting "
-       "into bed and cutting away."),
-    _t("intimacy.morning_after", "Afterwards scene", F.INTIMACY,
-       "Characters in bed together after sex, in towels or under sheets, talking or "
-       "waking up."),
+       "One character undresses another, or handles a body sexually: pulling down "
+       "clothing, removing underwear, hands under clothing, a couple in bed with "
+       "clothing off or coming off."),
+    _t("intimacy.simulated_sex", "Sex, or its aftermath", F.INTIMACY,
+       "Simulated sex, whether shown, implied through movement and sound, or conveyed by "
+       "cutting away and showing the aftermath (two people in bed afterwards, tangled "
+       "sheets, the morning after). Visible thrusting or an obvious rhythm is enough; a "
+       "fade to black with a clear meaning counts."),
+    _t("intimacy.cuddling_clothed", "Cuddling or embracing intimately", F.INTIMACY,
+       "Two characters cuddle, embrace or lie together fully clothed, in a way that "
+       "reads as intimate rather than comforting or congratulatory."),
     _t("intimacy.striptease_pole_lapdance", "Striptease, pole or lap dance", F.INTIMACY,
-       "A character strips, dances on a pole, dances on someone's lap, or is on a stage in "
-       "the act of removing clothing."),
+       "A strip tease, a pole or chair dance, a lap dance, or a striptease club and its "
+       "stage/pole equipment. The dance itself is enough: a partially clothed dancer "
+       "counts."),
     _t("intimacy.bondage", "Bondage or restraint in a sexual context", F.INTIMACY,
-       "A character is tied, bound or handcuffed in a sexual or suggestive context. If the "
-       "restraint is a arrest or a threat, that is the violence category instead."),
+       "Restraint that is sexual rather than hostile: rope, handcuffs or ties worn as part "
+       "of intimacy, blindfolds, being bound to a bed or chair in a sexual scene. Restraint "
+       "meant to harm or imprison is violence.restraint_confinement, and both may apply."),
     _t("intimacy.unclear", "Sexual content unclear", F.INTIMACY,
-       "The situation reads as romantic or sexual but nothing specific can be named from "
-       "the picture.", low_precision=True),
+       "Framing, sound, movement or editing that suggests intimacy without identifying it: "
+       "heavy breathing over a dark frame, a bed scene with bodies not visible, a "
+       "meaningful fade, two people heard but not seen."),
 
-    # --------------------------------------------------------------- violence
+    # ---------------------------------------------------------------- violence
+    _t("violence.threat_or_weapon", "Threats, intimidation or a weapon", F.VIOLENCE,
+       "Someone threatens or intimidates another: a verbal threat, a hostile advance, a "
+       "shove of power over someone, or a weapon visible, drawn, pointed or cocked at "
+       "someone, whether or not it is fired. A heated argument with raised voices counts."),
     _t("violence.peril_chase", "Being chased or in danger", F.VIOLENCE,
-       "A character is pursued, hunted or in physical danger, with nobody touching them."),
-    _t("violence.argument", "Heated argument", F.VIOLENCE,
-       "Characters shout at or argue angrily with each other. No physical contact.",
-       low_precision=True),
-    _t("violence.verbal_threat", "Threats or intimidation", F.VIOLENCE,
-       "A character threatens, menaces or intimidates another, in words or by advancing on "
-       "them, without hitting them.", low_precision=True),
-    _t("violence.weapon_display", "Weapon visible or aimed", F.VIOLENCE,
-       "A gun, knife, blade, bat or other weapon is held, drawn, pointed or aimed, even if "
-       "it is never used."),
-    _t("violence.restraint_capture", "Grabbed, pinned or captured", F.VIOLENCE,
-       "A character is seized, pinned down, held, restrained, handcuffed or captured."),
-    _t("violence.confinement_kidnap", "Kidnapped or locked up", F.VIOLENCE,
-       "A character is kidnapped, held captive, locked in a cell, room or cage, or bound."),
-    _t("violence.shove_grab", "Shoving or rough handling", F.VIOLENCE,
-       "Characters shove, push, grab, jostle or roughly pull each other."),
-    _t("violence.slap_hit", "Slap or single blow", F.VIOLENCE,
-       "Someone is slapped, backhanded, punched once, or hit with an open hand or object, "
-       "without a fight developing."),
-    _t("violence.fight_unarmed", "Fight without weapons", F.VIOLENCE,
-       "Two or more characters exchange punches, kicks or grappling."),
-    _t("violence.fight_armed", "Fight with weapons", F.VIOLENCE,
-       "Characters fight with swords, axes, staffs, guns used as clubs or other weapons."),
-    _t("violence.beating_prolonged", "Beating or sustained assault", F.VIOLENCE,
-       "One character repeatedly hits, kicks, stomps or assaults another who is not fighting "
-       "back, or a helpless person is attacked."),
+       "A character is pursued, cornered, hunted, hanging on, about to fall or otherwise "
+       "helpless against an approaching threat."),
+    _t("violence.restraint_confinement", "Restrained, captured or locked up", F.VIOLENCE,
+       "A character is grabbed and pinned, handcuffed, tied up, gagged, carried off, "
+       "captured, imprisoned, locked in a cell, box or trunk, or otherwise held against "
+       "their will."),
+    _t("violence.fight", "A physical fight or assault", F.VIOLENCE,
+       "One person hits another: a shove, a grab, a slap, a punch, a single blow, or a "
+       "sustained unarmed or armed fight. Both parties fighting back and one-sided "
+       "striking both count."),
+    _t("violence.beating_abuse", "Beating or abuse", F.VIOLENCE,
+       "Sustained one-sided violence: a beating, an assault while the victim is helpless, "
+       "or abuse inside a household or relationship, including the intimidating pattern "
+       "of it, not only the blow."),
     _t("violence.gunfire", "Shooting", F.VIOLENCE,
-       "A gun is fired at a person, people are shot at, or a character is hit by gunfire."),
-    _t("violence.explosion", "Explosion", F.VIOLENCE,
-       "A bomb, blast, grenade, explosion or wreck burning, whether or not anyone is hurt."),
-    _t("violence.battle_war", "Battle or war scene", F.VIOLENCE,
-       "Many combatants fighting: a battle, a charge, a firefight, soldiers dying."),
-    _t("violence.car_crash", "Crash or collision", F.VIOLENCE,
-       "A vehicle crashes, rolls, is hit, or falls: car, train, plane or boat."),
-    _t("violence.destruction_disaster", "Disaster or mass destruction", F.VIOLENCE,
-       "A building, city or structure collapses, a natural disaster, a flood, an avalanche, "
-       "or crowds being crushed."),
-    _t("violence.burning_scalding", "Burning or scalding a person", F.VIOLENCE,
-       "A person is burned, set on fire, branded, or scalded."),
-    _t("violence.torture", "Torture", F.VIOLENCE,
-       "A character is deliberately made to suffer: interrogated with pain, tied to a device, "
-       "waterboarded, electrodes, teeth or nails pulled, whipped."),
-    _t("violence.execution", "Execution", F.VIOLENCE,
-       "A helpless or restrained character is deliberately killed, or is about to be, by "
-       "shooting, hanging, guillotine or similar."),
-    _t("violence.murder", "A character is killed", F.VIOLENCE,
-       "A character is killed on screen, or has clearly just been killed: stabbed, shot, "
-       "strangled, pushed to their death."),
-    _t("violence.murder_attempt", "Killing attempted", F.VIOLENCE,
-       "An attempt on a character's life that they survive or that is interrupted: hanging, "
-       "drowning, strangling, a push that is survived."),
+       "A gun fired at a person or a person shot, from a single shot to sustained "
+       "firefight fire."),
+    _t("violence.mass_scene", "Battle, disaster or destruction", F.VIOLENCE,
+       "Large-scale violence or catastrophe: a battle or war scene, an explosion, a "
+       "vehicle crash or collision, a building, bridge or city being destroyed, a natural "
+       "disaster, or a crowd being swept up in it."),
+    _t("violence.torture_burning", "Torture, or a person burned", F.VIOLENCE,
+       "A person is made to suffer deliberately: torture, interrogation under duress, "
+       "being tied to a device, waterboarding, branding, or being burned or scalded. Both "
+       "the act and the immediate suffering count."),
+    _t("violence.death", "Someone is killed", F.VIOLENCE,
+       "A character is killed or a killing is depicted or attempted: murder, an execution, "
+       "an assassination, a killing in self-defence, a fatal fall, or an attempt that fails."),
     _t("violence.animal_harm", "An animal is hurt or killed", F.VIOLENCE,
-       "An animal is struck, injured, killed, suffering, or shown dead."),
+       "An animal is struck, injured, killed, shown dying, or is visibly dead."),
     _t("violence.child_endangerment", "A child is threatened or in danger", F.VIOLENCE,
-       "A child is threatened, frightened by an aggressor, neglected deliberately, or placed "
-       "in physical danger."),
-    _t("violence.domestic_abuse", "Abuse inside a household", F.VIOLENCE,
-       "One character frightens, controls, threatens or hurts a partner or family member in a "
-       "home setting.", low_precision=True),
+       "A child is threatened, menaced, neglected in a dangerous way, separated from an "
+       "adult by violence, or placed in peril."),
     _t("violence.implied_offscreen", "Violence heard or implied off screen", F.VIOLENCE,
-       "Violence happens out of shot: screaming, a gunshot with no shot shown, someone "
-       "dragged away, blood on a wall afterwards."),
+       "Violence conveyed indirectly: screams, gunshots or thuds off screen, aftermath "
+       "shots such as a body being carried away or a blood-spattered wall, or someone "
+       "describing an attack."),
     _t("violence.unclear", "Violence unclear", F.VIOLENCE,
-       "Something aggressive or dangerous seems to be happening but it cannot be named from "
-       "the picture.", low_precision=True),
+       "Contact or aggression is visible but ambiguous: a scruffle in a crowd, a fast cut, "
+       "a blow that lands off frame, or someone reacting in pain with the cause unseen."),
 
-    # ------------------------------------------------------------------- gore
-    _t("gore.blood_trivial", "A little blood", F.GORE,
-       "A small amount of blood: a trickle, a nosebleed, a scrape, blood on a hand or a "
-       "lip, a bandage with a spot of blood."),
-    _t("gore.blood_moderate", "Blood from a wound", F.GORE,
-       "A clear, visible amount of blood: a wound bleeding, blood soaking cloth, drips or "
-       "splatter on the floor or clothing."),
+    # -------------------------------------------------------------------- gore
+    _t("gore.blood", "Blood", F.GORE,
+       "Blood is visible in any amount: a trickle, a cut, a nosebleed, blood on hands, "
+       "clothing, a floor or a wall, blood spurting or pooling. Do not classify the "
+       "quantity."),
     _t("gore.blood_heavy", "A lot of blood", F.GORE,
-       "Heavy blood: pools, spurting, spraying, a body covered in blood, a blood-soaked room."),
-    _t("gore.wound_open", "Open wound", F.GORE,
-       "An open cut, gash, laceration, hole, tear or bite in skin, without showing inside "
-       "the body."),
-    _t("gore.wound_detail", "Wound shown in detail", F.GORE,
-       "A wound seen close up or in detail: fat, muscle, tendon, a bullet hole, stitching or "
-       "a wound being closed."),
-    _t("gore.bones_fracture", "Bone or fracture", F.GORE,
-       "Bone is visible through skin, a limb is bent wrongly, a bone is broken or set, or an "
-       "X-ray shows a break."),
-    _t("gore.organs_tissue", "Organs or insides", F.GORE,
-       "Internal organs, intestines, brain, muscle tissue or the inside of a body is shown."),
-    _t("gore.dismemberment", "Dismemberment", F.GORE,
-       "A body part is cut or torn off, a body is in pieces, a severed head, limbs or a "
-       "torso alone."),
-    _t("gore.mutilation", "Mutilation or deliberate damage", F.GORE,
-       "A body is deliberately damaged beyond a wound: eyes, tongue, ears, teeth or nails "
-       "removed, skin cut away, a body defaced."),
+       "Heavy blood: arterial spurting, a pool or spray, a body bleeding out, a large "
+       "quantity of blood covering a person, room or weapon."),
+    _t("gore.wound_bone", "A wound, or bone and fracture", F.GORE,
+       "An injury is visible: a cut, laceration, puncture, abrasion, gash, ulcer, "
+       "gunshot hole, exposed flesh or muscle, a broken bone, a limb bent the wrong way, "
+       "or a wound examined, stitched or treated in close view."),
+    _t("gore.dismemberment", "Dismemberment, organs or deliberate damage", F.GORE,
+       "A body taken apart or opened: a severed limb or head, organs, intestines or "
+       "insides visible, a body cavity, eyeball or tongue removal, mutilation, or a body "
+       "eviscerated or ground up."),
     _t("gore.burn_injury", "Burned flesh", F.GORE,
-       "Burned or blistered skin, charred tissue, the aftermath of a fire on a body."),
-    _t("gore.needle_injection", "Needle or injection", F.GORE,
-       "A needle, syringe, IV line or drug being injected into skin, whether medical or "
-       "recreational."),
+       "Burn injury on a body: charred, blistered, blackened or melted skin, a burn "
+       "victim, or a body that is visibly scorched."),
     _t("gore.corpse", "A dead body", F.GORE,
-       "A dead body or corpse is clearly shown, without heavy damage: a body laid out, a "
-       "corpse in a bed, on a slab, at a scene."),
-    _t("gore.corpse_decay", "Decaying or skeletal body", F.GORE,
-       "A body showing decay, decomposition, maggots, skeletal remains or a skeleton."),
-    _t("gore.surgery_medical", "Surgery or medical procedure", F.GORE,
-       "An operation, incision, suturing, a wound being treated, an operating theatre or a "
-       "medical procedure with visible flesh."),
-    _t("gore.vomit", "Vomit", F.GORE,
-       "Someone vomits or retches, or vomit is shown."),
-    _t("gore.bodily_fluids", "Other bodily fluids", F.GORE,
-       "Pus, infected wounds, faeces, urine, spit or semen shown on screen."),
-    _t("gore.medical_noblood", "Hospital or medical care, no blood", F.GORE,
-       "A hospital, bandages, a cast, a stretcher, a scan or a monitor, with no blood or "
-       "wound shown."),
-    _t("gore.illness_symptoms", "Illness or symptoms", F.GORE,
-       "A character is visibly sick: coughing blood, a seizure, fainting, vomiting from "
-       "illness, a wound going septic."),
-    _t("gore.butcher_hunt", "Butchering, hunting or dead animals", F.GORE,
-       "An animal being slaughtered, butchered, skinned, dressed or field-dressed, or a dead "
-       "animal shown with blood."),
-    _t("gore.nonrealistic", "Non-real blood or fluid", F.GORE,
-       "Blood or fluid that is plainly not real: green or blue fluid, oil, sludge, cartoon "
-       "or stylised blood, a robot or creature leaking."),
+       "A dead human body, whether fresh, decayed, skeletal, mummified, a corpse in a "
+       "morgue, a body in a bag, or bones in an attic."),
+    _t("gore.medical", "Medical or drug-injection detail", F.GORE,
+       "Medical detail a filter might want to cover: surgery, an operation in progress, "
+       "a needle, syringe, IV or injection, blood being drawn, an endoscope, a wound being "
+       "sutured, or an intensive-care machine."),
+    _t("gore.illness", "Illness, hospital care without blood", F.GORE,
+       "Sickness or medical context that is not gory: a character vomiting-free and ill, "
+       "symptoms such as coughing, fainting, pallor or sweating, a hospital ward, an "
+       "examination, a wheelchair or a diagnosis."),
+    _t("gore.bodily_fluids", "Vomit or other bodily fluids", F.GORE,
+       "Bodily fluid other than blood: vomit, saliva, mucus, pus, sweat shown heavily, "
+       "semen or other sexual fluids, urine or faeces."),
+    _t("gore.butcher_hunt", "Dead animals, butchery or hunting", F.GORE,
+       "An animal carcass, meat being butchered or skinned, a hunted animal killed or "
+       "dying, a kill shown, or animal parts on sale in a market."),
+    _t("gore.nonrealistic", "Non-realistic blood or injury", F.GORE,
+       "Injury or blood that does not look real: bright or stylised colours, cartoonish "
+       "impact, an obviously fake squib, animated or video-game violence."),
     _t("gore.unclear", "Blood or injury unclear", F.GORE,
-       "Something looks like blood, injury or bodily harm but it cannot be told from the "
-       "picture - dark liquid, distance, brief shot.", low_precision=True),
+       "Something red, wet, damaged or body-like that could be blood or injury: a red "
+       "liquid in dim light, a stain, a dark frame with a wound-shaped shape, a costume "
+       "or prop that reads briefly as damage."),
 
-    # ------------------------------------------------------------------- harm
-    _t("harm.suicide_depicted", "Suicide depicted", F.HARM,
-       "A character takes their own life, or is shown having just died by suicide."),
+    # -------------------------------------------------------------------- harm
+    # Deliberately NOT merged further. `harm.suicide_method` is the one tag whose
+    # detail is the harm: a viewer who accepts a character's death on screen may still
+    # need the method not shown, and collapsing it into the depicted suicide would make
+    # that uncensorable.
+    _t("harm.suicide", "Suicide depicted", F.HARM,
+       "A character dies by suicide, or a suicide is shown, in progress or completed, "
+       "including an attempt that is interrupted."),
     _t("harm.suicide_method", "Suicide method shown in detail", F.HARM,
-       "The means of suicide is shown or explained in a way that could be copied: preparing "
-       "pills, a noose being made, a weapon being raised to oneself, a list of methods."),
-    _t("harm.self_harm_depicted", "Deliberate self-injury", F.HARM,
-       "A character deliberately injures themselves: cutting, burning, hitting themselves; "
-       "or fresh marks are shown."),
-    _t("harm.overdose", "Overdose or poisoning oneself", F.HARM,
-       "A character takes an overdose or is shown collapsing from one, whether by accident "
-       "or on purpose."),
-    _t("harm.eating_disorder", "Eating disorder", F.HARM,
-       "Restricting food, bingeing, purging, or a character's body weight and food being "
-       "treated as a problem."),
+       "The method itself is legible and could serve as instruction: the method being "
+       "prepared, written instructions or notes describing a method, a noose, pills being "
+       "counted, a ledge or vehicle chosen, or the act depicted step by step."),
+    _t("harm.self_injury", "Self-injury or overdose", F.HARM,
+       "A character deliberately hurts themselves: cutting, burning or hitting themselves, "
+       "scars shown, or taking an overdose or poisoning themselves deliberately."),
+    _t("harm.eating_disorder", "An eating disorder", F.HARM,
+       "Disordered eating shown or made explicit: restricting, purging, bingeing, "
+       "body-checking in a mirror, calorie counting, or plot dialogue naming an eating "
+       "disorder."),
 
-    # --------------------------------------------------------------- language
-    # Audio-family. Words are grouped by WHAT they are (a slur is a different
-    # thing from an expletive), because a family may care enormously about slurs
-    # and not at all about "damn" - which the old single scale could not express.
-    _t("language.profanity_mild", "Mild swear words", F.LANGUAGE,
-       "Mild expletives and their euphemisms: damn, hell, crap, ass, bastard, "
-       "bloody, geez, damn it, heck.", visual=False, audio=True),
-    _t("language.profanity_common", "Common swear words", F.LANGUAGE,
-       "Common profanity: fuck and its forms, shit, bitch, asshole, dick, prick, bullshit, "
-       "piss, goddamn.", visual=False, audio=True),
+    # ---------------------------------------------------------------- language
+    _t("language.profanity", "Swearing", F.LANGUAGE,
+       "Any swear word or mild expletive, from damn, hell, bastard and crap to Fuck and "
+       "Shit. The intensity of the word is not part of this tag; only the strongest tier "
+       "is separate.", visual=False, audio=True),
     _t("language.profanity_severe", "The most offensive swear words", F.LANGUAGE,
-       "The strongest general expletive words, above ordinary profanity in how offensive "
-       "they are.", visual=False, audio=True),
-    _t("language.slur_racial", "Racial slur", F.LANGUAGE,
-       "A racial or ethnic slur is spoken.", visual=False, audio=True),
-    _t("language.slur_religious_ethnic", "Religious or ethnic slur", F.LANGUAGE,
-       "A slur aimed at someone's religion or ethnicity is spoken.", visual=False, audio=True),
-    _t("language.slur_lgbtq", "Slur about sexuality or gender", F.LANGUAGE,
-       "A slur about someone's sexuality or gender identity is spoken.", visual=False, audio=True),
-    _t("language.slur_disability", "Slur about disability or ability", F.LANGUAGE,
-       "A slur about disability, or a word used to insult someone by comparing them to a "
-       "disabled person, is spoken.", visual=False, audio=True),
-    _t("language.slur_sexist", "Sexist or misogynistic slur", F.LANGUAGE,
-       "A word used to put someone down for being a woman, or a sexual slur aimed at a "
-       "person, is spoken.", visual=False, audio=True),
-    _t("language.anatomy_words", "Words for body parts", F.LANGUAGE,
-       "Clinical or everyday words for genitals, breasts or sex acts are spoken, including "
-       "medical or educational discussion.", visual=False, audio=True),
-    _t("language.anatomy_crude", "Crude words for body parts", F.LANGUAGE,
-       "Slang or vulgar words for genitals, breasts, sex acts or bodily functions are "
-       "spoken, without being an expletive.", visual=False, audio=True),
-    _t("language.degradation_insult", "Cruel insult aimed at someone", F.LANGUAGE,
-       "A character says something meant to degrade or humiliate another named person: "
-       "calling them worthless, stupid, ugly, a burden, telling them to die.",
-       visual=False, audio=True),
-    _t("language.hostile_tone_general", "Rude, mean or dismissive tone", F.LANGUAGE,
-       "Speech that is rude, mean, sarcastic, mocking or dismissive without being a swear "
-       "word or a clear insult: shouting at someone, 'shut up', 'I hate you', sneering.",
-       visual=False, audio=True, low_precision=True),
-    _t("language.blasphemy_religious", "Religious language used as an expletive", F.LANGUAGE,
-       "God, Christ, Jesus, the Virgin Mary, hell or damnation used as an exclamation or "
-       "curse rather than as discussion of religion.", visual=False, audio=True),
-    _t("language.sexual_talk_explicit", "Explicit talk about sex", F.LANGUAGE,
-       "Characters describe sex acts, discuss their sex lives in detail, or ask explicit "
-       "sexual questions, with nothing shown.", visual=False, audio=True),
-    _t("language.crude_sexual_jokes", "Sexual jokes or innuendo", F.LANGUAGE,
-       "A sexual joke, double entendre, or crude suggestive remark is made.",
-       visual=False, audio=True),
+       "The strongest tier of profanity: the C-word, the N-word used non-hostilely, "
+       "cunt, and other words that are widely treated as the worst in the language.", visual=False, audio=True),
+    _t("language.slur", "A slur against a group", F.LANGUAGE,
+       "A slur, epithet or derogatory term aimed at someone's race, ethnicity, national "
+       "origin, religion, sexuality, gender identity, sex, disability or immigration "
+       "status. Includes a slur used by a character who is meant to be wrong.", visual=False, audio=True),
+    _t("language.anatomy", "Words for body parts or sex acts", F.LANGUAGE,
+       "Vocabulary for genitals, bodily functions or sex acts, in any register from "
+       "clinical to crude: cunt, cock, pussy, tits, balls, piss, shit, and explicit nouns "
+       "for sex acts.", visual=False, audio=True),
+    _t("language.cruel_tone", "Cruel insults or a hostile tone", F.LANGUAGE,
+       "Dialogue meant to cut someone down: a cruel or demeaning insult about a body, an "
+       "ability, looks, intelligence, or worth, or a persistent tone of contempt, mockery "
+       "or dismissal directed at a character.", visual=False, audio=True),
+    _t("language.blasphemy", "Religious language as an expletive", F.LANGUAGE,
+       "Religious names or phrases used as swearing or exclamations: God damn it, Jesus "
+       "Christ as an expletive, hell and damn as emphasis, or sacrilegious phrasing.", visual=False, audio=True),
+    _t("language.sexual_talk", "Explicit sexual talk or jokes", F.LANGUAGE,
+       "Speech about sex: explicit description of sex or of what someone wants to do, "
+       "graphic sexual jokes or innuendo, discussion of a sexual encounter, or talk of "
+       "body parts in a sexual way.", visual=False, audio=True),
     _t("language.unclear", "Language unclear", F.LANGUAGE,
-       "Speech that appears offensive or adult but the words cannot be made out.",
-       visual=False, audio=True, low_precision=True),
+       "Words that could be offensive but cannot be made out: audio clipped, music over "
+       "the dialogue, a mumbled or bleeped word, a caption that is missing or wrong, or "
+       "dialogue in a language the transcript did not resolve.", visual=False, audio=True),
 
-    # -------------------------------------------------------------- substance
+    # --------------------------------------------------------------- substance
     _t("substance.smoking", "Smoking or vaping", F.SUBSTANCE,
-       "A character smokes a cigarette, cigar, pipe or vapes, or a lit cigarette is held or "
-       "shown."),
+       "A character smoking or vaping a cigarette, cigar, pipe, joint, vape or e-cigarette, "
+       "including holding a lit one."),
     _t("substance.heavy_drinking", "Drinking to excess", F.SUBSTANCE,
-       "Characters drink alcohol heavily or drunkenly: getting drunk, many glasses, "
-       "compulsive drinking, alcoholism shown as a problem. A glass of wine at dinner does "
-       "not count."),
-    _t("substance.drug_use", "Drug use", F.SUBSTANCE,
-       "A character uses illegal drugs or misuses medicine: smoking cannabis, snorting, "
-       "injecting, popping pills to get high, being intoxicated."),
-    _t("substance.drug_preparation_deal", "Dealing or preparing drugs", F.SUBSTANCE,
-       "Drugs being grown, cooked, weighed, packaged, exchanged for money, or a transaction "
-       "being discussed."),
+       "Drinking shown as excess or as a problem: binge drinking, getting visibly drunk, "
+       "drinking alone to cope, flask or bottle at lips repeatedly, drinking before driving, "
+       "or alcoholism as a plot point. A glass of wine at dinner does not count."),
+    _t("substance.drugs", "Drug use, dealing or preparation", F.SUBSTANCE,
+       "Illegal or misused drugs: snorting, injecting, smoking or swallowing drugs, a "
+       "line, needle, pipe or pill being used, drugs being weighed, cut, bagged, sold or "
+       "bought, or a crop/lab operation."),
 
-    # ----------------------------------------------------------------- safety
-    # Residuals and enforced protections. The reason these exist: a sweep batch
-    # that the model cannot explain still must not be shown, and once categories
-    # get specific, "did not fit a box" silently becomes "shown unblurred".
+    # ------------------------------------------------------------------ safety
+    # Not content categories: these are how the scan reports its own uncertainty.
+    # They are never merged away, and exposure_with_minor is the single
+    # always_censor floor that no selection can switch off.
     _t("safety.unclassified", "Scan could not name it", F.SAFETY,
        "The scan picked this moment out and could not describe it as any specific thing.",
        visual=True),
@@ -806,6 +706,123 @@ _RESIDUAL = {
 # A model that invents "nudity.nude_woman_topless_half" must not silently
 # delete the finding. Unknown ids are folded into the family residual where one
 # exists, and into safety.unclassified when even the family is unrecognised.
+# Old tag ids, mapped onto the tag that replaced them in the 2026-10-30 merge
+# (v2's 121 tags -> v3's 68). Without this, a scan file made before the merge loses
+# every merged-away id into its family residual: the film stays censorable, which is
+# the safety requirement, but "bare midriff" becomes "nudity unclear" and the viewer
+# is told the scan could not tell what it plainly told the previous scan. Folding onto
+# the surviving tag keeps an old scan useful AND lets it drive the new chooser.
+#
+# Many-to-one is the only shape here; no id maps to two, because a scan file must not
+# gain censorship it did not record.
+LEGACY_TAGS: dict[str, str] = {
+    # gore
+    "gore.blood_moderate": "gore.blood",
+    "gore.blood_trivial": "gore.blood",
+    "gore.bones_fracture": "gore.wound_bone",
+    "gore.corpse_decay": "gore.corpse",
+    "gore.illness_symptoms": "gore.illness",
+    "gore.medical_noblood": "gore.illness",
+    "gore.mutilation": "gore.dismemberment",
+    "gore.needle_injection": "gore.medical",
+    "gore.organs_tissue": "gore.dismemberment",
+    "gore.surgery_medical": "gore.medical",
+    "gore.vomit": "gore.bodily_fluids",
+    "gore.wound_detail": "gore.wound_bone",
+    "gore.wound_open": "gore.wound_bone",
+    # harm
+    "harm.overdose": "harm.self_injury",
+    "harm.self_harm_depicted": "harm.self_injury",
+    "harm.suicide_depicted": "harm.suicide",
+    # intimacy
+    "intimacy.couple_in_bed_undressed": "intimacy.undressing_another",
+    "intimacy.kissing_brief": "intimacy.kissing",
+    "intimacy.kissing_passionate": "intimacy.kissing",
+    "intimacy.morning_after": "intimacy.simulated_sex",
+    "intimacy.sex_suggested_offscreen": "intimacy.simulated_sex",
+    # language
+    "language.anatomy_crude": "language.anatomy",
+    "language.anatomy_words": "language.anatomy",
+    "language.blasphemy_religious": "language.blasphemy",
+    "language.crude_sexual_jokes": "language.sexual_talk",
+    "language.degradation_insult": "language.cruel_tone",
+    "language.hostile_tone_general": "language.cruel_tone",
+    "language.profanity_common": "language.profanity",
+    "language.profanity_mild": "language.profanity",
+    "language.sexual_talk_explicit": "language.sexual_talk",
+    "language.slur_disability": "language.slur",
+    "language.slur_lgbtq": "language.slur",
+    "language.slur_racial": "language.slur",
+    "language.slur_religious_ethnic": "language.slur",
+    "language.slur_sexist": "language.slur",
+    # nudity
+    "nudity.bathing_shower": "nudity.vulnerable_context",
+    "nudity.behind_covers": "nudity.vulnerable_context",
+    "nudity.breastfeeding_female": "nudity.medical_or_maternal",
+    "nudity.breasts_full_female": "nudity.breasts_bare_female",
+    "nudity.changing_clothes": "nudity.vulnerable_context",
+    "nudity.childbirth_female": "nudity.medical_or_maternal",
+    "nudity.cleavage_female": "nudity.breasts_partial_female",
+    "nudity.covered_only_towel_female": "nudity.undressed_covered",
+    "nudity.covered_only_towel_male": "nudity.undressed_covered",
+    "nudity.erection_visible_male": "nudity.genital_shape",
+    "nudity.genital_outline_female": "nudity.genital_shape",
+    "nudity.hosiery_female": "nudity.revealing_clothing_female",
+    "nudity.legs_thigh_bare_female": "nudity.skin_bare_female",
+    "nudity.masturbation_female": "nudity.self_touch",
+    "nudity.masturbation_male": "nudity.self_touch",
+    "nudity.medical_exposure_female": "nudity.medical_or_maternal",
+    "nudity.medical_exposure_male": "nudity.medical_or_maternal",
+    "nudity.midriff_bare_female": "nudity.skin_bare_female",
+    "nudity.nipples_visible_female": "nudity.breasts_bare_female",
+    "nudity.sheer_tight_male": "nudity.sheer_or_wet_male",
+    "nudity.sheer_transparent_female": "nudity.sheer_or_wet_female",
+    "nudity.shoulders_back_bare_female": "nudity.skin_bare_female",
+    "nudity.swimwear_female": "nudity.underwear_swimwear_female",
+    "nudity.swimwear_male": "nudity.underwear_swimwear_male",
+    "nudity.tight_revealing_female": "nudity.revealing_clothing_female",
+    "nudity.underwear_lingerie_female": "nudity.underwear_swimwear_female",
+    "nudity.underwear_male": "nudity.underwear_swimwear_male",
+    "nudity.wet_clothing_female": "nudity.sheer_or_wet_female",
+    "nudity.wet_clothing_male": "nudity.sheer_or_wet_male",
+    # substance
+    "substance.drug_preparation_deal": "substance.drugs",
+    "substance.drug_use": "substance.drugs",
+    # violence
+    "violence.argument": "violence.threat_or_weapon",
+    "violence.battle_war": "violence.mass_scene",
+    "violence.beating_prolonged": "violence.beating_abuse",
+    "violence.burning_scalding": "violence.torture_burning",
+    "violence.car_crash": "violence.mass_scene",
+    "violence.confinement_kidnap": "violence.restraint_confinement",
+    "violence.destruction_disaster": "violence.mass_scene",
+    "violence.domestic_abuse": "violence.beating_abuse",
+    "violence.execution": "violence.death",
+    "violence.explosion": "violence.mass_scene",
+    "violence.fight_armed": "violence.fight",
+    "violence.fight_unarmed": "violence.fight",
+    "violence.murder": "violence.death",
+    "violence.murder_attempt": "violence.death",
+    "violence.restraint_capture": "violence.restraint_confinement",
+    "violence.shove_grab": "violence.fight",
+    "violence.slap_hit": "violence.fight",
+    "violence.torture": "violence.torture_burning",
+    "violence.verbal_threat": "violence.threat_or_weapon",
+    "violence.weapon_display": "violence.threat_or_weapon",
+}
+
+
+def resolve_legacy_tag(tag_id: str) -> str | None:
+    """The current id for a tag id from an older vocabulary, or None.
+
+    An id that is still current resolves to itself, which is what makes this safe to
+    call on every tag rather than only on files that claim to be old.
+    """
+    if tag_id in TAGS:
+        return tag_id
+    return LEGACY_TAGS.get(tag_id)
+
+
 def normalize_tags(raw_ids: list, seen_unknown: list[str] | None = None) -> list[str]:
     """Validate model output against the vocabulary.
 
@@ -833,6 +850,14 @@ def normalize_tags(raw_ids: list, seen_unknown: list[str] | None = None) -> list
                 tid = f"{head}.{rest}"
         if tid in TAGS:
             _add(tid)
+            continue
+        legacy = LEGACY_TAGS.get(tid)
+        if legacy:
+            # A retired id from a scan file written before the merge: record the tag
+            # that absorbed it, and do not report it as invented output -- the scan
+            # said something precise, and folding it into `unclear` would claim the
+            # opposite.
+            _add(legacy)
             continue
         if seen_unknown is not None and raw not in seen_unknown:
             seen_unknown.append(raw)
@@ -1060,13 +1085,8 @@ def audio_taxonomy_prompt() -> str:
 # those for free, and re-asking about them on every line of the film is how a
 # cheap pass stops being cheap.
 DIALOGUE_GROUP_IDS: set[str] = {
-    "language.slur_racial", "language.slur_religious_ethnic", "language.slur_lgbtq",
-    "language.slur_disability", "language.slur_sexist",
-    "language.degradation_insult", "language.hostile_tone_general",
-    "language.sexual_talk_explicit", "language.crude_sexual_jokes",
-    "language.anatomy_crude",
-    "substance.smoking", "substance.heavy_drinking", "substance.drug_use",
-    "substance.drug_preparation_deal",
+    "language.slur", "language.cruel_tone", "language.sexual_talk", "language.anatomy",
+    "substance.smoking", "substance.heavy_drinking", "substance.drugs",
 }
 
 

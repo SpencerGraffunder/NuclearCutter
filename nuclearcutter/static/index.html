@@ -177,20 +177,6 @@
   #bench-results th { color: var(--green-dim); }
   .ok { color: var(--green); } .miss { color: var(--red); }
   /* ---- category chooser (built from /api/taxonomy) ---- */
-  .chooser-bar { display: flex; align-items: center; gap: 10px; margin: 8px 0 6px; }
-  #tag-search { flex: 1; min-width: 120px; }
-  .presets { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
-  .presets button { padding: 4px 9px; font-size: 10px; letter-spacing: 1px; }
-  .presets button.on { background: var(--green-dark); border-color: var(--green);
-    color: var(--green); }
-  /* Rendering + minors qualifiers: filter MODIFIERS, not categories, so they
-     sit above the list rather than inside a family where they would read as
-     "another thing to hide". */
-  .qualifiers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
-    margin: 6px 0 10px; padding: 7px 9px; border: 1px solid var(--border);
-    border-radius: 4px; background: #0b0f0b; }
-  .qual-label { color: var(--green-dim); font-size: 10px; letter-spacing: 1px;
-    text-transform: uppercase; }
   .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
     border: 1px solid var(--border); border-radius: 12px; font-size: 11px;
     cursor: pointer; user-select: none; background: #101810; }
@@ -227,8 +213,6 @@
     min-width: 260px; max-width: 420px; font-size: 11px; line-height: 1.5;
     border-radius: 4px; box-shadow: 0 0 16px rgba(0,255,65,.25); }
   .tag:hover .tag-hint, .tag:focus-within .tag-hint { display: block; }
-  .tag.hidden-by-search { display: none; }
-  .fam.hidden-by-search { display: none; }
   .chooser-empty { padding: 10px; color: var(--orange); font-size: 11px; }
   .matrix td, .matrix th { border: 1px solid var(--border); padding: 3px 6px; }
   .matrix select { min-width: 110px; }
@@ -410,18 +394,15 @@ captions shown while audio is muted — never for the scan itself.</span></div>
     hidden</em>. Nothing is ticked by default — tick the categories that matter to you, per
     movie or once for your household. Hover any category to read exactly what it means.</div>
 
-    <div class="chooser-bar">
-      <input type="search" id="tag-search" placeholder="search: bikini, blood, slur, smoking…"
-             autocomplete="off" spellcheck="false">
-      <span id="chooser-count" class="hint" style="width:auto;"></span>
-    </div>
-    <div class="presets" id="presets">
-      <!-- buttons built from /api/taxonomy so a new preset is not a code change here -->
-    </div>
-    <div class="qualifiers">
-      <span class="qual-label">Picture style</span><span id="rendering-chips"></span>
-      <span class="qual-label">Include people</span><span id="minors-chips"></span>
-    </div>
+    <!-- 2026-10-30, on request: the search box, the preset buttons ("nothing",
+         "nudity", "sexual", …), the "Picture style" qualifiers and the "Include
+         people" minors checkboxes are GONE from this panel. Four controls on top of
+         a list of categories was four ways to change what the list means, and the
+         presets were the loudest: one tap rewrote every tick beside it, so the panel
+         could not be read as a record of your choice. They stay in the API and the
+         CLI (`--preset`, `--rendering`, `--minors`); the defaults here are "every
+         picture style" and "protect children", which is what the removed controls
+         were set to anyway. -->
     <div id="chooser"><!-- family groups with their tag chips, built by buildChooser() --></div>
 
     <div class="row"><label>Blur amount</label>
@@ -607,8 +588,7 @@ async function loadTaxonomy() {
     return;
   }
   TAX = d;
-  buildPresets();
-  buildQualifiers();
+  refreshPassThrough(state && state.settings);
   buildChooser();
   buildLegend();
   if (state && state.settings) applySelectionToChooser(state.settings);
@@ -665,64 +645,13 @@ function buildLegend() {
   if (count) box.appendChild(count);   // keep the counter inside the legend row
 }
 
-function buildPresets() {
-  const box = $("presets");
-  box.innerHTML = "";
-  // Labels, not the server's keys, so the button says what it hides in words a
-  // person would use. Order runs least -> most, the way the old levels did.
-  const LABELS = {
-    none: ["Nothing", "censor nothing at all — the default"],
-    nudity: ["Nudity", "nudity only"],
-    sexual: ["Sexual", "nudity and intimacy"],
-    language: ["Language", "swearing, slurs, adult talk, smoking and drinking"],
-    graphic: ["Graphic", "violence and blood — not self-harm, tick that separately"],
-    everything: ["Everything", "every category that can be chosen"],
-  };
-  // Order comes from the server (taxonomy.PRESET_NAMES), not from a list here,
-  // so a preset added in Python shows up in the right place in the row.
-  (TAX.preset_order || Object.keys(TAX.presets)).forEach(name => {
-    if (!(name in TAX.presets)) return;
-    const [label, title] = LABELS[name] || [name, ""];
-    const b = document.createElement("button");
-    b.type = "button"; b.dataset.preset = name; b.textContent = label; b.title = title;
-    b.addEventListener("click", () => {
-      const ids = TAX.presets[name];
-      document.querySelectorAll('#chooser input[data-tag]').forEach(i => {
-        i.checked = ids.includes(i.dataset.tag);
-      });
-      chooserChanged();
-    });
-    box.appendChild(b);
-  });
-}
-
-function buildQualifiers() {
-  // Rendering styles and the minors flag are filter MODIFIERS: they narrow which
-  // detections a ticked category applies to. Both default to all-on, so a wrong
-  // guess by the model can never silently un-censor something.
-  const mk = (container, items, selected) => {
-    const box = $(container);
-    box.innerHTML = "";
-    items.forEach(it => {
-      const lab = document.createElement("label");
-      lab.className = "chip";
-      const cb = document.createElement("input");
-      cb.type = "checkbox"; cb.value = it.id; cb.checked = selected.includes(it.id);
-      cb.title = it.description || it.label || "";
-      const span = document.createElement("span");
-      span.textContent = it.label || it.id;
-      lab.appendChild(cb); lab.appendChild(span);
-      const sync = () => { lab.classList.toggle("on", cb.checked); };
-      cb.addEventListener("change", () => { sync(); settingsChanged(); });
-      sync();
-      box.appendChild(lab);
-    });
-  };
-  mk("rendering-chips", TAX.rendering, state && state.settings
-      ? (state.settings.rendering || []) : TAX.rendering.map(r => r.id));
-  mk("minors-chips", TAX.minors, state && state.settings
-      ? (state.settings.minors || []) : TAX.minors.map(m => m.id));
-}
+// 2026-10-30, on request: buildPresets() and buildQualifiers() are gone with their
+// markup. The preset buttons rewrote every tick beside them on one tap, which made the
+// panel unreadable as a record of a choice, and "Picture style" / "Include people"
+// were modifiers sitting on top of a category list. Both still exist in the API and
+// CLI (`--preset`, `--rendering`, `--minors`); the page now simply uses the server
+// defaults for those, which are the values the removed checkboxes were pre-ticked to:
+// every picture style, and children protected.
 
 function buildChooser() {
   const host = $("chooser");
@@ -818,26 +747,12 @@ function buildTagChip(t) {
 }
 
 function chooserChanged() {
-  // A preset is only "on" while it exactly matches the ticked set, so ticking
-  // one extra box visibly un-highlights the button instead of lying about it.
-  const now = new Set(selectedTagIds());
-  document.querySelectorAll("#presets button").forEach(b => {
-    const ids = TAX.presets[b.dataset.preset] || [];
-    b.classList.toggle("on", ids.length === now.size && ids.every(i => now.has(i)));
-  });
-  updateChooserCount();
   renderTimeline();   // the marks light up as you tick, before any render
   settingsChanged();
 }
 
 function updateChooserCount() {
   const n = selectedTagIds().length;
-  const el = $("chooser-count");
-  if (el) {
-    el.textContent = n === 0
-      ? "nothing will be censored"
-      : n + " of " + TAX.tags.length + " categories ticked";
-  }
   const fams = {};
   document.querySelectorAll("#chooser input[data-tag]").forEach(i => {
     const fam = i.dataset.tag.split(".")[0];
@@ -870,20 +785,8 @@ function applySelectionToChooser(s) {
     const val = fa[sel2.dataset.famAction];
     if (val != null && [...sel2.options].some(o => o.value === val)) sel2.value = val;
   });
-  const syncChips = (id, vals) => {
-    document.querySelectorAll(`#${id} input`).forEach(i => {
-      i.checked = (vals || []).includes(i.value);
-      i.parentElement.classList.toggle("on", i.checked);
-    });
-  };
-  syncChips("rendering-chips", s.rendering);
-  syncChips("minors-chips", s.minors);
   if ($("polish_descriptions")) $("polish_descriptions").checked = !!s.polish_descriptions;
-  updateChooserCount();
-  document.querySelectorAll("#presets button").forEach(b => {
-    const ids = TAX.presets[b.dataset.preset] || [];
-    b.classList.toggle("on", ids.length === sel.size && ids.every(i => sel.has(i)));
-  });
+  refreshPassThrough(s);
 }
 
 
@@ -983,8 +886,7 @@ function setRenderSettingsDisabled(d) {
   // The chooser IS the render settings, so it locks while a render runs: changing
   // what is ticked mid-encode would leave the output describing a choice nobody
   // made, and the next poll would fight the user's clicks.
-  document.querySelectorAll("#chooser input, #chooser select, #presets button, "
-                              + "#rendering-chips input, #minors-chips input, #tag-search")
+  document.querySelectorAll("#chooser input, #chooser select")
     .forEach(el => { if (el.dataset.tag !== undefined && el.disabled && el.title === "always censored") return; el.disabled = d; });
 }
 
@@ -1026,8 +928,17 @@ function collectSettings() {
     summary_max_context: parseInt($("summary_max_context").value, 10) || 30000,
     selection: selectedTagIds(),
     family_actions: familyActionSettings(),
-    rendering: checkedValues("rendering-chips"),
-    minors: checkedValues("minors-chips"),
+    // These two are NOT read from the DOM any more, and that is load-bearing rather
+    // than incidental. When the "Picture style" / "Include people" checkboxes were
+    // removed, this line went on reading `#rendering-chips input:checked`, which now
+    // matches nothing and returns []. An empty renderings list makes the server's
+    // rendering_allowed() return False for every detection -- the page would have
+    // quietly switched OFF all censoring while still showing every tick. So the
+    // values are carried through from the server instead: whatever the last scan
+    // used (which --rendering / --minors may have narrowed), defaulting to all of
+    // them. The GUI stops offering the choice; it must not invent one.
+    rendering: passThrough.rendering,
+    minors: passThrough.minors,
     polish_descriptions: $("polish_descriptions") ? $("polish_descriptions").checked : false,
   };
 }
@@ -1049,10 +960,17 @@ function familyActionSettings() {
   });
   return out;
 }
-function checkedValues(containerId) {
-  const out = [];
-  document.querySelectorAll(`#${containerId} input:checked`).forEach(i => out.push(i.value));
-  return out;
+// Rendering styles and the minors flag whose checkboxes left this page (see
+// collectSettings). Seeded from /api/taxonomy the moment it loads, then overwritten
+// by every /api/state so a CLI-set value survives a GUI save.
+const passThrough = { rendering: [], minors: [] };
+function refreshPassThrough(s) {
+  const allR = (TAX && TAX.rendering || []).map(r => r.id);
+  const allM = (TAX && TAX.minors || []).map(m => m.id);
+  passThrough.rendering = (s && Array.isArray(s.rendering) && s.rendering.length)
+    ? s.rendering.slice() : allR;
+  passThrough.minors = (s && Array.isArray(s.minors) && s.minors.length)
+    ? s.minors.slice() : allM;
 }
 function derivedUrlHint(address) {
   // Mirror of the server's derive_server_urls: LLM on :8080 (/v1), whisper on
@@ -1921,48 +1839,9 @@ function attachInputListeners() {
    "blur_strength","mute_padding","blur_padding"]
     .forEach(id => $(id).addEventListener("blur", settingsChanged));
   $("show_prompts").addEventListener("change", settingsChanged);
-  // The chooser builds its own listeners (chips, family selects, presets), so
-  // nothing to wire here except the search box, which filters without saving.
-  $("tag-search").addEventListener("input", filterChooser);
+  // The chooser builds its own listeners (chips and family selects); the search box
+  // that used to be wired here was removed on request.
 }
-// Filter the chooser by typing. Matching the hint as well as the label is the
-// point: someone searching "surgery" should find gore.open_wound_* even though
-// the word never appears in the label, because that is what the hint says.
-function filterChooser() {
-  const q = $("tag-search").value.trim().toLowerCase();
-  const rx = q ? new RegExp(q.split(/\s+/).join("|"), "i") : null;
-  let anyVisible = false;
-  document.querySelectorAll("#chooser .fam").forEach(det => {
-    let famHas = false;
-    det.querySelectorAll(".tag").forEach(chip => {
-      const id = chip.dataset.tagId || "";
-      const tag = TAX.tags.find(t => t.id === id);
-      const hay = id + " " + (tag ? tag.label + " " + tag.hint : "");
-      const hit = !rx || rx.test(hay);
-      chip.classList.toggle("hidden-by-search", !hit);
-      if (hit) famHas = true;
-    });
-    const fam = TAX.families.find(f => f.id === det.dataset.fam);
-    const famHit = !rx || (fam && rx.test(fam.label + " " + fam.blurb));
-    det.classList.toggle("hidden-by-search", !famHas && !famHit);
-    if (rx && (famHas || famHit)) det.open = true;   // show what matched
-    if (det.classList.contains("hidden-by-search")) return;
-    anyVisible = true;
-  });
-  let empty = document.querySelector(".chooser-empty");
-  if (!anyVisible && rx) {
-    if (!empty) {
-      empty = document.createElement("div");
-      empty.className = "chooser-empty";
-      $("chooser").appendChild(empty);
-    }
-    empty.textContent = 'nothing matches "' + q + '". The categories are fixed '
-      + 'vocabulary, not free text — try a simpler word.';
-  } else if (empty && !rx) {
-    empty.remove();
-  }
-}
-
 wire(); loadTaxonomy(); poll();
 setInterval(poll, 1000);
 </script>
