@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 
 from nuclearcutter.detection.visual_scan import (
-    CandidateRange, SweepWindow, VisualScanDetector, _clean_triggers,
+    CandidateRange, SWEEP_FRAMES_PER_CALL, SweepWindow, VisualScanDetector,
+    _clean_triggers,
     _flagged_timestamps, _genders_hint, _identify_frame_count, _merge_subjects,
     _minors_of, _rendering_of, _subjects_of, build_identify_prompt,
     build_sweep_prompt, merge_windows,
@@ -315,14 +316,18 @@ def test_sweep_reports_progress_in_absolute_counts(tiny_video):
 
 
 def test_resume_skips_already_swept_samples(tiny_video):
+    # Interval chosen from the batch size so the 4 s video always spans >= 4
+    # full batches; a half-resume must then skip roughly half the calls.
+    interval = 3.5 / (SWEEP_FRAMES_PER_CALL * 4 + 1)
     client = FakeClient(lambda p, f: _sweep_reply([]))
     det = VisualScanDetector(client)
-    _, full = det.sweep(tiny_video, sample_interval=0.5)
+    _, full = det.sweep(tiny_video, sample_interval=interval)
     assert full.frames_total > 0
+    assert client.calls >= 4  # sanity: the test needs several batches to mean anything
 
     client2 = FakeClient(lambda p, f: _sweep_reply([]))
     det2 = VisualScanDetector(client2)
-    _, resumed = det2.sweep(tiny_video, sample_interval=0.5,
+    _, resumed = det2.sweep(tiny_video, sample_interval=interval,
                             resume_from=full.frames_total // 2)
     # Progress is reported in ABSOLUTE counts so the GUI bar does not jump back.
     assert resumed.frames_done == full.frames_total
