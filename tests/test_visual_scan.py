@@ -507,3 +507,132 @@ def test_identify_drops_frames_that_do_not_exist(monkeypatch, tiny_video):
     assert ok is False
     assert client.calls == 0
     assert out.tags == ["safety.unclassified"]
+
+
+# --------------------------------------------------------------------------
+# Sweep query concurrency (the sweep_concurrency knob)
+# --------------------------------------------------------------------------
+
+class _ProbeClient:
+    """FakeClient that measures overlap and can shape per-call latency.
+
+    `delays[i]` is the sleep of call i (index by call order); `fail_calls`
+    makes those call numbers raise so a batch burns retries from the pool.
+    """
+
+    def __init__(self, delay=0.05, delays=None, fail_calls=(), flag_all=False):
+        import threading
+        import time
+        self._lock = threading.Lock()
+        self._time = time
+        self._delay = delay
+        self._delays = delays or {}
+        self._fail_calls = set(fail_calls)
+        self._reply = (_sweep_reply(["skin"], frames=[0]) if flag_all
+                       else _sweep_reply([]))
+        self.active = 0
+        self.peak = 0
+        self.calls = 0
+
+    def vision_query_json(self, prompt, frame_paths, max_pixels=None):
+        with self._lock:
+            self.calls += 1
+            n = self.calls
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        self._time.sleep(self._delays.get(n - 1, self._delay))
+        with self._lock:
+            self.active -= 1
+        if n in self._fail_calls:
+            raise RuntimeError("server down")
+        return dict(self._reply, triggers=list(self._reply["triggers"]),
+                    frames=list(self._reply["frames"]))
+
+
+def _two_frames_per_call(monkeypatch):
+    from nuclearcutter.detection import visual_scan as _vs
+    monkeypatch.setattr(_vs, "SWEEP_FRAMES_PER_CALL", 2)
+
+
+def test_detector_clamps_sweep_concurrency():
+    client = FakeClient(lambda p, f: _sweep_reply([]))
+    assert VisualScanDetector(client).sweep_concurrency == \
+        __import__("nuclearcutter.detection.visual_scan",
+                   fromlist=["x"]).DEFAULT_SWEEP_CONCURRENCY
+    assert VisualScanDetector(client, sweep_concurrency=0).sweep_concurrency == 1
+    assert VisualScanDetector(client, sweep_concurrency=9).sweep_concurrency == 4
+
+
+def test_sweep_overlaps_queries_when_concurrency_allows(monkeypatch, tiny_video):
+    _two_frames_per_call(monkeypatch)  # 8 samples -> 4 batches
+    probe = _ProbeClient(delay=0.05)
+    det = VisualScanDetector(probe, sweep_concurrency=2)
+    _, stats = det.sweep(tiny_video, sample_interval=0.5)
+    assert stats.batches_queried == 4
+    assert probe.calls == 4
+    assert probe.peak == 2, "two batches must be able to run simultaneously"
+
+
+def test_sweep_concurrency_one_stays_serial(monkeypatch, tiny_video):
+    _two_frames_per_call(monkeypatch)
+    probe = _ProbeClient(delay=0.05)
+    det = VisualScanDetector(probe, sweep_concurrency=1)
+    det.sweep(tiny_video, sample_interval=0.5)
+    assert probe.peak == 1, "concurrency=1 must never overlap two queries"
+
+
+def test_results_merge_in_chronological_order_under_overlap(monkeypatch, tiny_video):
+    """A slow early batch may not let later batches overtake its RESULT:
+    window merging and callbacks are chronological by contract."""
+    _two_frames_per_call(monkeypatch)
+    # every batch flags its first frame; batch 1's call is slow so a
+    # completion-ordered implementation would emit the later batches first
+    probe = _ProbeClient(delays={0: 0.4}, flag_all=True)
+    flagged: list[float] = []
+    det = VisualScanDetector(probe, sweep_concurrency=2)
+    ranges, stats = det.sweep(tiny_video, sample_interval=0.5,
+                              on_flagged_window=lambda s, e, t, c: flagged.append(s))
+    assert stats.batches_failed == 0 and probe.peak == 2 and flagged, \
+        "the order assertion is only meaningful with flags to order"
+    assert flagged == sorted(flagged), "flagged callbacks must fire in time order"
+
+    # and the merged ranges must equal the serial run's ranges exactly
+    probe2 = _ProbeClient(delay=0.0, flag_all=True)
+    serial_ranges, _ = VisualScanDetector(probe2, sweep_concurrency=1).sweep(
+        tiny_video, sample_interval=0.5)
+    assert [(r.start, r.end) for r in ranges] == \
+        [(r.start, r.end) for r in serial_ranges]
+
+
+def test_failed_batch_under_overlap_still_becomes_doubt(monkeypatch, tiny_video):
+    _two_frames_per_call(monkeypatch)
+    # The first five calls raise. With two workers, pigeonhole says exactly one
+    # batch owns >=3 of those five and exhausts MAX_VLM_RETRIES(3); the other
+    # owns <=2 and recovers on its third attempt (call 6+) — one `doubt`
+    # window, deterministically, whatever the interleaving.
+    probe = _ProbeClient(delay=0.02, fail_calls={1, 2, 3, 4, 5})
+    det = VisualScanDetector(probe, sweep_concurrency=2)
+    ranges, stats = det.sweep(tiny_video, sample_interval=0.5)
+    assert stats.batches_failed == 1
+    doubts = [r for r in ranges if "doubt" in r.triggers]
+    assert len(doubts) == 1
+
+
+def test_stop_event_mid_overlap_joins_cleanly(monkeypatch, tiny_video):
+    import threading
+    _two_frames_per_call(monkeypatch)
+    probe = _ProbeClient(delay=0.08)
+    ev = threading.Event()
+    done: list[tuple[int, int]] = []
+
+    def _progress(d, total):
+        done.append((d, total))
+        if len(done) >= 2:
+            ev.set()
+
+    det = VisualScanDetector(probe, sweep_concurrency=2)
+    ranges, stats = det.sweep(tiny_video, sample_interval=0.5, stop_event=ev,
+                              on_progress=_progress)
+    assert stats.frames_done < stats.frames_total, "a stopped sweep is partial"
+    assert not [t for t in threading.enumerate()
+                if t.name.startswith("sweep_query")], "worker threads must join"

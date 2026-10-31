@@ -139,6 +139,7 @@ def scan(
     whisper_cfg: WhisperConfig | None = None,
     sweep_interval: float | None = None,
     sweep_resolution: str | None = None,
+    sweep_concurrency: int | None = None,
     identify_scale: str | None = None,
     status_path: Path | str | None = None,
     partial_result_path: Path | str | None = None,
@@ -355,7 +356,8 @@ def scan(
         progress_callback("visual_sweep", None)
     _phase("sweep")
     detector = VisualScanDetector(client, scale=scale, sweep_resolution=sweep_resolution,
-                                  identify_scale=identify_scale)
+                                  identify_scale=identify_scale,
+                                  sweep_concurrency=sweep_concurrency)
 
     def _on_flagged_window(start, end, triggers, confidence):
         if status is not None:

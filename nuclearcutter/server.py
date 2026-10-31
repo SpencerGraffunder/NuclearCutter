@@ -300,6 +300,7 @@ class AppState:
         self.whisper_model = ""
         self.scale = "480p"
         self.sweep_resolution = "full"  # sweep-pass pixel preset (vlm_confirm.SWEEP_QUALITY_PIXELS)
+        self.sweep_concurrency = 2  # overlapping sweep VLM calls; 1 = serial
         self.sweep_interval = 2.0
         # --- Render settings ----------------------------------------------
         self.output_name = ""  # empty -> <stem>_cleaned
@@ -544,6 +545,7 @@ class AppState:
             "whisper_model": self.whisper_model,
             "scale": self.scale,
             "sweep_resolution": self.sweep_resolution,
+            "sweep_concurrency": self.sweep_concurrency,
             "sweep_interval": self.sweep_interval,
             "output_name": self.output_name,
             "scan_path": self.scan_path,
@@ -599,6 +601,14 @@ class AppState:
             if res not in SWEEP_QUALITY_PIXELS:
                 raise ValueError("sweep_resolution must be full/360p/240p")
             self.sweep_resolution = res
+        if "sweep_concurrency" in payload:
+            try:
+                conc = int(payload["sweep_concurrency"])
+            except (TypeError, ValueError):
+                raise ValueError("sweep_concurrency must be an integer 1-4")
+            if not 1 <= conc <= 4:
+                raise ValueError("sweep_concurrency must be 1-4")
+            self.sweep_concurrency = conc
         if "sweep_interval" in payload:
             self.sweep_interval = float(payload["sweep_interval"])
             if self.sweep_interval <= 0:
@@ -1152,6 +1162,7 @@ class AppState:
                 whisper_cfg=self._whisper_cfg(),
                 sweep_interval=self.sweep_interval,
                 sweep_resolution=self.sweep_resolution,
+                sweep_concurrency=self.sweep_concurrency,
                 status_path=status_path,
                 partial_result_path=partial_path,
                 scale=self.scale,

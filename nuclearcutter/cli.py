@@ -156,6 +156,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         whisper_cfg=whisper_cfg,
         sweep_interval=args.sweep_interval,
         sweep_resolution=args.sweep_resolution,
+        sweep_concurrency=args.sweep_concurrency,
         status_path=status_path,
         partial_result_path=out_path,
         scale=args.scale or DEFAULT_SCALE,
@@ -524,6 +525,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Per-image pixel cap for the sweep pass only — lower is much faster "
                              "(the vision server's preprocessing cost scales with pixels); "
                              "confirm/summary passes always run at full --scale (default: full)")
+    p_scan.add_argument("--sweep-concurrency", type=int, default=2, metavar="N",
+                        help="sweep VLM calls kept in flight at once, 1-4 (default 2). A call's "
+                             "cost is mostly the fixed per-request overhead, so overlapping two "
+                             "can nearly halve sweep time when the model server decodes "
+                             "conversations together; servers without that simply queue (1 is "
+                             "the old serial behavior)")
     p_scan.add_argument("--no-dialogue-sweep", action="store_true",
                         help="Skip the dialogue sweep: the pass that reads the whole transcript "
                              "for slurs, threats and sexual talk that a wordlist cannot see. "
