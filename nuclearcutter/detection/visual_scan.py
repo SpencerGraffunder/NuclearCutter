@@ -68,13 +68,18 @@ DEFAULT_SWEEP_INTERVAL = DEFAULT_SWEEP_INTERVAL_SECONDS
 # the sweep; with sweep_resolution capping pixels and thinking off, what
 # dominates instead is a fixed ~8s cost per fresh request on the model server
 # (the conversation cache cannot carry over across batches because every batch
-# has new pictures) plus ~0.5-1s per image. So MORE frames per call is the
-# speed lever: measured live with never-seen 240p frames, 4/call = 2.8-3.6
-# s/frame, 8/call = 1.5, 16/call = 0.9. Recall-checked against a full-film
-# sidecar ground truth (10-min clip, 302 samples): 16/call covers 75/80 (94%)
-# GT detections at 375s vs 8/call 72/80 (90%) at 523s -- faster AND better
-# recall; 4/call only reaches 96% and costs 3.7x.
-SWEEP_FRAMES_PER_CALL = 16
+# has new pictures) plus ~0.5-1s per image and a per-batch ffmpeg seek. So
+# MORE frames per call is the speed lever: measured live on a dense 10-min
+# clip, wall per sweep pass was 4/call = 1399s, 8/call = 523s, 16/call = 375s.
+# Recall was checked against the full-film sidecar at EVENT level (missed GT
+# detections clustered into moments; edge detections outside the clip cut
+# themselves out of every arm): 4/call and 8/call both reproduce every interior
+# GT moment, while 16/call MISSES ONE that both smaller batches catch — with 16
+# pictures in a call the model dilutes its attention and skips a brief moment.
+# 8/call is therefore the default: 2.7x faster with no measured recall loss.
+# 16/call is another +28% but sacrifices accuracy; only raise it if you accept
+# that trade deliberately.
+SWEEP_FRAMES_PER_CALL = 8
 
 # How many batches' frames one chunked ffmpeg pass extracts. Frames are grabbed
 # in chunks (seek once, decode forward) instead of one seek+decode PER FRAME:
