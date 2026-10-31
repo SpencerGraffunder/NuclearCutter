@@ -1,32 +1,213 @@
-# Starter profanity wordlist for NuclearCutter.
-# One word per line, lowercase. Lines starting with # are ignored.
-# This is intentionally a starting point, not exhaustive — edit freely for
-# your own use, or open a PR to improve the default list.
-# Remember: this wordlist is only the first pass. Every match here is
-# re-checked in context by an LLM before being flagged (see
-# nuclearcutter/detection/profanity.py) — so it's fine (and expected) for this
-# list to be broad/loose, including mild words, since context is what
-# actually decides.
+# Default profanity wordlist for NuclearCutter.
+# One word (or short phrase) per line, lowercase. Lines starting with # are
+# ignored, and surrounding whitespace is stripped, so this file is safe to edit
+# by hand.
+#
+# This is a TRIGGER list, not a verdict. Every match is re-checked in context by
+# an LLM (see nuclearcutter/detection/language.py), which decides WHICH category
+# the line belongs to — "ass" inside "assassin", "hell" in "hell no", and a slur
+# quoted to condemn it are all rejected there. So being broad here is cheap and
+# being narrow is expensive: a word missing from this file can only be caught by
+# the dialogue sweep's judgement, never by a rule.
+#
+# The section headings are a reading order only. They do not decide the tag: the
+# LLM's answer does, so a "mild" word used as a weapon is still tagged as the
+# insult it was, and a severe word used clinically may be tagged as anatomy.
 
-damn
-hell
-ass
-asshole
-bastard
-bitch
-bullshit
+# --- mild / minimally offensive -------------------------------------------
 crap
-dick
-piss
-shit
-fuck
-fucking
-fucked
-motherfucker
+crappy
+darn
+dang
+drat
+heck
+hell
+bloody
+bugger
+git
+prat
+knob
+berk
+blimey
+sod
+sodding
+flipping
+frigging
+effing
 goddamn
-cunt
-cock
+goddammit
+
+# --- moderate --------------------------------------------------------------
+damn
+damned
+dammit
+ass
+asses
+asshole
+assholes
+arse
+arsed
+arsehole
+jackass
+jackasses
+dumbass
+bastard
+bastards
+bitch
+bitches
+bitching
+bitchy
 prick
+pricks
+dick
+dicks
+dickhead
+cock
+cocks
+cockblock
+twat
+wanker
+tosser
+bollocks
+piss
+pissed
+pissing
+shit
+shits
+shitting
+shitted
+shite
+bullshit
+horseshit
+clusterfuck
 douche
-slut
+douchebag
+douchey
+shithead
+smartass
+pain in the ass
 whore
+whores
+slut
+sluts
+slutty
+skank
+
+# --- severe ----------------------------------------------------------------
+fuck
+fucks
+fucked
+fucking
+fucker
+fuckers
+fuckin
+fuckwit
+fuckface
+fuckup
+motherfuck
+motherfucker
+motherfuckers
+motherfucking
+cunt
+cunts
+twunt
+dipshit
+cocksmoker
+
+# --- crude words for body parts (language.anatomy_words / anatomy_crude) ----
+penis
+vagina
+boobs
+boob
+tits
+tit
+nipples
+knickers
+knockers
+jugs
+clitoris
+anus
+ball sack
+man tits
+
+# --- slurs aimed at race, ethnicity, religion ------------------------------
+nigger
+niggers
+nigga
+niggas
+nigguh
+spic
+spics
+kike
+kikes
+hebe
+hebes
+gook
+gooks
+raghead
+towelhead
+chink
+chinks
+slopehead
+gypsy
+pikey
+coon
+wop
+dago
+guinea
+greaser
+beaner
+injun
+redskin
+gringo
+charlie
+sandnigger
+muzzy
+bohunk
+half-breed
+dollface
+ofay
+honkey
+honky
+cracker
+redneck
+hillbilly
+whitey
+pizzaface
+
+# --- slurs aimed at sexuality or gender ------------------------------------
+fag
+fags
+faggot
+faggots
+faggy
+homo
+homos
+queer
+tranny
+trannys
+she-male
+he-she
+
+# --- slurs aimed at disability or ability ----------------------------------
+retard
+retards
+retarded
+tronalittle
+moron
+morons
+imbecile
+cretin
+spaz
+spazzy
+spastic
+cripple
+gimp
+leper
+mongoloid
+retarde
+
+# --- misogynistic insults -------------------------------------------------
+bimbo
+tramp
+tart

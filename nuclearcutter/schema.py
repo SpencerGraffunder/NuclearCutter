@@ -5,12 +5,17 @@ Data models for NuclearCutter's two artifact types:
                   Written by `nuclearcutter scan`, read by `nuclearcutter render`.
                   This is what gets committed to timestamps/ in the repo.
 
-2. Preferences  — a user's personal choice of what action to take per
-                  category. Never shared, never committed alongside a
+2. Preferences  — a user's personal choice of what to censor and what to do
+                  about it. Never shared, never committed alongside a
                   ScanResult for someone else's use.
 
-See docs/SPEC.md sections 2, 3, and 6 for the reasoning behind keeping
-these two things strictly separate.
+Since schema v2 a detection carries a list of `tags` drawn from the fixed
+vocabulary in `nuclearcutter/taxonomy.py` — a description of *what is there* —
+instead of a severity level, which was a description of *how bad it was*. That
+inversion is the whole redesign: the scan file stops being an opinion, so one
+scan serves every viewer, and the viewer's choice is a set of tag ids
+(`taxonomy.Selection`) rather than a threshold to argue with. See docs/SPEC.md
+§2, §3 and §6, and docs/TAXONOMY.md for the vocabulary itself.
 """
 
 from __future__ import annotations
@@ -21,52 +26,44 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from nuclearcutter.taxonomy import (
+    Family, Minors, Rendering, Selection, TAGS, enforce_minor_protection,
+    family_of, normalize_tags, rendering_allowed,
+)
 
-SCHEMA_VERSION = 1
+
+SCHEMA_VERSION = 2
+
+# A scan file written by an older schema is rejected outright, never coerced.
+# v1 stored `category` + a low/med/high/exhigh `level`, which was a judgement
+# about how much censorship a scene needed; there is no honest way to turn that
+# back into "what is in the frame", and pretending otherwise would silently
+# censor or silently spare scenes on a guess. Re-scan instead.
+SUPPORTED_SCAN_VERSIONS = (SCHEMA_VERSION,)
 
 
-class Category(str, Enum):
-    NUDITY = "nudity"
-    GORE = "gore"
-    VIOLENCE = "violence"
-    FOUL_LANGUAGE = "foul_language"
-
-    @classmethod
-    def from_legacy(cls, value: str) -> "Category":
-        """Map old category names (from pre-2026-08 scan files) to the new set.
-
-        NOTE: don't use `legacy.get(value, cls(value))` here — the default
-        argument is evaluated eagerly, so an unknown-but-legacy value would
-        raise before the mapping is consulted.
-        """
-        legacy = {
-            "intimate_scenes": cls.NUDITY,
-            "gore_violence": cls.GORE,
-        }
-        if value in legacy:
-            return legacy[value]
-        return cls(value)
+class UnsupportedScanVersion(ValueError):
+    """Raised when a scan file's schema_version is not supported."""
 
 
 class VisualAction(str, Enum):
-    """What to do to the VIDEO for a flagged category."""
+    """What to do to the VIDEO for a matched category."""
     NONE = "none"
     BLUR = "blur"  # intense box blur + clean text description overlay
     BLACK = "black"  # black screen + clean text description overlay
 
 
 class AudioAction(str, Enum):
-    """What to do to the AUDIO for a flagged category.
+    """What to do to the AUDIO for a matched category.
 
     Foul language has word-level timestamps, so it can mute/replace individual
-    words or whole phrases. Visual categories (nudity/gore/violence) have NO
-    per-sound recognition, so their only audio options are none / mute_scene
-    (silence the whole flagged scene).
+    words or whole phrases. Visual categories have no per-sound recognition, so
+    their only audio options are none / mute_scene (silence the whole segment).
     """
     NONE = "none"
-    MUTE_WORD = "mute_word"  # silence the flagged word (foul language only)
-    MUTE_PHRASE = "mute_phrase"  # silence the whole utterance/phrase (foul language only)
-    MUTE_SCENE = "mute_scene"  # silence the whole flagged scene (visual categories)
+    MUTE_WORD = "mute_word"  # silence the flagged word (language detections)
+    MUTE_PHRASE = "mute_phrase"  # silence the whole utterance/phrase (language)
+    MUTE_SCENE = "mute_scene"  # silence the whole flagged segment (visual)
     REPLACE_WORD = "replace_word"  # (upcoming) AI voice replacement
     REPLACE_PHRASE = "replace_phrase"  # (upcoming) AI voice replacement
 
@@ -78,170 +75,225 @@ class AudioAction(str, Enum):
 
 
 # Module-level (NOT class attributes — a `str`-Enum would turn them into
-# members). Valid audio actions by category type.
-# Visual categories (nudity/gore/violence): no per-sound recognition, so only
-# none / mute_scene. Foul language has word-level timestamps: full set.
+# members). Valid audio actions by detection type.
 VISUAL_AUDIO_ACTIONS = ("none", "mute_scene")
 LANGUAGE_AUDIO_ACTIONS = ("none", "mute_word", "mute_phrase",
                           "replace_word", "replace_phrase")
 
+# What a user may pick per family in the chooser. Family -> (visual options,
+# audio options). Defaults come from taxonomy._FAMILY_MEDIA.
+_FAMILY_MEDIA_DEFAULT = {
+    "nudity": (VisualAction.BLUR, AudioAction.NONE),
+    "intimacy": (VisualAction.BLUR, AudioAction.NONE),
+    "violence": (VisualAction.BLUR, AudioAction.NONE),
+    "gore": (VisualAction.BLUR, AudioAction.NONE),
+    "harm": (VisualAction.BLUR, AudioAction.NONE),
+    "language": (VisualAction.NONE, AudioAction.MUTE_PHRASE),
+    "substance": (VisualAction.BLUR, AudioAction.NONE),
+    "safety": (VisualAction.BLUR, AudioAction.NONE),
+}
 
-class SeverityLevel(str, Enum):
-    """The FIXED severity scale every detection is classified into.
 
-    Standardized (NOT user-editable) so scan files can be shared. The level a
-    detection is assigned = how MUCH censorship is needed to catch it:
+def replace_tags(det, new_tags: list[str]) -> None:
+    """Rewrite a detection's tags, keeping the child-protection floor.
 
-      low    — the WORST content; caught even by the most restrictive filter
-               (bare genitals/full nudity, extreme gore, murder, slurs)
-      med    — caught by a moderate filter
-      high   — caught by a broad filter (revealing clothing, any blood, slaps)
-      exhigh — the MILDEST flagged content; only caught by a maximal filter
-               (anything even slightly bad — a towel, a shove, "omg")
+    A viewer correcting what the model saw replaces the tag list whole: unticking
+    "breasts (women)" on a detection means "that is not on screen", and there is no
+    partial-edit version of that. But `enforce_minor_protection()` decides whether
+    to censor a child's exposure by looking for a nudity/intimacy tag on the
+    detection — so a naive `det.tags = new` would let someone walk under the floor
+    by deleting the exposure tags, which are the RECORD of why the floor applies.
 
-    A user's per-category threshold (`nudity_level` etc.) is how strict they
-    want to be: `low` = low censorship (only the worst), `exhigh` = censor
-    basically everything. Ordering by rank: low < med < high < exhigh.
+    So the floor tag is carried across the replacement here, at the one place a
+    tag list is rewritten wholesale, rather than in each caller that might forget.
+    `minors` is the honest switch: set it to "no" if the age estimate was wrong.
     """
-    LOW = "low"
-    MED = "med"
-    HIGH = "high"
-    EXHIGH = "exhigh"
-
-    @property
-    def rank(self) -> int:
-        return _SEVERITY_RANK[self.value]
-
-    def is_corrected_by(self, threshold: "SeverityLevel") -> bool:
-        """True if a detection at this level gets corrected by a user whose
-        threshold is `threshold`. Content at/above the threshold's strictness
-        is corrected — i.e. this level's rank <= the threshold's rank.
-
-        `low` threshold -> only rank-0 (worst) content corrected (low censorship).
-        `exhigh` threshold -> everything (rank <= 3) corrected (max censorship).
-        """
-        return self.rank <= threshold.rank
-
-    @classmethod
-    def from_any(cls, value) -> "SeverityLevel":
-        """Tolerant parse (str, enum member, None). Unknown -> MED (safe default)."""
-        if isinstance(value, SeverityLevel):
-            return value
-        if value is None:
-            return SeverityLevel.MED
-        try:
-            return SeverityLevel(str(value).strip().lower())
-        except ValueError:
-            return SeverityLevel.MED
+    floor = "safety.exposure_with_minor"
+    had_floor = floor in (getattr(det, "tags", []) or [])
+    det.tags = [t for t in new_tags]
+    if had_floor and getattr(det, "minors", None) == Minors.YES.value \
+            and floor not in det.tags:
+        # Keep the floor while the reason for it still stands. Re-adding it AFTER
+        # enforce_minor_protection() would resurrect it even when the viewer
+        # cleared the minors flag, and there would be no way back out: clearing
+        # `minors` is the honest way to say the age estimate was wrong.
+        det.tags.append(floor)
+    enforce_minor_protection(det)
 
 
-# Module-level (NOT a class attribute — a `str`-Enum would turn a class attr
-# into a member). Used for ordering comparisons.
-_SEVERITY_RANK = {"low": 0, "med": 1, "high": 2, "exhigh": 3}
+def _parse_tags(raw) -> list[str]:
+    """Read a stored tag list: keep every id, in order, without re-deciding it.
 
-# A per-detection level OVERRIDE the user can set from the timeline popup. It
-# is stored as a plain string sentinel on the detection (NOT a SeverityLevel
-# member), so the standardized SeverityLevel scale stays untouched and shared
-# scan files stay valid. "removed" means the user dismissed this detection: it
-# stays flagged on the timeline (in dark grey) but the render must leave it
-# alone no matter what the render settings say.
-LEVEL_OVERRIDE_REMOVED = "removed"
-LEVEL_OVERRIDE_CHOICES = ("low", "med", "high", "exhigh", LEVEL_OVERRIDE_REMOVED)
+    This deliberately does NOT run `normalize_tags`. Folding an unfamiliar id
+    into its family residual is the right call for a MODEL's output (a made-up
+    category should become "something in this family"), but a scan file is not
+    model output: it was written by some build's vocabulary, possibly a newer
+    one. Rewriting `nudity.some_future_tag` to `nudity.unclear` here would
+    destroy a fact the file actually knows, and the rewrite would be saved back
+    on the next edit, so the information would be gone forever.
 
-
-def _parse_level_override(value) -> Optional[str]:
-    """Tolerant parse of a stored level override: a valid choice string, or
-    None when absent/blank/unknown. Returns the string (lowercased) or None."""
-    if value is None:
-        return None
-    v = str(value).strip().lower()
-    return v if v in LEVEL_OVERRIDE_CHOICES else None
+    An unknown id is still censorable — `tags_hit()` treats it as a hit whenever
+    it appears — so keeping it verbatim is the fail-safe choice too. Only junk
+    (non-strings, repeats) is dropped.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        tid = item.strip()
+        if tid and tid not in out:
+            out.append(tid)
+    return out
 
 
 @dataclass
 class VisualDetection:
-    """A single visual detection (nudity/gore/violence) from the VLM sweep."""
+    """A single visual detection: one moment in the film plus what is in it."""
 
-    category: Category
     start: float  # seconds
     end: float  # seconds
-    description: str  # VLM-generated summary, visual + dialogue content woven together
-    confidence: float  # 0-1, from the VLM confirmation stage
-    level: SeverityLevel = SeverityLevel.MED  # how severe (low/med/high/exhigh)
-    stage_a_score: Optional[float] = None  # retained for backward-compat; always None with the VLM sweep
-    level_override: Optional[str] = None  # per-detection override set in the GUI
-                                            # ("low"/"med"/"high"/"exhigh"/"removed"), else None
+    description: str  # clean, factual summary (also the on-screen text)
+    confidence: float  # 0-1, from the identify pass
+    tags: list[str] = field(default_factory=list)  # vocabulary ids
+    rendering: str = Rendering.LIVE_ACTION.value
+    minors: str = Minors.NO.value
+    uncertain_tags: list[str] = field(default_factory=list)  # subset of tags
+    triggers: list[str] = field(default_factory=list)  # coarse sweep triggers,
+    #   kept purely as provenance: which cheap cue let the model look here.
+    removed: bool = False  # user dismissed it; timeline shows it, render skips it
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["category"] = self.category.value
-        d["level"] = self.level.value
         return d
 
     @staticmethod
     def from_dict(d: dict) -> "VisualDetection":
-        d = dict(d)
-        d["category"] = Category.from_legacy(d["category"])
-        d["level"] = SeverityLevel.from_any(d.get("level"))
-        d["level_override"] = _parse_level_override(d.get("level_override"))
-        return VisualDetection(**d)
+        tags = _parse_tags(d.get("tags"))
+        uncertain = [t for t in (d.get("uncertain_tags") or []) if t in TAGS]
+        rendering = d.get("rendering") or Rendering.LIVE_ACTION.value
+        if rendering not in {r.value for r in Rendering}:
+            rendering = Rendering.LIVE_ACTION.value
+        minors = d.get("minors") or Minors.NO.value
+        if minors not in {m.value for m in Minors}:
+            minors = Minors.NO.value
+        return VisualDetection(
+            start=float(d["start"]), end=float(d["end"]),
+            description=d.get("description", ""),
+            confidence=float(d.get("confidence", 0.5)),
+            tags=tags,
+            rendering=rendering,
+            minors=minors,
+            uncertain_tags=uncertain,
+            triggers=[str(x) for x in (d.get("triggers") or [])],
+            removed=bool(d.get("removed", False)),
+        )
+
+    # -- families ------------------------------------------------------------
+    @property
+    def families(self) -> list[Family]:
+        out: list[Family] = []
+        for t in self.tags:
+            f = family_of(t)
+            if f is not None and f not in out:
+                out.append(f)
+        return out
 
     @property
     def is_removed(self) -> bool:
-        """True when the user dismissed this detection via the timeline popup.
-        It stays in the timeline (dark grey) but the render leaves it alone."""
-        return self.level_override == LEVEL_OVERRIDE_REMOVED
+        return self.removed
 
-    def effective_level(self) -> SeverityLevel:
-        """The severity the render gates on: the user's override when set to a
-        level, otherwise the scanned level. (A "removed" override is handled
-        separately by `is_removed` — the render skips the detection outright.)"""
-        if self.level_override in ("low", "med", "high", "exhigh"):
-            return SeverityLevel(self.level_override)
-        return self.level
+    @property
+    def is_uncertain(self) -> bool:
+        """True when the model itself said it was unsure about every tag it gave.
+
+        Surfaced in the chooser: an uncertain tag set is what a human should
+        look at first, and it is the honest successor to the old design hiding
+        its uncertainty behind a permissive 'exhigh' threshold.
+        """
+        return bool(self.tags) and all(t in self.uncertain_tags for t in self.tags)
+
+    def censorable(self, sel: Selection) -> list[str]:
+        """Tags on this detection that the user's selection wants censored.
+
+        Three rules, all fail-safe:
+          * `rendering` may only NARROW a match. An unrecognised rendering value
+            matches everything, so a bad guess cannot un-censor.
+          * a detection the user dismissed ("removed") is not censored —
+            that is their call about a scene they have looked at.
+          * ...unless it carries an enforced tag. Removing a scene that shows
+            exposure with a child present is not a call this tool makes on
+            someone's behalf, so `removed` is ignored for the enforced tags and
+            they still censor. The timeline keeps showing the marker as removed;
+            the popup explains why it is still being hidden.
+        """
+        from nuclearcutter.taxonomy import tags_hit
+
+        if not rendering_allowed(self.rendering, sel):
+            return []
+        hit = tags_hit(self.tags, sel)
+        if self.removed:
+            return [t for t in hit
+                    if t in TAGS and TAGS[t].always_censor]
+        return hit
 
 
 @dataclass
 class LanguageDetection:
-    """A single foul-language detection."""
+    """A single language/substance detection from the transcript.
 
-    start: float  # seconds, tightest window (the word itself)
+    v2 widened this from "one foul word" to "one line that contains something
+    from the language/substance vocabulary", because things like a slur, a
+    sexual remark or a crude joke are not single words. `text` is the word or
+    phrase that carried it; `tags` say what kind.
+    """
+
+    start: float  # seconds, tightest window (the word/phrase itself)
     end: float
-    utterance_start: float  # seconds, start of the containing sentence/utterance
+    utterance_start: float  # seconds, start of the containing sentence
     utterance_end: float
-    word: str
-    transcript_source: str  # "whisper", "subtitle", or "whisper+subtitle"
-    llm_confirmed: bool  # result of the always-on LLM context check
+    text: str  # the offending word or phrase as spoken
+    tags: list[str] = field(default_factory=list)
+    # Where the WORDS came from, not which pass flagged them (that is
+    # `llm_reasoning`): a whisper transcript cross-checked against a subtitle
+    # file is more trustworthy, and the GUI shows it in the tooltip.
+    transcript_source: str = "whisper"  # "whisper" | "subtitle" | "whisper+subtitle"
+    llm_confirmed: bool = False
     llm_reasoning: Optional[str] = None
-    level: SeverityLevel = SeverityLevel.MED  # severity of this word (low/med/high/exhigh)
-    level_override: Optional[str] = None  # per-detection override set in the GUI
-                                            # ("low"/"med"/"high"/"exhigh"/"removed"), else None
+    removed: bool = False
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        d["level"] = self.level.value
-        return d
+        return asdict(self)
 
     @staticmethod
     def from_dict(d: dict) -> "LanguageDetection":
-        d = dict(d)
-        d["level"] = SeverityLevel.from_any(d.get("level"))
-        d["level_override"] = _parse_level_override(d.get("level_override"))
-        return LanguageDetection(**d)
+        return LanguageDetection(
+            start=float(d["start"]), end=float(d["end"]),
+            utterance_start=float(d.get("utterance_start", d["start"])),
+            utterance_end=float(d.get("utterance_end", d["end"])),
+            text=d.get("text", d.get("word", "")),
+            tags=_parse_tags(d.get("tags")),
+            transcript_source=d.get("transcript_source", "whisper"),
+            llm_confirmed=bool(d.get("llm_confirmed", False)),
+            llm_reasoning=d.get("llm_reasoning"),
+            removed=bool(d.get("removed", False)),
+        )
 
     @property
     def is_removed(self) -> bool:
-        """True when the user dismissed this detection via the timeline popup.
-        It stays in the timeline (dark grey) but the render leaves it alone."""
-        return self.level_override == LEVEL_OVERRIDE_REMOVED
+        return self.removed
 
-    def effective_level(self) -> SeverityLevel:
-        """The severity the render gates on: the user's override when set to a
-        level, otherwise the scanned level. (A "removed" override is handled
-        separately by `is_removed` — the render skips the detection outright.)"""
-        if self.level_override in ("low", "med", "high", "exhigh"):
-            return SeverityLevel(self.level_override)
-        return self.level
+    def mute_window(self, padding: float, mute_whole_utterance: bool) -> tuple[float, float]:
+        if mute_whole_utterance:
+            return (self.utterance_start - padding, self.utterance_end + padding)
+        return (self.start - padding, self.end + padding)
+
+    def censorable(self, sel: Selection) -> list[str]:
+        if self.removed:
+            return []
+        from nuclearcutter.taxonomy import tags_hit
+        return tags_hit(self.tags, sel)
 
 
 @dataclass
@@ -263,7 +315,17 @@ class FilmIdentity:
 
     @staticmethod
     def from_dict(d: dict) -> "FilmIdentity":
-        return FilmIdentity(**d)
+        # Tolerant on purpose: `year` and `source_path` are optional in practice
+        # (a hand-written or older file may omit them), and a scan file that is
+        # otherwise readable should not fail to open over a missing key.
+        known = {f for f in ("title", "year", "duration_seconds", "phash_samples",
+                             "source_path")}
+        kwargs = {k: v for k, v in d.items() if k in known}
+        kwargs.setdefault("title", None)
+        kwargs.setdefault("year", None)
+        kwargs.setdefault("duration_seconds", 0.0)
+        kwargs.setdefault("phash_samples", [])
+        return FilmIdentity(**kwargs)
 
 
 @dataclass
@@ -272,7 +334,7 @@ class ScanResult:
     identity: FilmIdentity
     visual_detections: list[VisualDetection] = field(default_factory=list)
     language_detections: list[LanguageDetection] = field(default_factory=list)
-    generator: dict = field(default_factory=dict)  # model names/versions used, for provenance
+    generator: dict = field(default_factory=dict)  # models/versions, for provenance
 
     def to_dict(self) -> dict:
         return {
@@ -284,45 +346,79 @@ class ScanResult:
         }
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.to_dict(), indent=2))
+        tmp.replace(path)
 
     @staticmethod
     def load(path: Path) -> "ScanResult":
-        d = json.loads(path.read_text())
+        d = json.loads(Path(path).read_text())
+        version = int(d.get("schema_version") or 0)
+        if version not in SUPPORTED_SCAN_VERSIONS:
+            raise UnsupportedScanVersion(
+                f"{Path(path).name}: scan file is schema v{version or '?'}, this build "
+                f"reads v{'/'.join(str(v) for v in SUPPORTED_SCAN_VERSIONS)}. Scans made "
+                f"before the tag-taxonomy redesign stored a severity level instead of "
+                f"what is in the scene, which cannot be converted — re-scan the film.")
+        visual = [VisualDetection.from_dict(x) for x in d.get("visual_detections", [])]
+        # The child floor is re-applied on every load, not trusted from the file.
+        # A scan file is plain JSON that people hand-edit, merge and share; the
+        # protection has to survive any of that. `censorable()` independently
+        # refuses to let `removed` hide an enforced tag, so this is the second
+        # half of the same rule rather than the only defence.
+        from nuclearcutter.taxonomy import enforce_minor_protection
+        for det in visual:
+            enforce_minor_protection(det)
         return ScanResult(
-            schema_version=d["schema_version"],
+            schema_version=version,
             identity=FilmIdentity.from_dict(d["identity"]),
-            visual_detections=[VisualDetection.from_dict(x) for x in d["visual_detections"]],
-            language_detections=[LanguageDetection.from_dict(x) for x in d["language_detections"]],
+            visual_detections=visual,
+            language_detections=[LanguageDetection.from_dict(x)
+                                 for x in d.get("language_detections", [])],
             generator=d.get("generator", {}),
         )
+
+    # -- chooser support -----------------------------------------------------
+    def tag_counts(self) -> dict[str, int]:
+        """How many detections carry each tag. Drives the chooser: a category
+        that never occurred is shown greyed and collapsed, not as a wall of
+        identical empty checkboxes."""
+        counts: dict[str, int] = {}
+        for d in self.visual_detections:
+            for t in d.tags:
+                counts[t] = counts.get(t, 0) + 1
+        for d in self.language_detections:
+            for t in d.tags:
+                counts[t] = counts.get(t, 0) + 1
+        return counts
 
 
 @dataclass
 class Preferences:
-    """User's personal choice of action per category. Never shared.
+    """User's personal choice of what to censor, and what to do about it.
 
-    Each category has TWO independent corrections: a visual one (what to do
-    to the video) and an audio one (what to do to the audio). E.g. nudity
-    might be visual=BLUR with audio=NONE, while foul language is visual=NONE
-    with audio=MUTE_PHRASE. See VisualAction / AudioAction for options.
+    Two orthogonal halves, deliberately kept apart:
+      * `selection` — WHICH tags matter to this viewer (a set of ids).
+      * per-family actions — what to DO when one matches (blur / black / none,
+        mute / leave).
+    Splitting them is what lets one scan file serve a strict viewer and a lax
+    one, and lets the same person flip "blur" to "black" without re-deciding
+    anything.
     """
 
-    nudity_visual: VisualAction = VisualAction.BLUR
-    nudity_audio: AudioAction = AudioAction.NONE
-    nudity_level: SeverityLevel = SeverityLevel.MED  # correct nudity at/above this
-
-    gore_visual: VisualAction = VisualAction.BLUR
-    gore_audio: AudioAction = AudioAction.NONE
-    gore_level: SeverityLevel = SeverityLevel.MED
-
-    violence_visual: VisualAction = VisualAction.BLUR
-    violence_audio: AudioAction = AudioAction.NONE
-    violence_level: SeverityLevel = SeverityLevel.MED
-
-    foul_language_visual: VisualAction = VisualAction.NONE
-    foul_language_audio: AudioAction = AudioAction.MUTE_PHRASE
-    foul_language_level: SeverityLevel = SeverityLevel.MED
+    selection: Selection = field(default_factory=Selection)
+    # NAMING TRAP: these two are `visual_actions` / `audio_actions` HERE, but
+    # `family_actions: {family: {visual, audio}}` at the HTTP boundary the GUI
+    # speaks (server.update_settings maps one to the other). The shapes differ
+    # because the wire format groups by family — which is what a row in the GUI's
+    # matrix is — while the schema splits by medium, which is what the renderer
+    # needs. Both spellings are correct in their own layer; a rename that touches
+    # only one silently drops every action override to defaults, so if either is
+    # renamed, grep both `visual_actions` and `family_actions` in the same pass.
+    visual_actions: dict[str, str] = field(
+        default_factory=lambda: {k: v[0].value for k, v in _FAMILY_MEDIA_DEFAULT.items()})
+    audio_actions: dict[str, str] = field(
+        default_factory=lambda: {k: v[1].value for k, v in _FAMILY_MEDIA_DEFAULT.items()})
 
     # Multiplier on blur intensity. 1.0 = the standard intense boxblur
     # (radius 30, 3 passes); 2.0 = twice as extreme (radius 60, 6 passes).
@@ -332,69 +428,64 @@ class Preferences:
     # Extra seconds blurred/blacked before/after each flagged visual segment.
     blur_padding: float = 0.0
 
-    def visual_for(self, category: Category) -> VisualAction:
-        if category == Category.NUDITY:
-            return self.nudity_visual
-        if category == Category.GORE:
-            return self.gore_visual
-        if category == Category.VIOLENCE:
-            return self.violence_visual
-        if category == Category.FOUL_LANGUAGE:
-            return self.foul_language_visual
-        raise ValueError(f"Unknown category: {category}")
+    def __post_init__(self) -> None:
+        # A partially-specified Preferences is the normal case (the GUI sends the
+        # families it has rows for), and a missing family must mean "the default",
+        # never "the fallback in visual_for". Without this, `visual_actions={}`
+        # silently BLURS every family, including language, which blanks the
+        # picture while somebody swears.
+        defaults_vis = {k: v[0].value for k, v in _FAMILY_MEDIA_DEFAULT.items()}
+        defaults_aud = {k: v[1].value for k, v in _FAMILY_MEDIA_DEFAULT.items()}
+        for key, val in defaults_vis.items():
+            self.visual_actions.setdefault(key, val)
+        for key, val in defaults_aud.items():
+            self.audio_actions.setdefault(key, val)
 
-    def audio_for(self, category: Category) -> AudioAction:
-        if category == Category.NUDITY:
-            return self.nudity_audio
-        if category == Category.GORE:
-            return self.gore_audio
-        if category == Category.VIOLENCE:
-            return self.violence_audio
-        if category == Category.FOUL_LANGUAGE:
-            return self.foul_language_audio
-        raise ValueError(f"Unknown category: {category}")
+    def visual_for(self, family: Family | str) -> VisualAction:
+        key = family.value if isinstance(family, Family) else str(family)
+        return VisualAction(self.visual_actions.get(key, VisualAction.BLUR.value))
 
-    def level_for(self, category: Category) -> SeverityLevel:
-        """The user's threshold level for a category — correct at/above this."""
-        if category == Category.NUDITY:
-            return self.nudity_level
-        if category == Category.GORE:
-            return self.gore_level
-        if category == Category.VIOLENCE:
-            return self.violence_level
-        if category == Category.FOUL_LANGUAGE:
-            return self.foul_language_level
-        raise ValueError(f"Unknown category: {category}")
+    def audio_for(self, family: Family | str) -> AudioAction:
+        key = family.value if isinstance(family, Family) else str(family)
+        return AudioAction(self.audio_actions.get(key, AudioAction.NONE.value))
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        for key in ("nudity_visual", "gore_visual", "violence_visual", "foul_language_visual"):
-            d[key] = getattr(self, key).value
-        for key in ("nudity_audio", "gore_audio", "violence_audio", "foul_language_audio"):
-            d[key] = getattr(self, key).value
-        for key in ("nudity_level", "gore_level", "violence_level", "foul_language_level"):
-            d[key] = getattr(self, key).value
-        return d
+        return {
+            "selection": self.selection.to_dict(),
+            "visual_actions": dict(self.visual_actions),
+            "audio_actions": dict(self.audio_actions),
+            "blur_strength": self.blur_strength,
+            "mute_padding": self.mute_padding,
+            "blur_padding": self.blur_padding,
+        }
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        Path(path).write_text(json.dumps(self.to_dict(), indent=2))
 
     @staticmethod
     def load(path: Path) -> "Preferences":
-        d = json.loads(path.read_text())
+        d = json.loads(Path(path).read_text())
+        return Preferences.from_dict(d)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Preferences":
+        sel = d.get("selection")
+        vis = {k: v[0].value for k, v in _FAMILY_MEDIA_DEFAULT.items()}
+        aud = {k: v[1].value for k, v in _FAMILY_MEDIA_DEFAULT.items()}
+        for k, v in (d.get("visual_actions") or {}).items():
+            if k in vis and v in {a.value for a in VisualAction}:
+                vis[k] = v
+        for k, v in (d.get("audio_actions") or {}).items():
+            if k in aud and v in {a.value for a in AudioAction}:
+                aud[k] = v
         return Preferences(
-            nudity_visual=VisualAction(d.get("nudity_visual", "blur")),
-            nudity_audio=AudioAction(d.get("nudity_audio", "none")),
-            nudity_level=SeverityLevel.from_any(d.get("nudity_level")),
-            gore_visual=VisualAction(d.get("gore_visual", "blur")),
-            gore_audio=AudioAction(d.get("gore_audio", "none")),
-            gore_level=SeverityLevel.from_any(d.get("gore_level")),
-            violence_visual=VisualAction(d.get("violence_visual", "blur")),
-            violence_audio=AudioAction(d.get("violence_audio", "none")),
-            violence_level=SeverityLevel.from_any(d.get("violence_level")),
-            foul_language_visual=VisualAction(d.get("foul_language_visual", "none")),
-            foul_language_audio=AudioAction(d.get("foul_language_audio", "mute_phrase")),
-            foul_language_level=SeverityLevel.from_any(d.get("foul_language_level")),
+            # The GUI sends {"tags": [...], "renderings": [...]}; a hand-written
+            # file or a script may send just the ids. Both mean the same thing.
+            selection=(Selection.from_dict(sel) if isinstance(sel, dict)
+                       else Selection.from_dict({"tags": sel}) if isinstance(sel, list)
+                       else Selection()),
+            visual_actions=vis,
+            audio_actions=aud,
             blur_strength=float(d.get("blur_strength", 1.0)),
             mute_padding=float(d.get("mute_padding", 0.5)),
             blur_padding=float(d.get("blur_padding", 0.0)),

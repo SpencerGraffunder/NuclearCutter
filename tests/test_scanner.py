@@ -1,475 +1,401 @@
-"""Tests for the scan orchestrator, focusing on the unified VLM sweep pipeline."""
+"""The scan orchestrator: order, resume, and what happens when a pass fails.
+
+The individual passes have their own tests; these cover the *sequence* — that
+language runs off the transcript before the visual work, that a resume does not
+re-spend money or skip un-swept footage, and that a dead model produces an error
+instead of a scan file that looks clean.
+
+Everything model-side and ffmpeg-side is faked; the only thing under test is the
+scheduling and the files written to disk.
+"""
 
 from __future__ import annotations
 
-import tempfile
+import json
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from nuclearcutter.detection.vlm_confirm import SweepRange
-from nuclearcutter.schema import Category
+from nuclearcutter.detection.transcribe import Utterance, Word
+from nuclearcutter.detection.visual_scan import SweepWindow
+from nuclearcutter.schema import (
+    SCHEMA_VERSION, FilmIdentity, LanguageDetection, ScanResult, VisualDetection,
+)
+from nuclearcutter.scan import scanner
+from nuclearcutter.scan.scanner import ScanStopped, scan
+from nuclearcutter.taxonomy import TAXONOMY_VERSION
+from nuclearcutter.utils.llm_client import LLMConfig
+from nuclearcutter.utils.scan_status import ScanStatus
+
+
+class FakeClient:
+    def __init__(self, visual=None, text=None):
+        self.visual = visual or {"tags": [], "triggers": []}
+        self.text = text or {}
+        self.visual_calls = 0
+        self.text_calls = 0
+
+    def test_connection(self):
+        return True
+
+    def vision_query_json(self, prompt, frame_paths, max_pixels=None):
+        self.visual_calls += 1
+        if isinstance(self.visual, Exception):
+            raise self.visual
+        return dict(self.visual)
+
+    def text_query_json(self, prompt):
+        self.text_calls += 1
+        if isinstance(self.text, Exception):
+            raise self.text
+        return dict(self.text)
 
 
 @pytest.fixture
-def mock_video(tmp_path: Path) -> Path:
-    """Create a fake video file so path resolution works."""
-    video = tmp_path / "test_movie.mkv"
-    video.write_text("fake video content")
-    return video
-
-
-def _fake_identity_patches(monkeypatch):
-    """Mock out fingerprinting so it doesn't need a real video."""
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.load_cached_fingerprint",
-        lambda _: (100.0, []),
-    )
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.compute_fingerprint",
-        lambda _: (100.0, []),
-    )
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.cache_fingerprint",
-        lambda _a, _b, _c: None,
-    )
-
-
-def _mock_transcription(monkeypatch):
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.transcribe",
-        lambda _v, model=None, progress_callback=None: [],
-    )
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.find_subtitle_file",
-        lambda _: None,
-    )
-
-
-def _mock_profanity(monkeypatch):
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.load_wordlist",
-        lambda: [],
-    )
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.detect_foul_language",
-        lambda _u, _c, _w, _s, foul_language_prompt=None: [],
-    )
-
-
-def test_scan_runs_sweep_and_confirms_ranges(monkeypatch, mock_video):
-    """The scanner should drive the unified VisualSweepDetector: sweep, then
-    confirm each returned range into a VisualDetection."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    captured = {"interval": None}
-
-    class FakeDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            captured["interval"] = sample_interval
-            return [
-                SweepRange(start=10.0, end=20.0, category=Category.NUDITY,
-                           description="sweep desc", confidence=0.9),
-                SweepRange(start=50.0, end=60.0, category=Category.GORE,
-                           description="gore", confidence=0.8),
-            ]
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            from nuclearcutter.schema import VisualDetection
-            return VisualDetection(
-                category=candidate.category,
-                start=candidate.start,
-                end=candidate.end,
-                description=candidate.description,
-                confidence=candidate.confidence,
-            )
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(
-        base_url="http://localhost:9999/v1",
-        vlm_model="test-model",
-        text_model="test-model",
-    )
-
-    result = scan(mock_video, llm_config=llm_config)
-    assert captured["interval"] == 2.0, "scanner should use the default sweep interval"
-    assert len(result.visual_detections) == 2
-    assert result.visual_detections[0].category == Category.NUDITY
-    assert result.visual_detections[1].category == Category.GORE
-
-
-def test_scan_forwards_custom_sweep_interval(monkeypatch, mock_video):
-    """A caller-supplied sweep interval must reach the detector."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
+def video(tmp_path) -> Path:
+    v = tmp_path / "Movie.mkv"
+    v.write_text("not a real video")
+    return v
+
+
+@pytest.fixture
+def no_media(monkeypatch):
+    """Stub out fingerprint, whisper and both visual passes."""
+    calls: dict = {"sweep": [], "identify": [], "phases": []}
+
+    monkeypatch.setattr(scanner, "load_cached_fingerprint", lambda _p: (100.0, []))
+    monkeypatch.setattr(scanner, "compute_fingerprint", lambda _p: (100.0, []))
+    monkeypatch.setattr(scanner, "cache_fingerprint", lambda *a: None)
+
+    transcript = [Utterance("oh damn it", 10.0, 11.0,
+                            [Word("oh", 10.0, 10.4), Word("damn", 10.4, 10.7),
+                             Word("it", 10.7, 11.0)])]
+    monkeypatch.setattr(scanner, "read_transcript_cache", lambda *a, **k: list(transcript))
+    monkeypatch.setattr(scanner, "transcribe", lambda *a, **k: list(transcript))
+    monkeypatch.setattr(scanner, "transcribe_killable", lambda *a, **k: list(transcript))
+    monkeypatch.setattr(scanner, "write_transcript_cache", lambda *a, **k: None)
+    monkeypatch.setattr(scanner, "find_subtitle_file", lambda _p: None)
+    monkeypatch.setattr(scanner, "detect_language",
+                        lambda *a, **k: [LanguageDetection(
+                            start=10.4, end=10.7, utterance_start=10.0,
+                            utterance_end=11.0, text="damn",
+                            tags=["language.profanity"], llm_confirmed=True)])
+
+    def fake_sweep(self, video_path, sample_interval=2.0, on_flagged_window=None,
+                   on_progress=None, resume_from=0, existing_windows=None,
+                   stop_event=None):
+        calls["sweep"].append({"resume_from": resume_from,
+                               "existing": list(existing_windows or []),
+                               "interval": sample_interval})
+        windows = list(existing_windows or [])
+        if resume_from == 0:
+            windows.append(SweepWindow(20.0, 22.0, ["skin"], "live_action",
+                                       {"adult_female": 0, "adult_male": 1,
+                                        "minors": "no"}, 0.7))
+        if on_progress:
+            on_progress(50, 50)
+        from nuclearcutter.detection.visual_scan import CandidateRange, SweepStats
+
+        stats = SweepStats()
+        stats.batches_queried = 5
+        stats.frames_total = 50
+        stats.frames_done = 50
+        ranges = [CandidateRange(20.0, 22.0, ["skin"], "live_action",
+                                 {"adult_female": 0, "adult_male": 1, "minors": "no"},
+                                 0.7)]
+        calls["phases"].append("sweep")
+        return ranges, stats
+
+    def fake_identify(self, video_path, candidate, dialogue_text="",
+                      invented_tags=None):
+        calls["identify"].append({"start": candidate.start,
+                                  "dialogue": dialogue_text,
+                                  "triggers": list(candidate.triggers)})
+        calls["phases"].append("identify")
+        return (VisualDetection(start=candidate.start, end=candidate.end,
+                                description="a shirtless man", confidence=0.8,
+                                tags=["nudity.shirtless_male"],
+                                triggers=list(candidate.triggers)), True)
+
+    monkeypatch.setattr(scanner.VisualScanDetector, "sweep", fake_sweep, raising=True)
+    monkeypatch.setattr(scanner.VisualScanDetector, "identify", fake_identify,
+                        raising=True)
+    return calls
+
+
+def _run(video, tmp_path, client=None, llm_override=None, **kw):
+    status = tmp_path / "Movie.nuclearcutter.status.json"
+    partial = tmp_path / "Movie.nuclearcutter.json"
+    result = scan(video, llm_config=llm_override or LLMConfig(), client_factory=lambda cfg: client or FakeClient(),
+                  status_path=status, partial_result_path=partial, **kw)
+    return result, status, partial
+
+
+# --------------------------------------------------------------------------
+# Order and outputs
+# --------------------------------------------------------------------------
+
+def test_phases_run_in_the_documented_order(video, tmp_path, no_media):
+    calls = no_media
+    _run(video, tmp_path)
+    assert calls["phases"] == ["sweep", "identify"], \
+        "the sweep decides WHERE to look; classify can only run after it"
+
+
+def test_language_is_tagged_from_the_vocabulary(video, tmp_path, no_media):
+    result, _s, _p = _run(video, tmp_path)
+    assert result.language_detections[0].tags == ["language.profanity"]
+
+
+def test_result_carries_tags_not_levels(video, tmp_path, no_media):
+    result, _s, _p = _run(video, tmp_path)
+    det = result.visual_detections[0]
+    assert det.tags == ["nudity.shirtless_male"]
+    assert not hasattr(det, "level")
+    assert result.schema_version == SCHEMA_VERSION
 
-    captured = {"interval": None}
 
-    class FakeDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            captured["interval"] = sample_interval
-            return []
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            return None
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(
-        base_url="http://localhost:9999/v1",
-        vlm_model="test-model",
-        text_model="test-model",
-    )
-
-    result = scan(mock_video, llm_config=llm_config, sweep_interval=2.5)
-    assert captured["interval"] == 2.5, "scanner should forward sweep_interval to the detector"
-    assert result.visual_detections == []
-
-
-def test_scan_raises_when_all_confirmations_fail(monkeypatch, mock_video):
-    """If every sweep range's confirmation fails, the scan should error loudly
-    rather than silently emit an unreliable (empty) scan."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    class FailingDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            return [SweepRange(start=1.0, end=2.0, category=Category.NUDITY,
-                               description="x", confidence=0.5)]
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            return None  # every confirmation "fails" (returns no detection)
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FailingDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(
-        base_url="http://localhost:9999/v1",
-        vlm_model="test-model",
-        text_model="test-model",
-    )
-
-    with pytest.raises(RuntimeError, match="confirmation queries failed"):
-        scan(mock_video, llm_config=llm_config)
-
-
-def test_scan_skips_transcription_when_cache_valid(monkeypatch, mock_video):
-    """A valid transcript cache must skip whisper entirely and report 100%."""
-    _fake_identity_patches(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    from nuclearcutter.detection.transcribe import Utterance, write_transcript_cache
-
-    cache = mock_video.with_suffix(".nuclearcutter.transcript.json")
-    write_transcript_cache(cache, mock_video, [Utterance(text="hi", start=0.0, end=1.0, words=[])])
-
-    def _boom(*a, **k):
-        raise AssertionError("transcribe must be skipped when the cache is valid")
-
-    monkeypatch.setattr("nuclearcutter.scan.scanner.transcribe", _boom)
-
-    class FakeDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            return []
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            return None
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(base_url="http://localhost:9999/v1", vlm_model="m", text_model="m")
-    events = []
-    scan(mock_video, llm_config=llm_config, whisper_cfg=None,
-         progress_callback=lambda stage, detail: events.append((stage, detail)))
-    assert ("transcribing", 1.0) in events, "cached transcript must report 100%"
-
-
-def test_scan_forwards_sweep_progress(monkeypatch, mock_video):
-    """Sweep progress must reach the GUI's progress_callback (the scan bar)."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    class FakeDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            if on_progress:
-                on_progress(25, 50)
-            return []
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            return None
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(base_url="http://localhost:9999/v1", vlm_model="m", text_model="m")
-    events = []
-    scan(mock_video, llm_config=llm_config, progress_callback=lambda s, d: events.append((s, d)))
-    assert ("visual_sweep", (25, 50)) in events
-
-
-def test_scan_reports_transcribe_100_when_done(monkeypatch, mock_video):
-    """Transcription completing (even below whisper's internal bar) reports 100%."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    class FakeDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            return []
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            return None
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(base_url="http://localhost:9999/v1", vlm_model="m", text_model="m")
-    events = []
-    scan(mock_video, llm_config=llm_config, whisper_cfg=None,
-         progress_callback=lambda s, d: events.append((s, d)))
-    assert ("transcribing", 1.0) in events
-
-
-def test_scan_resumes_from_prior_status(monkeypatch, mock_video, tmp_path):
-    """An interrupted scan resumes: the sweep gets resume_from + existing
-    windows, and already-confirmed candidates are not re-confirmed."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    status_path = tmp_path / "test_movie.nuclearcutter.status.json"
-    # Simulate a prior run that swept 8 frames, found one candidate (already
-    # confirmed) and one unconfirmed candidate.
-    prior = {
-        "schema": 1, "video": mock_video.name, "duration_seconds": 100.0,
-        "sweep_interval": 2.0, "pid": 1, "started_at": "2026-01-01T00:00:00",
-        "phase": "visual_confirm", "frames_done": 8, "frames_total": 50,
-        "position_seconds": 16.0,
-        "visual_candidates": [
-            {"category": "nudity", "start": 10.0, "end": 12.0, "confidence": 0.9, "level": "low"},
-            {"category": "gore", "start": 50.0, "end": 52.0, "confidence": 0.8, "level": "low"},
-        ],
-        "visual_detections": [
-            {"category": "nudity", "start": 8.0, "end": 14.0, "description": "already done",
-             "confidence": 0.9, "level": "high"},
-        ],
-        "language_detections": [],
-    }
-    import json as _json
-    status_path.write_text(_json.dumps(prior))
-
-    captured = {"resume_from": None, "existing": None}
-
-    class FakeDetector:
-        def __init__(self, client):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None, on_progress=None,
-                  resume_from=0, existing_windows=None, stop_event=None):
-            captured["resume_from"] = resume_from
-            captured["existing"] = existing_windows
-            # Return the two candidates from the prior status (reconstructed
-            # from the seeded windows by the merge).
-            return [
-                SweepRange(start=8.0, end=14.0, category=Category.NUDITY,
-                           description="already done", confidence=0.9, level="high"),
-                SweepRange(start=50.0, end=54.0, category=Category.GORE,
-                           description="new", confidence=0.8),
-            ]
-
-        def confirm_and_describe(self, video_path, candidate, dialogue_text=""):
-            from nuclearcutter.schema import VisualDetection
-            # Only the GORE candidate is new — the NUDITY one was confirmed.
-            if candidate.category == Category.GORE:
-                return VisualDetection(
-                    category=Category.GORE, start=50.0, end=54.0,
-                    description="confirmed now", confidence=0.8,
-                )
-            raise AssertionError("already-confirmed candidate was re-confirmed!")
-
-    monkeypatch.setattr(
-        "nuclearcutter.scan.scanner.VisualSweepDetector",
-        lambda client, prompts=None, scale=None, sweep_resolution=None: FakeDetector(client),
-    )
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(
-        base_url="http://localhost:9999/v1",
-        vlm_model="test-model",
-        text_model="test-model",
-    )
-
-    result = scan(mock_video, llm_config=llm_config, status_path=status_path)
-
-    # Sweep resumed from frame 8 with the two prior raw windows.
-    assert captured["resume_from"] == 8
-    assert len(captured["existing"]) == 2
-    # Both confirmed detections present (prior NUDITY + newly confirmed GORE).
-    assert len(result.visual_detections) == 2
-    cats = {d.category for d in result.visual_detections}
-    assert cats == {Category.NUDITY, Category.GORE}
-
-
-def test_scan_resume_rescales_frames_when_interval_changed(monkeypatch, mock_video, tmp_path):
-    """Resuming with a CHANGED sweep_interval preserves the swept POSITION
-    (seconds), not the sample count: a run interrupted at 8 frames @ 2.0s
-    (16s swept) must resume at frame 4 when restarted at 4.0s — resuming at
-    frame 8 would silently skip 16s of un-swept footage."""
-    _fake_identity_patches(monkeypatch)
-    _mock_transcription(monkeypatch)
-    _mock_profanity(monkeypatch)
-    monkeypatch.setattr("nuclearcutter.scan.scanner.gc.collect", lambda: None)
-
-    status_path = tmp_path / "test_movie.nuclearcutter.status.json"
-    prior = {
-        "schema": 1, "video": mock_video.name, "duration_seconds": 100.0,
-        "sweep_interval": 2.0, "pid": 1, "started_at": "2026-01-01T00:00:00",
-        "phase": "visual_confirm", "frames_done": 8, "frames_total": 50,
-        "position_seconds": 16.0,
-        "visual_candidates": [], "visual_detections": [], "language_detections": [],
-    }
-    import json as _json
-    status_path.write_text(_json.dumps(prior))
-
-    captured = {}
-
-    class FakeDetector:
-        def __init__(self, client, prompts=None, scale=None, sweep_resolution=None):
-            pass
-
-        def sweep(self, video_path, sample_interval=5.0, on_flagged_window=None,
-                  on_progress=None, resume_from=0, existing_windows=None, stop_event=None):
-            captured["resume_from"] = resume_from
-            return []
-
-    monkeypatch.setattr("nuclearcutter.scan.scanner.VisualSweepDetector", FakeDetector)
-
-    from nuclearcutter.scan.scanner import scan
-    from nuclearcutter.utils.llm_client import LLMConfig
-
-    llm_config = LLMConfig(
-        base_url="http://localhost:9999/v1", vlm_model="test-model", text_model="test-model",
-    )
-    scan(mock_video, llm_config=llm_config, status_path=status_path, sweep_interval=4.0)
-    assert captured["resume_from"] == 4, "8 frames @2.0s must become 4 frames @4.0s on resume"
-
-
-def test_resume_state_loads_completed_scan(mock_video, tmp_path):
-    """A COMPLETED scan's status file is still resumable, so clearing just one
-    section (e.g. transcription) re-runs only that piece on the next start."""
-    from nuclearcutter.scan.scanner import _load_resume_state
-
-    status_path = tmp_path / "test_movie.nuclearcutter.status.json"
-    import json as _json
-
-    status_path.write_text(_json.dumps({
-        "schema": 1, "video": mock_video.name, "duration_seconds": 100.0,
-        "sweep_interval": 2.0, "pid": 1, "started_at": "2026-01-01T00:00:00",
-        "phase": "done", "frames_done": 50, "frames_total": 50,
-        "position_seconds": 100.0,
-        "visual_candidates": [
-            {"category": "nudity", "start": 10.0, "end": 12.0, "confidence": 0.9, "level": "low"},
-        ],
-        "visual_detections": [
-            {"category": "nudity", "start": 8.0, "end": 14.0, "description": "done",
-             "confidence": 0.9, "level": "high"},
-        ],
-        "language_detections": [],
-    }))
-
-    st = _load_resume_state(status_path, mock_video.name)
-    assert st is not None
+def test_status_file_records_every_phase(video, tmp_path, no_media):
+    _run(video, tmp_path)
+    # The final write says done; the intermediate ones are checked elsewhere.
+    st = ScanStatus.load(tmp_path / "Movie.nuclearcutter.status.json")
     assert st.phase == "done"
-    # The sweep resume point is the full frame count -> sweep is skipped on
-    # restart (frames_done == frames_total).
-    assert st.frames_done == st.frames_total == 50
-    # Language detections from the prior run are preserved.
-    assert st.language_detections == []
+    assert st.visual_detections[0]["tags"] == ["nudity.shirtless_male"]
+    assert st.language_detections[0]["tags"] == ["language.profanity"]
 
 
-def test_resume_state_still_rejects_other_videos(mock_video, tmp_path):
-    """The done-state change must not weaken the video-ownership guard."""
-    from nuclearcutter.scan.scanner import _load_resume_state
+def test_partial_result_is_written_as_it_goes(video, tmp_path, no_media):
+    _run(video, tmp_path)
+    partial = tmp_path / "Movie.nuclearcutter.json"
+    assert partial.exists()
+    data = json.loads(partial.read_text())
+    assert data["schema_version"] == 2
+    assert data["visual_detections"][0]["tags"] == ["nudity.shirtless_male"]
+    assert data["generator"]["taxonomy_version"] == TAXONOMY_VERSION
 
-    status_path = tmp_path / "other_movie.nuclearcutter.status.json"
-    import json as _json
 
-    status_path.write_text(_json.dumps({
-        "schema": 1, "video": "some_other_file.mkv", "phase": "done",
-        "frames_done": 10, "frames_total": 10,
-        "visual_candidates": [], "visual_detections": [], "language_detections": [],
+def test_dialogue_in_the_range_is_reaches_classify(video, tmp_path, no_media, monkeypatch):
+    """The classify pass sees words: a line of dialogue is often the only clue
+    that a blood-streaked face is a cartoon rather than a wound."""
+    def utt(text, start, end):
+        n = len(text.split())
+        step = (end - start) / max(n, 1)
+        return Utterance(text, start, end,
+                         [Word(w, start + i * step, start + (i + 1) * step)
+                          for i, w in enumerate(text.split())])
+
+    monkeypatch.setattr(scanner, "read_transcript_cache", lambda *a, **k: [
+        utt("look at all that blood", 20.5, 21.5),
+        utt("nowhere near this scene", 90.0, 91.0),
+    ])
+    calls = no_media
+    _run(video, tmp_path)
+    assert calls["identify"][0]["dialogue"] == "look at all that blood", \
+        "the line that overlaps the range must be passed to the classify pass"
+
+
+def test_classify_is_skipped_for_ranges_already_classified(video, tmp_path, no_media,
+                                                           monkeypatch):
+    """A resumed scan must not re-spend a classify call on a range it already
+    named — that is the money the resume exists to save."""
+    status_path = tmp_path / "Movie.nuclearcutter.status.json"
+    prior = ScanStatus(video="Movie.mkv", phase="identify", frames_done=50,
+                       frames_total=50)
+    prior.visual_candidates.append({"triggers": ["skin"], "start": 20.0, "end": 22.0,
+                                    "confidence": 0.7})
+    prior.visual_detections.append({"tags": ["nudity.shirtless_male"], "start": 20.0,
+                                    "end": 22.0, "description": "kept",
+                                    "confidence": 0.8, "rendering": "live_action",
+                                    "minors": "no"})
+    prior.language_detections.append({"tags": ["language.profanity"], "text": "damn",
+                                      "start": 1.0, "end": 1.2, "utterance_start": 0.5,
+                                      "utterance_end": 2.0})
+    prior.write(status_path)
+
+    result, _s, _p = _run(video, tmp_path)
+    assert no_media["identify"] == [], "the range was already classified"
+    kept = [d for d in result.visual_detections if d.description == "kept"]
+    assert kept, "the prior detection must survive the resume"
+    assert result.language_detections[0].tags == ["language.profanity"]
+
+
+def test_resume_reconverts_frame_counts_when_the_interval_changed(video, tmp_path,
+                                                                  no_media):
+    """Progress is stored in SAMPLES. Resuming at a different sweep interval must
+    preserve the swept POSITION in seconds, not the sample count — otherwise
+    halving the interval resumes twice as deep and skips un-swept footage."""
+    status_path = tmp_path / "Movie.nuclearcutter.status.json"
+    st = ScanStatus(video="Movie.mkv", phase="sweep", frames_done=25, frames_total=50)
+    st.sweep_interval = 4.0  # 100 s swept
+    st.write(status_path)
+
+    _run(video, tmp_path, sweep_interval=2.0)
+    assert no_media["sweep"][0]["resume_from"] == 50  # 100 s / 2 s, not 25
+
+
+def test_resume_refuses_a_status_file_from_another_film(tmp_path, no_media, monkeypatch):
+    """Two films can share a stem. Resuming across them would put one film's
+    detections on the other's timeline."""
+    other = tmp_path / "Other.mkv"
+    other.write_text("x")
+    status_path = tmp_path / "Other.nuclearcutter.status.json"
+    st = ScanStatus(video="Different.mkv", phase="sweep", frames_done=25, frames_total=50)
+    st.write(status_path)
+
+    scan(other, llm_config=LLMConfig(),
+                  client_factory=lambda cfg: FakeClient(),
+                  status_path=status_path,
+                  partial_result_path=tmp_path / "Other.nuclearcutter.json")
+    assert no_media["sweep"][0]["resume_from"] == 0
+
+
+def test_a_v1_status_file_is_not_resumable(tmp_path, no_media):
+    """Old status files hold category/level records with no tags. Mixing the two
+    vocabularies in one scan file would be unrecoverable."""
+    status_path = tmp_path / "Movie.nuclearcutter.status.json"
+    status_path.write_text(json.dumps({
+        "schema": 1, "video": "Movie.mkv", "phase": "visual_confirm",
+        "frames_done": 50, "frames_total": 50,
+        "visual_candidates": [{"category": "NUDITY", "start": 3.0, "end": 5.0,
+                               "confidence": 0.9, "level": "high"}],
+        "visual_detections": [], "language_detections": [],
     }))
-    assert _load_resume_state(status_path, mock_video.name) is None
+    scan(tmp_path / "Movie.mkv", llm_config=LLMConfig(),
+                  client_factory=lambda cfg: FakeClient(), status_path=status_path,
+                  partial_result_path=tmp_path / "Movie.nuclearcutter.json")
+    assert no_media["sweep"][0]["resume_from"] == 0
+    after = ScanStatus.load(status_path)
+    assert all("category" not in c and "triggers" in c for c in after.visual_candidates)
+
+
+# --------------------------------------------------------------------------
+# Failure modes: a scan must never look clean when it could not look
+# --------------------------------------------------------------------------
+
+def test_every_sweep_batch_failing_raises_instead_of_a_clean_scan(video, tmp_path,
+                                                                  monkeypatch):
+    """With the sweep unable to read anything, the ranges are all 'doubt' and the
+    classify pass would churn through the whole film. Fail now, say why."""
+    monkeypatch.setattr(scanner, "load_cached_fingerprint", lambda _p: (100.0, []))
+    monkeypatch.setattr(scanner, "compute_fingerprint", lambda _p: (100.0, []))
+    monkeypatch.setattr(scanner, "cache_fingerprint", lambda *a: None)
+    monkeypatch.setattr(scanner, "read_transcript_cache", lambda *a, **k: [])
+    monkeypatch.setattr(scanner, "find_subtitle_file", lambda _p: None)
+    monkeypatch.setattr(scanner, "detect_language", lambda *a, **k: [])
+
+    def all_fail(self, video_path, **kw):
+        from nuclearcutter.detection.visual_scan import SweepStats
+
+        stats = SweepStats()
+        stats.batches_queried = 7
+        stats.batches_failed = 7
+        return [], stats
+
+    monkeypatch.setattr(scanner.VisualScanDetector, "sweep", all_fail)
+    client = FakeClient()
+    with pytest.raises(RuntimeError) as exc:
+        scan(video, llm_config=LLMConfig(), client_factory=lambda cfg: client,
+             status_path=tmp_path / "s.json",
+             partial_result_path=tmp_path / "p.json")
+    assert "not answering" in str(exc.value).lower() or "failed" in str(exc.value).lower()
+
+
+def test_every_classify_failing_raises(video, tmp_path, no_media, monkeypatch):
+    def always_broken(self, video_path, candidate, dialogue_text="",
+                      invented_tags=None):
+        from nuclearcutter.detection.visual_scan import _unclassified
+
+        return _unclassified(candidate, reason="classify query failed"), False
+
+    monkeypatch.setattr(scanner.VisualScanDetector, "identify", always_broken)
+    with pytest.raises(RuntimeError) as exc:
+        _run(video, tmp_path)
+    assert "classify" in str(exc.value).lower()
+
+
+def test_partial_progress_survives_a_stop(video, tmp_path, no_media):
+    ev = threading.Event()
+    ev.set()
+    with pytest.raises(ScanStopped):
+        _run(video, tmp_path, stop_event=ev)
+    status = tmp_path / "Movie.nuclearcutter.status.json"
+    assert status.exists(), "a stopped scan must leave a resumable status file"
+
+
+def test_stop_midway_keeps_found_detections(video, tmp_path, no_media, monkeypatch):
+    """Stopping during classify must still write the detections found so far —
+    otherwise Stop costs you the whole run."""
+    ev = threading.Event()
+
+    def sweeping(self, video_path, sample_interval=2.0, on_flagged_window=None,
+                 on_progress=None, resume_from=0, existing_windows=None,
+                 stop_event=None):
+        from nuclearcutter.detection.visual_scan import CandidateRange, SweepStats
+
+        stats = SweepStats()
+        stats.batches_queried = 3
+        # Two candidates, and Stop is pressed before classify starts.
+        ev.set()
+        ranges = [CandidateRange(20.0, 22.0, ["skin"], "live_action",
+                                 {"adult_female": 0, "adult_male": 1, "minors": "no"},
+                                 0.7),
+                  CandidateRange(40.0, 42.0, ["blood"], "live_action",
+                                 {"adult_female": 0, "adult_male": 1, "minors": "no"},
+                                 0.7)]
+        stats.frames_total = stats.frames_done = 50
+        return ranges, stats
+
+    monkeypatch.setattr(scanner.VisualScanDetector, "sweep", sweeping)
+    with pytest.raises(ScanStopped):
+        _run(video, tmp_path, stop_event=ev)
+    partial = json.loads((tmp_path / "Movie.nuclearcutter.json").read_text())
+    assert partial["language_detections"], "language found before the stop must persist"
+
+
+def test_status_write_failure_does_not_kill_a_scan(video, tmp_path, no_media,
+                                                   monkeypatch):
+    """The status file lives next to the movie, often on a network share. If the
+    share drops mid-scan, losing the status file is bad; losing the scan is worse."""
+    monkeypatch.setattr(ScanStatus, "write",
+                        lambda self, path: (_ for _ in ()).throw(OSError("share gone")))
+    result, _s, _p = _run(video, tmp_path)
+    assert result.visual_detections[0].tags == ["nudity.shirtless_male"]
+
+
+def test_partial_result_write_failure_is_survivable(video, tmp_path, no_media,
+                                                    monkeypatch):
+    """Same reasoning for the partial scan file, which is written after every
+    detection and is the first thing to hit a dead share."""
+    real_write = scanner._atomic_write_json
+
+    def exploding(path, data):
+        raise OSError("smb disconnected")
+
+    monkeypatch.setattr(scanner, "_atomic_write_json", exploding)
+    result, _s, _p = _run(video, tmp_path)  # must not raise
+    assert result.visual_detections
+
+
+# --------------------------------------------------------------------------
+# Provenance in the file
+# --------------------------------------------------------------------------
+
+def test_generator_records_the_model_and_taxonomy(video, tmp_path, no_media):
+    result, _s, _p = _run(video, tmp_path, client=FakeClient(),
+                          llm_override=LLMConfig(vlm_model="gemma-test",
+                                                 text_model="gemma-test"))
+    assert result.generator["taxonomy_version"] == TAXONOMY_VERSION
+    assert result.generator.get("vlm_model")
+
+
+def test_resume_state_is_loaded_from_the_matching_video_only(video, tmp_path, no_media):
+    """The happy path of the guard above: same name, same status file -> resume."""
+    st = ScanStatus(video="Movie.mkv", phase="sweep", frames_done=10, frames_total=50)
+    st.sweep_interval = 2.0
+    path = tmp_path / "Movie.nuclearcutter.status.json"
+    st.write(path)
+    scan(video, llm_config=LLMConfig(), client_factory=lambda c: FakeClient(),
+         status_path=path, partial_result_path=tmp_path / "Movie.nuclearcutter.json",
+         sweep_interval=2.0)
+    assert no_media["sweep"][0]["resume_from"] == 10

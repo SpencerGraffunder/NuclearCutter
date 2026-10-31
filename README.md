@@ -1,7 +1,8 @@
 # NuclearCutter
 
 Self-hosted, open-source content censoring for your local movie collection.
-Detects nudity, gore, violence, and foul language and produces a permanently
+Describes what is in every scene of a movie — nudity, violence, blood, sexual
+content, language, drug use — and produces a permanently
 modified copy of the file — no live-playback plugin, no dependency on Plex or
 any particular player. NuclearCutter is a **client** that does all the ffmpeg
 work locally and talks to your own, already-running model servers over the
@@ -98,7 +99,7 @@ recognition, so the only options are:
 | `none` | leave the audio untouched |
 | `mute_scene` | silence the whole flagged scene |
 
-For **foul language** (which has word-level timestamps):
+For the **language** family (which has word-level timestamps):
 
 | Audio action | Effect |
 |---|---|
@@ -108,46 +109,65 @@ For **foul language** (which has word-level timestamps):
 | `replace_word` | (upcoming) AI voice replacement of the word — falls back to mute for now |
 | `replace_phrase` | (upcoming) AI voice replacement of the phrase — falls back to mute for now |
 
-**Categories and defaults:**
+**Families and defaults:**
 
-| Category | Default visual | Default audio | Default level | Notes |
+Detection describes **what is in the frame**. Rendering decides what to do about
+it. Those are separate, and the table below is the *default* half of the second
+step — every one of these is a dropdown in the GUI and a flag in the CLI.
+
+| Family | Tags | Default picture | Default audio | What it covers |
 |---|---|---|---|---|
-| Nudity | `blur` | `none` | `med` | bare/partly covered private parts, underwear/swimwear/lingerie in an intimate context, sex scenes. (Formerly two categories — nudity + intimate scenes — now merged into one.) |
-| Gore | `blur` | `none` | `med` | visible blood, open wounds, surgery showing blood/incisions, corpses with wounds, mutilation |
-| Violence | `blur` | `none` | `med` | characters deliberately hurting each other (fighting, punching, attacks, murder, torture) even if no blood is shown |
-| Foul language | `none` | `mute_phrase` | `med` | profanity; audio-only by default |
+| Nudity & modesty | 35 | `blur` | `none` | How much of a body, or what clothing, is visible |
+| Sexual situations | 11 | `blur` | `none` | Kissing, undressing, sex — with or without nudity |
+| Violence | 26 | `blur` | `none` | One person hurting, or threatening to hurt, another |
+| Blood & injury | 21 | `blur` | `none` | Wounds, blood, damaged bodies |
+| Self-harm & suicide | 5 | `blur` | `none` | Someone hurting themselves, and how it is depicted |
+| Language | 16 | `none` | `mute_phrase` | Swearing, slurs, insults, explicit talk |
+| Drugs, drinking, smoking | 4 | `blur` | `none` | Smoking, heavy drinking, drug use |
+| Scan was unsure | 3 | `blur` | `none` | Flagged but could not be named — see below |
 
-### Severity levels (shareable scans)
+### What gets censored is a set of tags, not a level
 
-Every detection is classified into a **fixed severity level** — `low` / `med` /
-`high` / `exhigh` — by the model during the scan. This level is recorded in the
-scan JSON, so **scan files are shareable**: the scan says *how bad* a scene is,
-and each person decides their own cutoff.
+The scan records facts — `nudity.shirtless_male`, `violence.weapon_display`,
+`gore.blood_moderate` — and **nothing else about them**. There is no severity
+score, no threshold, and no "how bad is this" anywhere in the pipeline. What gets
+censored is simply which tag ids you have ticked:
 
-The level is the amount of **censorship**:
-- `low` = **low censorship** — only the worst content is corrected
-- `med` = medium
-- `high` = high
-- `exhigh` = **max censorship** — basically everything gets corrected
+```python
+det.censorable(your_selection)   # any overlap → that moment is censored
+```
 
-Your per-category **level** setting in the Render section is that threshold:
-detections at or below it get corrected; milder ones are left alone. E.g.
-`nudity_level = "low"` blurs only the most extreme nudity, while
-`nudity_level = "exhigh"` blurs essentially anything that isn't fully modest
-(it makes the film play like a documentary — which is fine, since every
-blur/black segment shows a clean text summary of the scene).
+So the workflow is: scan once, then decide. Tick "shirtless men" off and the
+beach scenes come back; tick it on later and re-render in minutes with no rescan.
+Presets (`Nothing`, `Nudity`, `Sexual`, `Language`, `Graphic`, `Everything`) are
+one-tap starting points that only ever *add* to what you had picked — and there is
+deliberately no "recommended" one, because deciding what is offensive is the entire
+decision this tool hands back to you.
 
-The level *scale itself* is standardized (built in, not per-user), so the same
-scan JSON produces consistent results for everyone. The **full definitions of
-each level** (i.e. exactly what gets caught at each setting) are part of the
-sweep/confirm prompts in `nuclearcutter/prompts.json`, which the web GUI's
-**VLM Prompts** panel lets you view and edit.
+**This is also why scan files are shareable.** A detection is a fact, so two people
+who disagree completely about what deserves censoring use the same file. Under the
+old severity levels they could not: the scan encoded somebody else's threshold, and
+disagreeing with it meant rescanning the film — hours of GPU time — to hold a
+different opinion.
 
-**`blur`** keeps the scene intact and less disruptive than replacing the
-footage entirely, while still obscuring the flagged content. **`black`** shows
-nothing but the clean summary text. Audio can be set independently per
-category, so e.g. nudity can be `visual=blur` + `audio=none`, or violence can
-be `visual=black` + `audio=mute_scene`.
+Two things are enforced rather than offered, because a safety setting that can be
+missed is a safety setting that will be missed:
+
+- **A child in the scene is always censored.** `safety.exposure_with_minor` is the
+  one non-negotiable tag; the GUI shows it greyed out and labelled *always on*
+  rather than hiding it.
+- **"Unsure" is a tag, never silence.** A moment the scan flagged but cannot name
+  lands on `safety.unclassified` or a family's `unclear`, and is censorable by
+  default. A dropped detection is an uncensored scene, which is the one failure
+  mode this tool cannot afford. (Self-harm and substance detection deliberately
+  forgo an `unclear` tag — guessing those from a blurry frame deletes plotlines;
+  [docs/TAXONOMY.md](docs/TAXONOMY.md) §3.3 explains the trade.)
+
+**`blur`** keeps the scene intact and less disruptive than replacing the footage
+entirely, while still obscuring it. **`black`** shows nothing but the clean summary
+text. Picture and sound are set independently per family, so nudity can be
+`blur`+`none` while violence is `black`+`mute_scene`. When one moment matches two
+families asking for different actions, the **stronger** ask wins.
 
 Blur intensity is tunable with the **Blur amount** field in the GUI:
 `1.0` is the standard intense blur, `2.0` is twice as extreme (bigger radius +
@@ -167,8 +187,8 @@ each blur/black segment by extra seconds on both sides.
   - an **OpenAI-compatible LLM/VLM server** serving a vision-capable model
     over a `/v1` API (e.g. llama.cpp `llama-server` with a multimodal GGUF +
     `--mmproj`, LM Studio, Ollama, …). This does the visual sweep, the scene
-    descriptions, and the text-level foul-language re-checks.
-  - a **whisper.cpp server** for transcription (foul language). NuclearCutter
+    descriptions, and the tagging of spoken language.
+  - a **whisper.cpp server** for transcription (the language family). NuclearCutter
     loads the model you pick in the GUI on demand — the server hot-swaps to
     it when a transcription starts.
 
@@ -200,7 +220,7 @@ Scan section covers:
   LLM/VLM. Hit **Scan for models** to fetch its model ids from `/v1/models`
   into the dropdowns.
 - **VLM model / Text model** — the vision model for the sweep + descriptions,
-  and (optionally different) the text model for the foul-language re-checks.
+  and (optionally different) the text model used to tag spoken language.
 - **Whisper server** — derived from the same server address (port +1); the
   whisper.cpp server for transcription. Its `.bin` model folder is
   auto-detected from the server process — no setting needed.
@@ -230,28 +250,38 @@ clear message rather than hanging. Images sent to the vision model are
 downscaled to the selected scale before upload — the single biggest speed
 lever in the whole pipeline.
 
-### Full-film VLM sweep (the only visual detector)
+### How a scan works (trigger sweep, then one classifier pass)
 
-Visual detection is a single **full-film VLM sweep** — there is no separate
-NudeNet classifier anymore. NudeNet was removed because it can miss a real
-nude scene entirely (it scored zero on every frame of a full nude scene in
-The Martian that a vision model immediately flagged at 0.95 confidence).
+Visual detection is two passes over the film, split because they answer different
+questions at very different cost. There is no NudeNet-style pre-filter: it scored
+**zero** on every frame of a full nude scene that a vision model immediately
+flagged at 0.95 confidence, so the VLM never got shown those scenes at all. A blind
+fast pass cannot be the gatekeeper if it can silently drop real content.
 
-The sweep samples frames across the whole film, sends them to the vision
-model in small batches, and asks one question per batch: *"does this batch
-contain ANY flagged content?"* — covering nudity, gore, and violence in a
-single pass. Flagged batch windows are merged into ranges with generous
-before/after padding, so a scene is never clipped and nothing is silently
-dropped. Each range is then confirmed, described, **and classified into a
-severity level** (low/med/high/exhigh) using the fixed, standardized scale.
-The level is stored in the scan JSON, which is what makes scans shareable.
+1. **Sweep** samples frames across the whole film and asks the vision model one
+   cheap question per batch: *which of these categories, if any, appear in these
+   frames?* — a short list of trigger names, not the 121-tag vocabulary. Coarse
+   presence is what low-resolution batches are good at, and keeping the vocabulary
+   out of this prompt is what keeps the call cheap.
+2. Flagged windows are merged with generous before/after padding so a scene is
+   never clipped, and merging takes the **union** of what was seen.
+3. **Classify** then re-watches each merged range at higher resolution and returns
+   the specific tag ids, a scene description, a confidence, how the content is
+   presented (live-action, animation, anime, artwork, archival, fantasy or stage)
+   and an age estimate for the people present. Those presentation styles are the
+   **Filter** checkboxes in the GUI, all ticked by default — untick `artwork` to
+   stop a museum scene being blurred, and nothing else.
 
-The **scan interval** controls sampling density (seconds between samples;
-default 2). Smaller catches shorter scenes but makes more VLM calls; larger
-is faster but can miss brief flashes. Because this is one VLM sweep covering
-all three visual categories, it replaces what used to be NudeNet + a VLM
-confirm pass + two separate opt-in sweeps — and it never depends on a
-fast-but-blind classifier deciding what's worth looking at.
+**The sweep's verdict is final — classify can add detail but can never un-flag a
+range.** That asymmetry is why the two passes stay separate: a cheap pass that can
+only *include* and an expensive pass that can only *enrich* means nothing gets
+dropped on a bad model day. It is also why `harm` and `substance` tags appear only
+from the classify pass — no blurry thumbnail can support those claims.
+
+The **scan interval** controls sampling density (seconds between samples; default
+2). Smaller catches shorter scenes but makes more VLM calls; larger is faster but
+can miss brief flashes. Expect a full feature to take hours: this is the slow pass,
+and rendering afterwards is fast and needs no models.
 
 ### Rendering preserves the source codec
 
@@ -347,7 +377,7 @@ Open the GUI, set the source file to your movie, point the **Model server**
 and **Whisper server** rows at your running servers (hit **Scan for models** /
 **Scan** to fill the dropdowns), keep scale at 480p, and hit **Start scan**.
 When the scan finishes, set your render preferences (or keep defaults: blur
-nudity/gore/violence, mute foul-language phrases) and hit **Start render**.
+which categories to censor and how) and hit **Start render**.
 Result: `Movie_cleaned.mkv` next to the original, which is left untouched.
 
 ### Example 2 — Point it at llama.cpp (LLM/VLM) + whisper.cpp
@@ -383,16 +413,32 @@ python3 nuclearcutter.py scan "/path/to/Movie.mkv" \
 
 You already scanned once; now you want a different censorship policy without
 re-analyzing the film. In the GUI, the render reads the same scan JSON
-(`Movie.nuclearcutter.json`) — just change the levels/corrections and render
-again. Headless equivalent:
+(`Movie.nuclearcutter.json`) — just change which tags are selected and render
+again; no rescan is involved. Headless equivalent — the selection is a set of tag
+ids or families, there is no level to tune:
 
 ```bash
+# What can even be chosen, if you don't know the ids:
+python3 nuclearcutter.py tags --search swimwear
+python3 nuclearcutter.py tags --family gore --json
+
+# Censor a starting preset, then subtract what you don't want:
 python3 nuclearcutter.py render "/path/to/Movie.mkv" \
   --scan "/path/to/Movie.nuclearcutter.json" \
   --output "/path/to/Movie_lite_cut.mkv" \
-  --nudity-level low \
-  --foul-language-audio mute_word
+  --preset sexual \
+  --allow nudity.shirtless_male \
+  --audio language=mute_word
 ```
+
+`--censor` / `--allow` take a tag id *or* a whole family name, so
+`--censor gore` means every gore tag. The flags apply in a fixed order —
+**preset → `--censor` → `--allow` → `--grep` → `--tag-file`** — which is what makes
+`--preset sexual --allow nudity.shirtless_male` read exactly as it sounds: start
+broad, then subtract. A later flag overrules an earlier one, so put what you want
+to *keep* before anything that re-adds it. `--grep REGEX` matches tag ids and
+labels (`--grep 'blood|wound'` is the cheap way to ask for "all the blood"), and
+`--tag-file` reads a household profile — one id per line, `#` comments allowed.
 
 ### Example 4 — Benchmark the model before committing to a scan
 

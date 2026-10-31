@@ -7,7 +7,13 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from nuclearcutter.server import AppState, JobInfo, _LogCapture, create_app
+from nuclearcutter.schema import (
+    SCHEMA_VERSION, FilmIdentity, ScanResult, VisualDetection,
+)
+from nuclearcutter.server import (
+    AppState, JobInfo, _LogCapture, _scan_steps, create_app,
+)
+from nuclearcutter.taxonomy import Minors, TAXONOMY_VERSION, TAGS
 
 
 def make_client(state=None):
@@ -64,15 +70,15 @@ def test_settings_apply_and_validate():
         "whisper_model": "ggml-small",
         "scale": "720p",
         "sweep_interval": 5,
-        "levels": {"nudity": "high"},
-        "audio_actions": {"foul_language": "mute_word"},
+        "selection": ["nudity.shirtless_male", "gore.blood_heavy"],
+        "family_actions": {"language": {"visual": "none", "audio": "mute_word"}},
     }})
     assert ok.status_code == 200
     s = ok.json()["settings"]
     assert s["scale"] == "720p"
     assert s["sweep_interval"] == 5
-    assert s["levels"]["nudity"] == "high"
-    assert s["audio_actions"]["foul_language"] == "mute_word"
+    assert s["selection"] == ["nudity.shirtless_male", "gore.blood_heavy"]
+    assert s["family_actions"]["language"]["audio"] == "mute_word"
     assert s["vlm_model"] == "qwen3-vl-8b"
     assert s["whisper_model"] == "ggml-small"
     assert s["server_address"] == "http://192.168.4.164"
@@ -100,8 +106,16 @@ def test_settings_legacy_base_url_alias():
     assert bad.status_code == 400
     bad2 = c.post("/api/settings", json={"settings": {"scale": "4800p"}})
     assert bad2.status_code == 400
-    bad3 = c.post("/api/settings", json={"settings": {"audio_actions": {"gore": "mute_word"}}})
-    assert bad3.status_code == 400  # visual categories can't mute per-word
+    # A picture-only family cannot mute per word — there are no words in it.
+    bad3 = c.post("/api/settings", json={"settings": {
+        "family_actions": {"gore": {"audio": "mute_word"}}}})
+    assert bad3.status_code == 400
+    # An unknown tag id in the selection is a 400, not a silently ignored entry:
+    # a renamed tag surviving in settings.json would censor nothing, forever.
+    bad4 = c.post("/api/settings", json={"settings": {"selection": ["nudity.nude_lady"]}})
+    assert bad4.status_code == 400
+    # ...and selecting nothing is legal and means "censor nothing".
+    assert c.post("/api/settings", json={"settings": {"selection": []}}).status_code == 200
 
 
 def test_summary_settings_apply_and_validate():
@@ -167,22 +181,29 @@ def _write_full_scan(tmp_path):
     """Write a movie with a transcript cache + status + completed result, and
     return the movie path. Mirrors the auto-load test setup."""
     from nuclearcutter.schema import (
-        Category, FilmIdentity, ScanResult, SeverityLevel, VisualDetection,
+        SCHEMA_VERSION, FilmIdentity, LanguageDetection, ScanResult, VisualDetection,
     )
 
     movie = tmp_path / "M.mkv"
     movie.write_bytes(b"x")
     # Transcript cache exists -> transcription counts as done.
     (tmp_path / "M.nuclearcutter.transcript.json").write_text('{"utterances": []}')
-    (tmp_path / "M.nuclearcutter.status.json").write_text('{"phase": "done"}')
+    from nuclearcutter.utils.scan_status import ScanStatus
+    st_done = ScanStatus(video="M.mkv", phase="done", duration_seconds=100.0,
+                         frames_done=50, frames_total=50, sweep_interval=2.0)
+    st_done.write(tmp_path / "M.nuclearcutter.status.json")
     scan = ScanResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         identity=FilmIdentity(title="M", year=None, duration_seconds=100.0, phash_samples=[]),
         visual_detections=[
-            VisualDetection(category=Category.NUDITY, start=1.0, end=2.0,
-                            description="x", confidence=0.9, level=SeverityLevel.HIGH),
+            VisualDetection(start=1.0, end=2.0, tags=["nudity.shirtless_male"],
+                            description="x", confidence=0.9),
         ],
-        language_detections=[],
+        language_detections=[
+            LanguageDetection(start=5.0, end=5.5, utterance_start=4.0,
+                              utterance_end=6.0, text="damn",
+                              tags=["language.profanity"]),
+        ],
     )
     scan.save(tmp_path / "M.nuclearcutter.json")
     return movie
@@ -208,7 +229,7 @@ def test_clear_scan_verify_keeps_transcript(tmp_path):
     assert st.scan_result is None
     assert st.scan_result_path == ""
     assert st.scan.status == "idle"
-    assert st.scan.steps == {"transcribe": 1.0, "scan": 0.0, "verify": 0.0, "summary": 0.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=1.0, language=0.0, scan=0.0, identify=0.0, render=0.0)
 
 
 def test_clear_transcription_keeps_scan(tmp_path):
@@ -217,7 +238,7 @@ def test_clear_transcription_keeps_scan(tmp_path):
     movie = _write_full_scan(tmp_path)
     st = AppState()
     st.update_settings({"video_path": str(movie)})
-    assert st.scan.steps == {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=1.0, language=1.0, scan=1.0, identify=1.0, render=0.0)
 
     d = st.clear_transcription_progress()
     assert any(p.endswith(".nuclearcutter.transcript.json") for p in d["removed"])
@@ -229,7 +250,7 @@ def test_clear_transcription_keeps_scan(tmp_path):
     # Only the transcribe bar drops back to 0.
     assert st.scan.steps["transcribe"] == 0.0
     assert st.scan.steps["scan"] == 1.0
-    assert st.scan.steps["verify"] == 1.0
+    assert st.scan.steps["identify"] == 1.0
 
 
 def test_loaded_scan_reflects_missing_transcript(tmp_path):
@@ -241,7 +262,7 @@ def test_loaded_scan_reflects_missing_transcript(tmp_path):
     st = AppState()
     st.update_settings({"video_path": str(movie)})
     assert st.scan_result is not None
-    assert st.scan.steps == {"transcribe": 0.0, "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=0.0, language=1.0, scan=1.0, identify=1.0, render=0.0)
     assert "transcription pending" in st.scan.message
 
 
@@ -260,7 +281,7 @@ def test_restart_after_scan_clear_reflects_kept_transcript(tmp_path):
     assert st.scan_result is None
     assert st.scan.steps["transcribe"] == 1.0
     assert st.scan.steps["scan"] == 0.0
-    assert st.scan.steps["verify"] == 0.0
+    assert st.scan.steps["identify"] == 0.0
     assert "Transcript cached" in st.scan.message
 
 
@@ -283,8 +304,7 @@ def test_switching_to_movie_without_scan_resets_status(tmp_path):
     assert st.scan.status == "idle"
     assert st.scan.progress == 0.0
     assert st.scan.duration == 0.0
-    assert st.scan.steps == {"transcribe": 0.0, "scan": 0.0, "verify": 0.0,
-                             "summary": 0.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=0.0, language=0.0, scan=0.0, identify=0.0, render=0.0)
     assert st.timeline_dict() is None
 
 
@@ -381,17 +401,73 @@ def test_models_endpoint_uses_key_override_then_saved_key(monkeypatch):
     assert seen["api_key"] == "not-needed"  # keyless default keeps old behavior
 
 
-def test_definitions_endpoint():
-    """The render hover tooltips come from here: all 4 levels for every category."""
+def test_taxonomy_endpoint_is_the_single_source_of_the_chooser():
+    """The GUI builds "what do you want to hide?" from this payload.
+
+    Worth pinning: the whole point of serving the vocabulary is that adding a
+    category in one Python file makes it appear in the browser. If the endpoint
+    stops reporting a real hint, or drops a family's audio options, the UI
+    silently shows a checkbox that censors nothing.
+    """
     _, c = make_client()
-    r = c.get("/api/definitions")
+    r = c.get("/api/taxonomy")
     assert r.status_code == 200
     d = r.json()
-    assert set(d) == {"nudity", "gore", "violence", "foul_language"}
-    for cat in ("nudity", "gore", "violence"):
-        assert set(d[cat]) == {"low", "med", "high", "exhigh"}
-        assert all(len(d[cat][lv]) > 20 for lv in d[cat])  # real definitions, not empty
-    assert len(d["foul_language"]) > 20  # foul language ships as one full scale text
+    assert d["taxonomy_version"] == TAXONOMY_VERSION
+    assert d["schema_version"] == 2
+
+    fam_ids = [f["id"] for f in d["families"]]
+    assert "gore" in fam_ids and "language" in fam_ids
+    for fam in d["families"]:
+        assert fam["label"] and fam["blurb"]
+        # Exactly one control per medium the family exists in. A family with no
+        # picture (language) must not offer a blur, or the GUI ships a dropdown
+        # that changes nothing.
+        assert fam["visual"] or fam["audio"], "every family needs one action"
+        assert fam["default_visual"] in (fam["visual"] or ["none"])
+        assert fam["default_audio"] in fam["audio"]
+    lang = next(f for f in d["families"] if f["id"] == "language")
+    assert lang["visual"] == [], "spoken words cannot be blurred"
+    assert "mute_word" in lang["audio"]
+    gore = next(f for f in d["families"] if f["id"] == "gore")
+    assert gore["visual"] and "mute_word" not in gore["audio"], \
+        "a picture has no words to mute one at a time"
+
+    tags = d["tags"]
+    # "More than N tags" was the old anti-truncation guard, and the merge to 68 tags
+    # broke it while proving it was the wrong assertion: a fixed floor says nothing
+    # about whether the endpoint told the whole story. Assert equality with the live
+    # vocabulary instead — a dropped or capped tag now fails immediately, at any size.
+    assert {t["id"] for t in tags} == set(TAGS.keys()), \
+        "the endpoint is not serving the whole vocabulary"
+    by_family = {}
+    for t in tags:
+        by_family.setdefault(t["family"], []).append(t)
+        assert t["id"].startswith(t["family"] + "."), "ids are grouped by prefix"
+        assert len(t["hint"]) > 20, f"{t['id']} has no usable hint"
+        assert t["label"]
+    # Gender split where the user asked for it, and not where they didn't.
+    assert any(t["gender"] == "female" for t in by_family["nudity"])
+    assert any(t["gender"] == "male" for t in by_family["nudity"])
+    assert all(t["gender"] == "any" for t in by_family["gore"])
+    assert all(t["gender"] == "any" for t in by_family["violence"])
+
+    assert d["default_selection"] == []
+    # "everything" is every tag a human may choose; the child-protection rule is
+    # not a preference and must not appear as a checkbox.
+    assert set(d["presets"]["everything"]) == {
+        t["id"] for t in tags if not t["always_censor"]}
+    assert len(d["presets"]["everything"]) < len(tags), \
+        "an always-on tag must not be offered as a choice"
+    assert d["presets"]["none"] == []
+    from nuclearcutter.taxonomy import Rendering
+    assert {r["id"] for r in d["rendering"]} == {r.value for r in Rendering}
+    # Live action must be selectable on its own: it is the single most common way
+    # people want to narrow a filter ("censor the gore, not the cartoon").
+    assert "live_action" in {r["id"] for r in d["rendering"]}
+    assert all(r["label"] for r in d["rendering"])
+    # The minor flag is a fact about the film, never a checkbox you can turn off.
+    assert any(m["id"] == "yes" for m in d["minors"])
 
 
 def test_benchmark_stop_endpoint():
@@ -485,10 +561,12 @@ def test_timeline_dict_during_scan_uses_live_data():
     st = AppState()
     st.scan.duration = 100.0
     st.live_timeline["visual_candidates"].append(
-        {"category": "nudity", "start": 10.0, "end": 12.0, "confidence": 0.9, "level": "low"})
+        {"tags": ["nudity.shirtless_male"], "start": 10.0, "end": 12.0,
+         "confidence": 0.9})
     st.live_timeline["language_detections"].append(
-        {"category": "foul_language", "start": 5.0, "end": 5.5, "word": "fuck",
-         "utterance_start": 4.0, "utterance_end": 6.0, "level": "med", "llm_confirmed": True})
+        {"tags": ["language.profanity"], "text": "damn", "start": 5.0,
+         "end": 5.5, "utterance_start": 4.0, "utterance_end": 6.0,
+         "llm_confirmed": True})
     tl = st.timeline_dict()
     assert tl is not None
     assert tl["duration"] == 100.0
@@ -499,7 +577,7 @@ def test_timeline_dict_during_scan_uses_live_data():
 def test_timeline_dict_completed_scan_has_no_candidates():
     """A completed scan's timeline comes from the result (no generic candidates)."""
     from nuclearcutter.schema import (
-        Category, FilmIdentity, ScanResult, SeverityLevel, VisualDetection,
+        FilmIdentity, ScanResult, VisualDetection,
     )
 
     st = AppState()
@@ -507,8 +585,8 @@ def test_timeline_dict_completed_scan_has_no_candidates():
         schema_version=1,
         identity=FilmIdentity(title="T", year=2024, duration_seconds=90.0, phash_samples=[]),
         visual_detections=[
-            VisualDetection(category=Category.NUDITY, start=1.0, end=2.0,
-                            description="x", confidence=0.9, level=SeverityLevel.HIGH),
+            VisualDetection(start=1.0, end=2.0, tags=["nudity.shirtless_male"],
+                            description="x", confidence=0.9),
         ],
         language_detections=[],
     )
@@ -521,7 +599,7 @@ def test_timeline_dict_completed_scan_has_no_candidates():
 def test_loaded_scan_is_auto_loaded_for_saved_movie(tmp_path):
     """Choosing a movie with existing scan data loads it and marks work done."""
     from nuclearcutter.schema import (
-        Category, FilmIdentity, ScanResult, SeverityLevel, VisualDetection,
+        SCHEMA_VERSION, FilmIdentity, LanguageDetection, ScanResult, VisualDetection,
     )
 
     movie = tmp_path / "M.mkv"
@@ -530,13 +608,17 @@ def test_loaded_scan_is_auto_loaded_for_saved_movie(tmp_path):
     # counts as done too.
     (tmp_path / "M.nuclearcutter.transcript.json").write_text('{"utterances": []}')
     scan = ScanResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         identity=FilmIdentity(title="M", year=None, duration_seconds=100.0, phash_samples=[]),
         visual_detections=[
-            VisualDetection(category=Category.NUDITY, start=1.0, end=2.0,
-                            description="x", confidence=0.9, level=SeverityLevel.HIGH),
+            VisualDetection(start=1.0, end=2.0, tags=["nudity.shirtless_male"],
+                            description="x", confidence=0.9),
         ],
-        language_detections=[],
+        language_detections=[
+            LanguageDetection(start=5.0, end=5.5, utterance_start=4.0,
+                              utterance_end=6.0, text="damn",
+                              tags=["language.profanity"]),
+        ],
     )
     scan.save(tmp_path / "M.nuclearcutter.json")
 
@@ -547,7 +629,7 @@ def test_loaded_scan_is_auto_loaded_for_saved_movie(tmp_path):
     assert len(st.scan_result.visual_detections) == 1
     # Progress bars reflect the completed work.
     assert st.scan.status == "done"
-    assert st.scan.steps == {"transcribe": 1.0, "scan": 1.0, "verify": 1.0, "summary": 1.0, "render": 0.0}
+    assert st.scan.steps == _scan_steps(transcribe=1.0, language=1.0, scan=1.0, identify=1.0, render=0.0)
     assert st.scan.duration == 100.0
     # Timeline now comes from the loaded scan (no generic candidates).
     tl = st.timeline_dict()
@@ -664,7 +746,8 @@ def test_settings_persist_across_restart(tmp_path):
     st1.update_settings({
         "video_path": "/tmp/Movie.mkv",
         "scale": "720p",
-        "levels": {"nudity": "high"},
+        "selection": ["nudity.shirtless_male"],
+        "family_actions": {"language": {"visual": "none", "audio": "mute_word"}},
         "audio_actions": {"foul_language": "mute_word"},
     })
     assert path.exists()
@@ -675,8 +758,8 @@ def test_settings_persist_across_restart(tmp_path):
     st2 = AppState(settings_path=path)
     assert st2.video_path == "/tmp/Movie.mkv"
     assert st2.scale == "720p"
-    assert st2.levels["nudity"] == "high"
-    assert st2.audio_actions["foul_language"] == "mute_word"
+    assert st2.selection == ["nudity.shirtless_male"]
+    assert st2.family_actions["language"]["audio"] == "mute_word"
 
 
 def test_corrupt_settings_file_is_ignored(tmp_path):
@@ -894,3 +977,489 @@ def test_pwa_icon_allowlist_blocks_anything_else():
     assert c.get("/icons/index.html").status_code == 404
     assert c.get("/icons/..%2f..%2fsettings.json").status_code == 404
     assert c.get("/icons/settings.json").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# The single-page GUI, as a contract with the server
+# --------------------------------------------------------------------------
+
+def _page(c):
+    return c.get("/").text
+
+
+def test_the_page_has_no_leftovers_from_the_severity_ui():
+    """index.html is one file with the whole UI in it, and the old levels table
+    was 60 lines of hardcoded HTML. Any of these strings coming back means a
+    widget that talks to an endpoint which no longer exists — it would fail
+    silently in the browser, one click at a time."""
+    page = _page(make_client()[1])
+    for dead in ("/api/definitions", "/api/detection/override", "LEVEL_RANK",
+                 "matrixValues", "OVERRIDE_OPTIONS", "exhigh", "foul_language",
+                 'data-key="level"', "level_override"):
+        assert dead not in page, f"the page still uses {dead!r}"
+
+
+def test_the_page_builds_the_chooser_from_the_api_not_from_itself():
+    """The point of /api/taxonomy is that the browser ships no category list. If
+    someone hardcodes one, a tag added in taxonomy.py appears in scans but not in
+    the UI — the worst kind of miss, because the film IS being filtered without
+    the viewer being offered the choice."""
+    page = _page(make_client()[1])
+    assert 'fetch("/api/taxonomy")' in page
+    assert "buildChooser" in page
+    for hardcoded in ("nudity.shirtless_male", "gore.blood_heavy"):
+        assert hardcoded not in page, f"{hardcoded} is hardcoded in the page"
+
+
+def test_page_offers_the_controls_the_settings_api_accepts():
+    """Every key collectSettings() sends must be one update_settings() reads, and
+    vice versa — otherwise a setting is silently dropped on the floor."""
+    page = _page(make_client()[1])
+    for key in ("selection:", "family_actions:", "rendering:", "minors:",
+                "polish_descriptions:"):
+        assert key in page, f"collectSettings no longer sends {key}"
+    _, c = make_client()
+    settings = c.get("/api/state").json()["settings"]
+    for key in ("selection", "family_actions", "rendering", "minors",
+                "polish_descriptions"):
+        assert key in settings
+
+
+def test_page_renders_marks_by_family_class_the_server_sends():
+    """_visual_marker colours marks via `families`; a family with no CSS class
+    draws an invisible mark — the detection is there and the user cannot see it."""
+    from nuclearcutter.taxonomy import Family
+
+    page = _page(make_client()[1])
+    for fam in Family:
+        assert f".tl-mark.{fam.value}" in page, f"no mark colour for {fam.value}"
+
+
+def _code(page: str) -> str:
+    """The page with its comments stripped.
+
+    The removals below are documented *in* the HTML with comments that name what was
+    removed and why, so "is the word X still on the page" is not a usable test —
+    assert against the code, and let the prose say whatever it needs to.
+    """
+    import re
+    out = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    out = re.sub(r"/\*.*?\*/", "", out, flags=re.S)
+    # Line comments, but not the "//" in a URL — hence the negative lookbehind.
+    return re.sub(r"(?<!:)//[^\n]*", "", out)
+
+
+def test_chooser_has_no_search_box_but_still_hints_on_hover():
+    """The search box was removed on request (2026-10-30), with the preset row, the
+    "Picture style" qualifiers and the "Include people" checkboxes.
+
+    The reason those four went: the panel is a list of categories you tick, and each
+    of them was a different way to change what the list means without touching a
+    tick — one preset tap rewrote every neighbouring checkbox, so the panel stopped
+    being a readable record of a decision. The hover hint is what replaced the search
+    box's job ("what exactly is this?"), so it stays, and it stays asserted.
+    """
+    page = _code(_page(make_client()[1]))
+    assert "tag-search" not in page, "the search box came back"
+    assert "hidden-by-search" not in page, "dead filter CSS for a removed control"
+    assert "filterChooser" not in page, "the search handler is still wired up"
+    assert "title" in page and "hint" in page, "the chooser lost its hover definitions"
+    # Removals must not silently become "everything is gone": the chips are still
+    # built from the API, which is the whole point of /api/taxonomy.
+    assert "buildChooser" in page
+    assert "TAX.tags" in page, "the chooser no longer builds itself from the vocabulary"
+
+
+def test_removed_gui_controls_still_reach_the_server_with_safe_defaults():
+    """Losing the checkboxes must not change what the server is told.
+
+    `rendering` and `minors` are read by the render plan as filters over detections:
+    an EMPTY rendering list makes rendering_allowed() false for every detection, so a
+    page that kept reading its own deleted checkboxes would have shipped "nothing is
+    censored" behind a panel showing every box ticked. The page therefore carries the
+    server's own values through, and this pins the server half of that contract.
+    """
+    from nuclearcutter.taxonomy import Rendering, Selection, rendering_allowed
+
+    _, c = make_client()
+    tax = c.get("/api/taxonomy").json()
+    assert tax["rendering"] and tax["minors"], "API must keep offering what the GUI dropped"
+
+    all_renderings = Selection(renderings={r.value for r in Rendering})
+    assert rendering_allowed("live_action", all_renderings)
+    assert not rendering_allowed("live_action", Selection(renderings=set())), (
+        "an empty rendering list must exclude, which is exactly why the GUI sends "
+        "the full set instead of reading removed checkboxes")
+
+
+def test_detection_edit_endpoint_rejects_an_out_of_range_index():
+    _, c = make_client()
+    r = c.post("/api/detection/edit",
+               json={"type": "visual", "index": 0, "removed": True})
+    assert r.status_code == 400  # no scan loaded at all
+
+
+def test_detection_edit_changes_tags_and_the_dismissed_flag():
+    st = AppState()
+    st.update_settings({"video_path": ""})
+    st.scan_result = ScanResult(
+        schema_version=SCHEMA_VERSION,
+        identity=FilmIdentity(title="T", year=None, duration_seconds=60.0,
+                              phash_samples=[]),
+        visual_detections=[VisualDetection(start=1.0, end=2.0,
+                                           tags=["nudity.shirtless_male"],
+                                           description="x", confidence=0.9)],
+        language_detections=[],
+    )
+    _client = TestClient(create_app(st))
+
+    # 1) dismissing keeps the detection on the timeline, it only stops censoring.
+    r = _client.post("/api/detection/edit",
+                     json={"type": "visual", "index": 0, "removed": True})
+    assert r.status_code == 200
+    assert st.scan_result.visual_detections[0].removed is True
+    assert st.scan_result.visual_detections[0].tags == ["nudity.shirtless_male"]
+    marker = st.timeline_dict()["visual_detections"][0]
+    assert marker["removed"] is True
+    assert marker["tags"] == ["nudity.shirtless_male"], \
+        "dismissing must not rewrite what the scan saw"
+
+    # 2) correcting the tags is a statement about what is on screen, so it is a
+    #    different edit from a dismissal and both must be possible independently.
+    r = _client.post("/api/detection/edit",
+                     json={"type": "visual", "index": 0,
+                           "tags": ["gore.blood", "violence.beating_abuse"]})
+    assert r.status_code == 200
+    det = st.scan_result.visual_detections[0]
+    assert det.tags == ["gore.blood", "violence.beating_abuse"]
+    assert det.removed is True  # the dismissal was not silently reset
+
+    # 3) editing the tags of a detection that involves a minor re-applies the
+    #    child floor: removing the exposure tags by hand must not walk around it.
+    st.scan_result.visual_detections[0].minors = Minors.YES.value
+    st.scan_result.visual_detections[0].tags = ["nudity.breasts_bare_female"]
+    st.scan_result.visual_detections[0].removed = True
+    r = _client.post("/api/detection/edit",
+                     json={"type": "visual", "index": 0, "tags": ["violence.threat_or_weapon"]})
+    assert r.status_code == 200, r.text
+    protected = st.scan_result.visual_detections[0]
+    assert "safety.exposure_with_minor" in protected.tags, \
+        "the floor tag must come back even though the viewer asked to replace them"
+
+    # 4) an unknown tag id is refused rather than stored: it would match nothing.
+    r = _client.post("/api/detection/edit",
+                     json={"type": "visual", "index": 0, "tags": ["nudity.nope"]})
+    assert r.status_code == 400
+
+
+def test_timeline_marks_carry_labels_the_browser_cannot_compute():
+    """The browser has no copy of the vocabulary, so the server must hand it the
+    human names and families for every mark."""
+    st = AppState()
+    st.scan_result = ScanResult(
+        schema_version=SCHEMA_VERSION,
+        identity=FilmIdentity(title="T", year=None, duration_seconds=60.0,
+                              phash_samples=[]),
+        visual_detections=[VisualDetection(start=1.0, end=2.0,
+                                           tags=["nudity.shirtless_male"],
+                                           description="x", confidence=0.9,
+                                           minors=Minors.UNCERTAIN.value,
+                                           triggers=["skin"])],
+        language_detections=[],
+    )
+    marker = TestClient(create_app(st)).get("/api/state").json()["timeline"]["visual_detections"][0]
+    assert marker["kinds"] == ["Shirtless (men)"]
+    assert marker["families"] == ["nudity"]
+    assert marker["minors"] == Minors.UNCERTAIN.value
+    assert marker["triggers"] == ["skin"]
+    assert marker["tags"] == ["nudity.shirtless_male"]
+
+
+def test_legend_colours_and_names_every_family():
+    """A timeline mark in a colour the legend does not name is a mystery swatch.
+
+    The colours are necessarily declared twice (CSS cannot read JSON), so what the
+    test pins is the thing that does not have to be duplicated: coverage. Every
+    family the API reports must have BOTH a `.tl-mark.<family>` colour and a place
+    in the legend colour table, and no family may be named in the legend colour
+    table that the API no longer reports (a stale swatch teaches people to
+    distrust the legend).
+    """
+    from nuclearcutter.taxonomy import Family
+
+    page = _page(make_client()[1])
+    table = page[page.index("const LEGEND_COLORS = {"):]
+    table = table[:table.index("};")]
+    for fam in Family:
+        assert f".tl-mark.{fam.value}" in page, f"no timeline colour for {fam.value}"
+        assert f"{fam.value}:" in table, f"{fam.value} missing from LEGEND_COLORS"
+    for stale in ("nudity_candidate", "foul_language", "intimate"):
+        assert f"{stale}:" not in table, f"{stale} is not a family but is in the legend"
+
+
+def test_presets_are_gone_from_the_page_but_still_mean_what_they_said():
+    """The button row left the GUI (2026-10-30): one tap rewrote every tick beside it.
+
+    The presets themselves stay in the vocabulary and the CLI (`--preset graphic`), so
+    the guarantee that mattered — a preset must not quietly include what its label
+    excludes — still has to hold, and it is now asserted where the presets live.
+    `graphic` is the case that earned the check: it is the button a viewer reaches for
+    when a film has a battle in it, and inheriting suicide-method detail from it would
+    be the worst surprise this product could produce.
+    """
+    from nuclearcutter.taxonomy import selection_named
+
+    page = _code(_page(make_client()[1]))
+    assert "buildPresets" not in page, "the preset row came back"
+    assert "buildQualifiers" not in page, "the qualifier row came back"
+    assert 'id="presets"' not in page, "the preset row came back"
+
+    graphic = set(selection_named("graphic").tags)
+    assert not any(t.startswith("harm.") for t in graphic), \
+        "graphic must not reach into self-harm"
+    assert any(t.startswith("violence.") for t in graphic)
+    assert any(t.startswith("gore.") for t in graphic)
+    assert set(selection_named("nudity").tags) <= set(selection_named("sexual").tags)
+    assert not selection_named("none").tags
+
+
+def test_every_scan_phase_that_moves_the_job_also_moves_its_message():
+    """A progress line that stops moving is worse than no progress line.
+
+    `job.message` is set once to "Connecting to the model server..." before the
+    scan starts, and each phase branch of the progress callback used to update
+    only `phase`/counters — so the GUI displayed "connecting" for the five hours
+    of a sweep that was plainly running, and the honest reading of the screen was
+    "the job is stuck on a dead backend". Pressing stop felt like the only option.
+
+    This checks the invariant structurally, per `elif stage == ...` branch: a
+    branch that assigns job.phase must also assign job.message. Testing it
+    behaviourally would need a whole fake scan_pass, which is far more machinery
+    than the bug is worth, and the machinery would be what people maintain.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent
+           / "nuclearcutter" / "server.py").read_text()
+    body = src[src.index("def _progress(stage, detail)"):]
+    body = body[:body.index("result = scan_pass(")]
+
+    # Split on BOTH `if` and `elif`, or the first phase (transcribing — the one
+    # that waits on whisper, and the first thing a viewer watches) escapes the
+    # check while every later phase is held to it.
+    branches = re.split(r"\n                (?:elif|if) stage == ", body)
+    assert len(branches) > 5, "the progress callback lost its phase branches"
+    silent = []
+    for br in branches[1:]:
+        stage = br.split('"')[1]
+        code = br.split("elif stage ==")[0].split("if stage ==")[0]
+        if "job.phase = " in code and "job.message = " not in code:
+            silent.append(stage)
+    assert not silent, f"phase(s) update without a message: {silent}"
+
+
+def test_a_stale_status_file_does_not_seed_the_live_timeline(tmp_path):
+    """A scan paints its timeline from the last status file — but only its own kind.
+
+    The seed used to read whatever file was there. Scan a film that has a v1
+    status file next to it and ~1000 v1 candidates appeared on the v2 timeline, each
+    with a `category` and a `level` the new UI does not have: the film looked far
+    more flagged than the scan had found, and the rows never cleared because the
+    new scan cannot address what it did not produce. The scanner already refuses to
+    RESUME across a taxonomy change; displaying across one was the leak.
+    """
+    import json
+
+    video = tmp_path / "Film.mkv"
+    video.write_bytes(b"\0")
+    status = tmp_path / "Film.nuclearcutter.status.json"
+    stale = {
+        "SCHEMA": 1,
+        "visual_candidates": [{"category": "violence", "level": "low",
+                               "start": 340.0, "end": 340.0, "confidence": 0.95}],
+        "visual_detections": [{"category": "nudity", "level": "high",
+                               "start": 90.0, "end": 100.0, "description": "old"}],
+        "language_detections": [{"word": "damn", "start": 12.0, "end": 12.4}],
+    }
+    status.write_text(json.dumps(stale))
+
+    st = AppState()
+    st.video_path = str(video)
+    seeded = st._seed_live_timeline(video)
+    assert seeded["visual_candidates"] == [], "v1 candidates leaked into a v2 timeline"
+    assert seeded["visual_detections"] == [], "v1 detections leaked into a v2 timeline"
+    assert seeded["language_detections"] == []
+
+    # A current-schema file still seeds, or resume loses the progress it exists for.
+    from nuclearcutter.utils.scan_status import SCHEMA_VERSION
+
+    fresh = dict(stale, SCHEMA=SCHEMA_VERSION,
+                 visual_candidates=[{"triggers": ["skin"], "start": 30.0,
+                                     "end": 30.0, "confidence": 0.6}])
+    status.write_text(json.dumps(fresh))
+    seeded = st._seed_live_timeline(video)
+    assert len(seeded["visual_candidates"]) == 1, "a resumable scan started from nothing"
+
+    # Unreadable file: no crash, empty timeline (the scan rebuilds it).
+    status.write_text("{not json")
+    assert st._seed_live_timeline(video)["visual_candidates"] == []
+
+
+def test_step_keys_the_page_reads_are_keys_the_server_sends():
+    """Every `steps.<key>` the STATUS panel reads must exist on the server.
+
+    This is the test that should have existed when the panel was written. VERIFY read
+    `scanJob.steps.verify`; no server code has ever set `verify` (the pass is called
+    `identify` in the scanner, the prompts and the phase names). The row therefore got
+    `undefined`, and setBar's old `val == null` check painted it as the indeterminate
+    sliding block — the bar moved constantly for hours and reported no position at
+    all, while a real (done, total) pair sat in steps.identify going unread. The user
+    asked for a progress bar that shows WHERE the job is; that is a contract, and this
+    checks the contract instead of the pixels.
+
+    Checks both directions:
+      - a row reading a key nobody sets  -> dead bar (this bug)
+      - a key the server reports that no row displays -> a stage with no bar, so the
+        panel claims to show where the job is while a whole pass runs invisible
+        (steps.language had no row for exactly this reason)
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    page = (root / "nuclearcutter" / "static" / "index.html").read_text()
+    srv = (root / "nuclearcutter" / "server.py").read_text()
+
+    # Keys the page reads: setBar(..., X.steps.key)
+    read = set(re.findall(r"\.steps\.([a-z_]+)", page))
+    assert read, "the panel stopped reading job.steps at all"
+
+    # Keys the server produces, from the one function that builds them.
+    helper = srv[srv.index("def _scan_steps("):]
+    helper = helper[:helper.index("return steps")]
+    emitted = set(re.findall(r'"([a-z_]+)": 0\.0', helper))
+    assert len(emitted) >= 5, f"could not read the step list from _scan_steps: {emitted}"
+
+    missing = sorted(read - emitted)
+    assert not missing, (
+        f"the panel reads steps.{missing}, which no server code sets — that row will "
+        "draw as broken/no data. Either name the right key or add it to _scan_steps()"
+    )
+
+    undisplayed = sorted(emitted - read)
+    assert not undisplayed, (
+        f"steps.{undisplayed} is reported but no bar row reads it — that stage runs "
+        "with nothing on screen showing it"
+    )
+
+
+def test_scan_job_step_dicts_always_carry_every_key():
+    """A half-updated literal at one of the five scan checkpoints used to be enough
+    to break a bar, because a dict missing a key is indistinguishable from a step that
+    has not started. _scan_steps() is now the only way to build one; assert no call
+    site has regressed to a bare literal.
+    """
+    from pathlib import Path
+    import re
+
+    srv = (Path(__file__).resolve().parent.parent
+           / "nuclearcutter" / "server.py").read_text()
+    leftovers = re.findall(r"\.steps = \{[^{}]*\}", srv)
+    bad = [b for b in leftovers if "transcribe" in b]
+    assert not bad, f"bare steps literals remain (use _scan_steps): {bad}"
+
+    # And the helper really does cover all of them.
+    st = AppState()
+    assert set(st.scan.steps) == set(_scan_steps()), "job default diverged from _scan_steps()"
+    for key, val in st.scan.steps.items():
+        assert isinstance(val, float), f"steps.{key} must be a float, got {val!r}"
+
+
+def test_a_running_scan_shows_its_own_timeline_not_the_loaded_one(tmp_path):
+    """Resuming a scan must not paint the previous scan's results over it.
+
+    The check was "is a scan result loaded", so any film with a completed scan beside
+    it served that result for the entire re-scan: 148 old detections, no sweep
+    candidates, frozen — while the live job had moved past it. Observed live on a
+    resumed Hadestown scan (156 real detections, 2057 candidates, none displayed).
+    """
+    import json
+
+    video = tmp_path / "Film.mkv"
+    video.write_bytes(b"\0")
+
+    st = AppState()
+    st.video_path = str(video)
+
+    # A completed previous scan is loaded, exactly as at server start-up.
+    st.scan_result = ScanResult(
+        schema_version=SCHEMA_VERSION,
+        identity=FilmIdentity(title="Film", year=None, duration_seconds=100.0,
+                              phash_samples=[]),
+        visual_detections=[VisualDetection(start=5.0, end=9.0, description="old scan",
+                                           confidence=0.9,
+                                           tags=["nudity.full_nude_female"])],
+    )
+    done = st.timeline_dict()
+    assert len(done["visual_detections"]) == 1, "a finished scan should show its results"
+
+    # Now the same film is being scanned again.
+    st.scan.status = "running"
+    st.scan.duration = 100.0
+    st.live_timeline = {
+        "visual_candidates": [{"triggers": ["skin"], "start": 30.0, "end": 30.0,
+                               "confidence": 0.6}],
+        "visual_detections": [{"start": 40.0, "end": 44.0, "description": "new scan",
+                               "confidence": 0.8, "tags": ["gore.blood"]}],
+        "language_detections": [],
+    }
+    live = st.timeline_dict()
+    assert len(live["visual_candidates"]) == 1, "live sweep candidates must be visible"
+    assert len(live["visual_detections"]) == 1, \
+        "the running scan's detection count, not the old scan's merged in"
+    assert not any(d.get("description") == "old scan" for d in live["visual_detections"]), \
+        "the previous scan's rows leaked into the running scan's timeline"
+
+    # And once the scan ends, the finished result is authoritative again.
+    st.scan.status = "done"
+    assert len(st.timeline_dict()["visual_candidates"]) == 0
+
+
+def test_scan_phases_that_know_their_total_also_offer_an_eta():
+    """A phase that reports `i of total` and has been running long enough can produce
+    an ETA, so leaving it out is a choice to make the GUI less informative.
+
+    Only the sweep computed one, so during identify the ETA field carried the sweep's
+    leftover value. On a resumed scan that read 0 — "almost done" — with 395 of 411
+    ranges still to classify, and the natural response to a wrong ETA is to stop the
+    job. Checked structurally for the same reason as the message rule: behavioural
+    coverage would need a whole fake scan, and that machinery is what people end up
+    maintaining instead of the feature.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent
+           / "nuclearcutter" / "server.py").read_text()
+    body = src[src.index("def _progress(stage, detail):"):]
+    body = body[:body.index("result = scan_pass(")]
+
+    counting = [m for m in re.finditer(
+        r'(?:elif|if) stage == "([a-z_]+)"', body)]
+    assert len(counting) > 4
+    missing = []
+    for i, m in enumerate(counting):
+        stage = m.group(1)
+        end = counting[i + 1].start() if i + 1 < len(counting) else len(body)
+        code = body[m.end():end]
+        # A phase reporting a (done, total) pair must either compute an ETA or clear
+        # the field. `job.eta = None` counts as handled: "running, no estimate" is a
+        # real state; inheriting the previous phase's number is a lie.
+        if "done, total = detail" in code or "i, total = detail" in code:
+            if "job.eta" not in code:
+                missing.append(stage)
+    assert not missing, (
+        f"phase(s) {missing} know how far along they are but give no ETA — "
+        "the ETA field then shows a previous phase's number or nothing"
+    )

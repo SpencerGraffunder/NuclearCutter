@@ -7,22 +7,39 @@ Primary interface is the web GUI (this repo's default):
        can reach it at http://<this-machine-ip>:8000, no login)
 
 Headless scan/render are still available for scripting:
-    python3 nuclearcutter.py scan MOVIE.mkv [--scale 480p ...]
-    python3 nuclearcutter.py render MOVIE.mkv [--nudity-level high ...]
+    python3 nuclearcutter.py scan  MOVIE.mkv --vlm-model MODEL [--scale 480p ...]
+    python3 nuclearcutter.py tags   --search bikini        # what can be censored
+    python3 nuclearcutter.py render MOVIE.mkv --preset graphic --allow gore
+    python3 nuclearcutter.py render MOVIE.mkv --censor nudity.full_nude_female \
+                                  --censor language.slur_racial --visual gore=black
 
-There is no config file any more — everything is set in the web GUI (or via
-CLI flags for the headless commands). VLM prompts come from prompts.json
+A render censors NOTHING unless you select something with --preset/--censor, so
+headless runs never surprise you with someone else's idea of what is offensive.
+The scan file holds facts (tag ids); the selection is yours, every time.
+
+There is no per-user config file for what to censor — the scan file records what
+is in the film, and the choice of what to hide is made at render time in the GUI
+(or with flags here). VLM prompts come from prompts.json
 (see nuclearcutter/prompts.py), shared by the GUI and the scanner.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 from pathlib import Path
 
 from nuclearcutter.render.renderer import build_output_path, render as render_pass
-from nuclearcutter.schema import AudioAction, Preferences, ScanResult, SeverityLevel, VisualAction
+from nuclearcutter.schema import (
+    AudioAction, Preferences, ScanResult, Selection, UnsupportedScanVersion,
+    VisualAction,
+)
+from nuclearcutter.taxonomy import (
+    PRESET_NAMES, TAGS, Family, Minors, Rendering, audio_options,
+    selection_named,
+)
 from nuclearcutter.utils.llm_client import LLMConfig
 from nuclearcutter.utils.model_server import (
     DEFAULT_BASE_URL, WHISPER_DEFAULT_BASE_URL, WHISPER_DEFAULT_MODELS_DIR,
@@ -142,9 +159,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         status_path=status_path,
         partial_result_path=out_path,
         scale=args.scale or DEFAULT_SCALE,
-        summary_model=args.summary_model or None,
-        summary_frames=args.summary_frames,
-        summary_max_context=args.summary_max_context,
+        run_dialogue_sweep=not args.no_dialogue_sweep,
     )
     print()
 
@@ -170,24 +185,192 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _split_ids(value: str) -> list[str]:
+    """`--censor a,b` and `--censor a --censor b` both work."""
+    out: list[str] = []
+    for part in (value or "").split(","):
+        part = part.strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+def _expand_id(raw: str) -> list[str]:
+    """Resolve one `--censor` argument: a tag id, or a whole family.
+
+    `--censor gore` meaning "every gore tag" is what people expect from a flag,
+    and it is unambiguous because family names never contain a dot.
+    """
+    tid = raw.strip().lower()
+    if tid in TAGS:
+        return [tid]
+    try:
+        fam = Family(tid)
+    except ValueError:
+        raise SystemExit(
+            f"unknown category or tag: {raw!r}\n"
+            f"  run `nuclearcutter tags` to list the vocabulary, or\n"
+            f"  `nuclearcutter tags --search {tid}` to look for one")
+    return [t.id for t in TAGS.values() if t.family is fam]
+
+
+def _selection_from_args(args) -> Selection:
+    """Build the viewer's selection from --preset / --censor / --allow / --grep.
+
+    Order matters and is documented in --help: preset, then adds, then removals.
+    That way `--preset everything --allow gore` reads the way it sounds, and a
+    script that only says `--censor nudity.full_nude_female` censors exactly that
+    and nothing else (the default is still nothing).
+    """
+    sel = selection_named(getattr(args, "preset", None) or "none")
+    for raw in getattr(args, "censor", None) or []:
+        for part in _split_ids(raw):
+            for tid in _expand_id(part):
+                sel.toggle(tid, True)
+    for raw in getattr(args, "allow", None) or []:
+        for part in _split_ids(raw):
+            for tid in _expand_id(part):
+                sel.toggle(tid, False)
+    for pattern in getattr(args, "grep", None) or []:
+        try:
+            rx = re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise SystemExit(f"bad --grep pattern {pattern!r}: {exc}")
+        matched = [t.id for t in TAGS.values()
+                   if rx.search(t.id) or rx.search(t.label)]
+        if not matched:
+            raise SystemExit(f"--grep {pattern!r} matched no tags "
+                             f"(try `nuclearcutter tags --search {pattern}`)")
+        for tid in matched:
+            sel.toggle(tid, True)
+    if getattr(args, "tag_file", None):
+        path = Path(args.tag_file)
+        try:
+            raw = path.read_text()
+        except OSError as exc:
+            raise SystemExit(f"cannot read --tag-file {path}: {exc}")
+        ids: list[str] = []
+        if raw.lstrip().startswith("{") or raw.lstrip().startswith("["):
+            try:
+                data = json.loads(raw)
+            except ValueError as exc:
+                raise SystemExit(f"--tag-file {path} is not valid JSON: {exc}")
+            if isinstance(data, dict):
+                data = data.get("tags", [])
+            ids = [str(x) for x in data]
+        else:  # one id per line, # comments allowed — hand-editable on purpose
+            ids = [ln.strip() for ln in raw.splitlines()
+                   if ln.strip() and not ln.strip().startswith("#")]
+        for tid in ids:
+            if tid not in TAGS:
+                raise SystemExit(f"--tag-file {path}: unknown tag id {tid!r}")
+            sel.toggle(tid, True)
+    if getattr(args, "rendering", None):
+        wanted = {r.strip().lower() for r in _split_ids(args.rendering)}
+        known = {r.value for r in Rendering}
+        bad = wanted - known
+        if bad:
+            raise SystemExit(f"unknown rendering style(s): {', '.join(sorted(bad))} "
+                             f"(known: {', '.join(sorted(known))})")
+        sel.renderings = wanted
+    return sel
+
+
+def _family_action_overrides(args, kind: str) -> dict[str, str]:
+    """Parse repeatable `--visual gore=black` / `--audio language=mute_word`."""
+    out: dict[str, str] = {}
+    allowed_visual = {a.value for a in VisualAction}
+    for raw in getattr(args, kind, None) or []:
+        fam_text, sep, act_text = str(raw).partition("=")
+        if not sep:
+            raise SystemExit(f"--{kind} expects FAMILY=ACTION, got {raw!r}")
+        fam_text = fam_text.strip().lower()
+        act_text = act_text.strip().lower()
+        try:
+            fam = Family(fam_text)
+        except ValueError:
+            raise SystemExit(f"--{kind}: unknown family {fam_text!r} "
+                             f"(known: {', '.join(f.value for f in Family)})")
+        if kind == "visual":
+            if act_text not in allowed_visual:
+                raise SystemExit(f"--visual: unknown action {act_text!r} "
+                                 f"(known: {', '.join(sorted(allowed_visual))})")
+        else:
+            options = audio_options(fam)
+            if act_text not in options:
+                raise SystemExit(f"--audio {fam.value}: {act_text!r} is not available "
+                                 f"for this family (options: {', '.join(options)})")
+        out[fam.value] = act_text
+    return out
+
+
 def _prefs_from_args(args) -> Preferences:
+    """Assemble the render's settings from the command line.
+
+    Unmentioned families keep the taxonomy defaults, so `--preset nudity` alone
+    still means something sensible for language (it does not censor it).
+    """
     return Preferences(
-        nudity_visual=VisualAction(args.nudity_visual),
-        nudity_audio=AudioAction(args.nudity_audio),
-        nudity_level=SeverityLevel.from_any(args.nudity_level),
-        gore_visual=VisualAction(args.gore_visual),
-        gore_audio=AudioAction(args.gore_audio),
-        gore_level=SeverityLevel.from_any(args.gore_level),
-        violence_visual=VisualAction(args.violence_visual),
-        violence_audio=AudioAction(args.violence_audio),
-        violence_level=SeverityLevel.from_any(args.violence_level),
-        foul_language_visual=VisualAction(args.foul_language_visual),
-        foul_language_audio=AudioAction(args.foul_language_audio),
-        foul_language_level=SeverityLevel.from_any(args.foul_language_level),
+        selection=_selection_from_args(args),
+        visual_actions=_family_action_overrides(args, "visual"),
+        audio_actions=_family_action_overrides(args, "audio"),
         blur_strength=args.blur_strength,
         mute_padding=args.mute_padding,
         blur_padding=args.blur_padding,
     )
+
+
+def cmd_tags(args: argparse.Namespace) -> int:
+    """Print the vocabulary the --censor/--allow flags take.
+
+    Exists because a list of ~120 ids nobody can see is a list nobody uses, and
+    because the alternative — hardcoding ids in someone's script from reading a
+    doc that might be stale — fails silently (an unknown id selects nothing).
+    """
+    if args.presets:
+        for name in PRESET_NAMES:
+            ids = selection_named(name).tags
+            print(f"{name:10s} {len(ids):3d} tags")
+        return 0
+
+    wanted = list(TAGS.values())
+    if args.family:
+        try:
+            fam = Family(args.family.strip().lower())
+        except ValueError:
+            print(f"error: unknown family {args.family!r} "
+                  f"(known: {', '.join(f.value for f in Family)})", file=sys.stderr)
+            return 2
+        wanted = [t for t in wanted if t.family is fam]
+    if args.audio:
+        wanted = [t for t in wanted if t.audio]
+    if args.visual:
+        wanted = [t for t in wanted if t.visual]
+    if args.search:
+        try:
+            rx = re.compile(args.search, re.IGNORECASE)
+            wanted = [t for t in wanted if rx.search(t.id) or rx.search(t.label)]
+        except re.error as exc:
+            print(f"error: bad pattern {args.search!r}: {exc}", file=sys.stderr)
+            return 2
+
+    if args.json:
+        print(json.dumps([{"id": t.id, "family": t.family.value, "label": t.label,
+                           "audio": t.audio, "visual": t.visual,
+                           "always_censor": t.always_censor} for t in wanted],
+                         indent=2))
+        return 0
+
+    current_family = None
+    for t in wanted:
+        if t.family is not current_family:
+            current_family = t.family
+            print(f"\n{current_family.label}  ({current_family.value})")
+        flags = "".join([" audio" if t.audio else "", " VISUAL" if t.visual else "",
+                         " ALWAYS-ON" if t.always_censor else ""])
+        print(f"  {t.id:38s} {t.label}{flags}")
+    print(f"\n{len(wanted)} tag(s). Pick with --censor ID  or  --censor FAMILY.")
+    return 0
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -205,11 +388,41 @@ def cmd_render(args: argparse.Namespace) -> int:
     scan_result = ScanResult.load(scan_path)
     prefs = _prefs_from_args(args)
     output_path = Path(args.output) if args.output else build_output_path(video_path)
-    print(f"Rendering {video_path.name} -> {output_path.name}...")
 
-    # Optional summary pass: a separate, larger model writes the on-screen text
-    # for blurred/blacked segments + captions for muted audio. Any failure
-    # degrades gracefully (render proceeds with scan-time descriptions).
+    # Say what is about to be hidden, before an hour of encoding. A headless run
+    # has no timeline to look at, and discovering afterwards that --allow gore did
+    # not do what you meant means re-encoding the film.
+    hits = [d for d in scan_result.visual_detections if d.censorable(prefs.selection)]
+    lang_hits = [d for d in scan_result.language_detections
+                 if d.censorable(prefs.selection)]
+    kinds: dict[str, int] = {}
+    for d in hits:
+        for t in d.censorable(prefs.selection):
+            tag = TAGS.get(t)
+            key = tag.label if tag else t
+            kinds[key] = kinds.get(key, 0) + 1
+    print(f"Rendering {video_path.name} -> {output_path.name}")
+    if not prefs.selection.tags:
+        print("  nothing is selected to censor — the picture and sound will be "
+              "unchanged. Use --preset or --censor (see `nuclearcutter tags`).")
+    else:
+        print(f"  censoring {len(hits)} of {len(scan_result.visual_detections)} visual "
+              f"and {len(lang_hits)} of {len(scan_result.language_detections)} language "
+              f"detection(s), from {len(prefs.selection.tags)} selected categorie(s)")
+        top = sorted(kinds.items(), key=lambda kv: -kv[1])[:8]
+        for label, n in top:
+            print(f"    {n:4d}  {label}")
+        if len(kinds) > 8:
+            print(f"    ...and {len(kinds) - 8} more categorie(s)")
+
+    # Optional: a separate, larger model writes nicer on-screen text for
+    # blurred/blacked segments (--polish-descriptions) and small captions over
+    # audio-only mutes. Any failure degrades gracefully; the scan file already
+    # holds a one-line description of each segment.
+    polish = bool(getattr(args, "polish_descriptions", False))
+    if polish and not args.summary_model:
+        print("error: --polish-descriptions needs --summary-model", file=sys.stderr)
+        return 2
     summarizer = None
     if args.summary_model:
         try:
@@ -256,6 +469,7 @@ def cmd_render(args: argparse.Namespace) -> int:
         output_path=output_path,
         progress_callback=progress,
         summarizer=summarizer,
+        polish_descriptions=polish,
     )
     print(f"\nDone: {output_path}")
     return 0
@@ -310,34 +524,61 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Per-image pixel cap for the sweep pass only — lower is much faster "
                              "(the vision server's preprocessing cost scales with pixels); "
                              "confirm/summary passes always run at full --scale (default: full)")
-    p_scan.add_argument("--summary-model", default=None,
-                        help="Model id for the summary pass — rewrites every visual detection's description "
-                             "(frames + transcript) right after the scan. Empty = disabled.")
-    p_scan.add_argument("--summary-frames", type=int, default=12,
-                        help="Frames sampled per detection for the summary pass (default: 12, 0 = text-only)")
-    p_scan.add_argument("--summary-max-context", type=int, default=30000,
-                        help="Assumed loaded context window (tokens) for the summary model when the server "
-                             "reports none (default: 30000)")
+    p_scan.add_argument("--no-dialogue-sweep", action="store_true",
+                        help="Skip the dialogue sweep: the pass that reads the whole transcript "
+                             "for slurs, threats and sexual talk that a wordlist cannot see. "
+                             "Saves time; costs recall (its detections are the only source of "
+                             "language.slur_*, language.degradation_insult, ...).")
+    p_scan.add_argument("--identify-scale", choices=["360p", "480p", "720p", "1080p"], default=None,
+                        help="Resolution for the classify pass only. Default: --scale. "
+                             "Gendered modesty tags need enough pixels to tell a man from a woman.")
     p_scan.set_defaults(func=cmd_scan)
+
+    p_tags = sub.add_parser("tags", help="List or search the tag vocabulary.")
+    p_tags.add_argument("--search", "-q", help="Substring or regex to match against tag ids and labels.")
+    p_tags.add_argument("--family", help=f"One of: {', '.join(f.value for f in Family)}")
+    p_tags.add_argument("--audio", action="store_true", help="Only audio-actionable tags.")
+    p_tags.add_argument("--visual", action="store_true", help="Only picture-affecting tags.")
+    p_tags.add_argument("--json", action="store_true", help="Machine-readable output.")
+    p_tags.add_argument("--presets", action="store_true", help="List the --preset names instead of tags.")
+    p_tags.set_defaults(func=cmd_tags)
 
     p_render = sub.add_parser("render", help="Render a cleaned copy of a movie file (headless).")
     p_render.add_argument("video")
     p_render.add_argument("--scan", "-s", help="Path to scan JSON (default: MOVIE.nuclearcutter.json)")
     p_render.add_argument("--output", "-o", help="Output path (default: MOVIE_cleaned.ext)")
-    p_render.add_argument("--nudity-visual", choices=["none", "blur", "black"], default="blur")
-    p_render.add_argument("--nudity-audio", choices=["none", "mute_scene"], default="none")
-    p_render.add_argument("--nudity-level", choices=["low", "med", "high", "exhigh"], default="med")
-    p_render.add_argument("--gore-visual", choices=["none", "blur", "black"], default="blur")
-    p_render.add_argument("--gore-audio", choices=["none", "mute_scene"], default="none")
-    p_render.add_argument("--gore-level", choices=["low", "med", "high", "exhigh"], default="med")
-    p_render.add_argument("--violence-visual", choices=["none", "blur", "black"], default="blur")
-    p_render.add_argument("--violence-audio", choices=["none", "mute_scene"], default="none")
-    p_render.add_argument("--violence-level", choices=["low", "med", "high", "exhigh"], default="med")
-    p_render.add_argument("--foul-language-visual", choices=["none", "blur", "black"], default="none")
-    p_render.add_argument("--foul-language-audio",
-                          choices=["none", "mute_word", "mute_phrase", "replace_word", "replace_phrase"],
-                          default="mute_phrase")
-    p_render.add_argument("--foul-language-level", choices=["low", "med", "high", "exhigh"], default="med")
+    p_render.add_argument(
+        "--preset", choices=list(PRESET_NAMES), default=None,
+        help="Start from a group of categories, then refine with --censor/--allow. "
+             "Default: nothing is censored.")
+    p_render.add_argument("--censor", action="append", metavar="TAG|FAMILY",
+                          help="Add a tag id, or a whole family (gore, nudity, ...). "
+                               "Repeatable and comma-separated. Applied after --preset.")
+    p_render.add_argument("--allow", action="append", metavar="TAG|FAMILY",
+                          help="Remove a tag id or family from the selection. "
+                               "Applied after --censor, so `--preset everything "
+                               "--allow gore` means what it says.")
+    p_render.add_argument("--grep", action="append", metavar="REGEX",
+                          help="Select every tag whose id or label matches a regex "
+                               "(e.g. --grep 'female|bikini').")
+    p_render.add_argument("--tag-file", metavar="FILE",
+                          help="File of tag ids to add: one per line (# comments ok) "
+                               "or JSON. Lets you keep a household profile.")
+    p_render.add_argument("--rendering",
+                          help="Comma-separated rendering styles to include "
+                               f"({', '.join(r.value for r in Rendering)}). "
+                               "Default: all of them.")
+    p_render.add_argument("--visual", action="append", metavar="FAMILY=ACTION",
+                          help="How to hide a family: none|blur|black "
+                               "(e.g. --visual gore=black). Repeatable.")
+    p_render.add_argument("--audio", action="append", metavar="FAMILY=ACTION",
+                          help="What to do with a family's audio "
+                               f"(e.g. --audio language=mute_word). Repeatable; "
+                               f"options differ per family ({', '.join(audio_options(Family.LANGUAGE))}).")
+    p_render.add_argument("--polish-descriptions", action="store_true",
+                          help="Spend one call per CENSORED segment rewriting its blur/black card "
+                               "text with --summary-model. Off: the scan file's own short "
+                               "description is used (it is written by the classify pass).")
     p_render.add_argument("--blur-strength", type=float, default=1.0,
                           help="Blur intensity multiplier (1.0 = standard, 2.0 = twice as extreme)")
     p_render.add_argument("--mute-padding", type=float, default=0.5,
@@ -364,7 +605,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except UnsupportedScanVersion as exc:
+        # A v1 scan file is an expected condition with a complete sentence written
+        # for a person, not a bug: exit code and message are the interface. A
+        # traceback buries the one line that says what to do (re-scan) under 15
+        # frames of internals, and teaches the reader that the tool crashed rather
+        # than that the file is too old. Other exceptions keep their traceback —
+        # those ARE bugs, and hiding one would cost a debugging session.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

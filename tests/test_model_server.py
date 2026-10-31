@@ -174,11 +174,17 @@ class TestWhisperListModels:
         (tmp_path / "not-a-model.txt").write_text("x")
         (tmp_path / "ggml-med.bin").write_bytes(b"x")
         cfg = WhisperConfig(models_dir=str(tmp_path))
-        assert whisper_list_models(cfg) == [
-            {"id": "ggml-base.en", "label": "ggml-base.en", "loaded": False},
-            {"id": "ggml-med", "label": "ggml-med", "loaded": False},
-            {"id": "ggml-small", "label": "ggml-small", "loaded": False},
-        ]
+        # The "loaded" flag comes from the live whisper-server process, so this
+        # test has to pin it: on a dev box that actually runs whisper-server, an
+        # unpinned probe marks whichever model happens to be resident and the
+        # assertion fails for reasons nothing in the code caused.
+        with patch("nuclearcutter.utils.model_server.whisper_loaded_model_id",
+                   return_value=""):
+            assert whisper_list_models(cfg) == [
+                {"id": "ggml-base.en", "label": "ggml-base.en", "loaded": False},
+                {"id": "ggml-med", "label": "ggml-med", "loaded": False},
+                {"id": "ggml-small", "label": "ggml-small", "loaded": False},
+            ]
 
     def test_loaded_model_is_marked(self, tmp_path):
         (tmp_path / "ggml-small.bin").write_bytes(b"x")
